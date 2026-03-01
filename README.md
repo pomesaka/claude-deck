@@ -205,6 +205,22 @@ See [docs/architecture.md](docs/architecture.md) for details.
 ~/.claude/projects/<project>/<uuid>.jsonl  Claude Code JSONL (read by claude-deck)
 ```
 
+## Q&A
+
+### ダッシュボードからテキストをコピーしたい
+
+claude-deck は alt screen + マウスモードを有効にしているため、通常のマウスドラッグではテキスト選択ができません。ターミナルのネイティブ選択を使うには **Shift キー**を併用してください。
+
+| 操作 | macOS | Linux |
+|------|-------|-------|
+| テキスト選択 | `Shift + ドラッグ` | `Shift + ドラッグ` |
+| 矩形（ブロック）選択 | `Shift + Opt + ドラッグ` | `Shift + Ctrl + Alt + ドラッグ` |
+
+右ペインのテキストだけをコピーしたい場合は、**矩形選択**を使うとペイン境界のボーダー文字を含めずに選択できます。
+
+> [!NOTE]
+> キー操作はターミナルによって異なる場合があります。上記は Ghostty での操作例です。
+
 ## License
 
 [MIT](LICENSE)
