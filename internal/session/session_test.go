@@ -1,10 +1,14 @@
 package session
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pomesaka/sandbox/claude-deck/internal/store"
 )
 
 func TestStatus_String(t *testing.T) {
@@ -372,5 +376,78 @@ func TestEncodePathForDir(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("encodePathForDir(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestLoadExisting_DeletedDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	st, err := store.New(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 存在しないパスを WorkspacePath に持つ完了済みセッション
+	deletedPath := filepath.Join(tmpDir, "nonexistent-workspace")
+	finishedAt := time.Now().Add(-1 * time.Hour)
+	sess := &Session{
+		ID:            "test-deleted-dir",
+		Name:          "test",
+		RepoPath:      "/repo",
+		WorkspacePath: deletedPath,
+		Status:        StatusCompleted,
+		FinishedAt:    &finishedAt,
+	}
+	if err := st.Save(sess.ID, sess); err != nil {
+		t.Fatal(err)
+	}
+
+	// 存在するパスを持つ完了済みセッション（こちらはエラーにならない）
+	existingPath := t.TempDir()
+	sess2 := &Session{
+		ID:            "test-existing-dir",
+		Name:          "test2",
+		RepoPath:      "/repo",
+		WorkspacePath: existingPath,
+		Status:        StatusCompleted,
+		FinishedAt:    &finishedAt,
+	}
+	if err := st.Save(sess2.ID, sess2); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(context.Background(), st, ManagerConfig{
+		DataDir:     tmpDir,
+		MaxSessions: 30,
+	})
+	if err := mgr.LoadExisting(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 削除済みディレクトリのセッションは StatusError になる
+	got := mgr.GetSession("test-deleted-dir")
+	if got == nil {
+		t.Fatal("session test-deleted-dir not found")
+	}
+	if got.Status != StatusError {
+		t.Errorf("deleted dir session status = %v, want StatusError", got.Status)
+	}
+	if got.ErrorMessage == "" {
+		t.Error("expected non-empty ErrorMessage for deleted directory")
+	}
+	if !strings.Contains(got.ErrorMessage, deletedPath) {
+		t.Errorf("ErrorMessage = %q, want to contain %q", got.ErrorMessage, deletedPath)
+	}
+	// FinishedAt は元の値を保持（上書きしない）
+	if got.FinishedAt == nil || !got.FinishedAt.Equal(finishedAt) {
+		t.Errorf("FinishedAt should preserve original value, got %v", got.FinishedAt)
+	}
+
+	// 存在するディレクトリのセッションは StatusCompleted のまま
+	got2 := mgr.GetSession("test-existing-dir")
+	if got2 == nil {
+		t.Fatal("session test-existing-dir not found")
+	}
+	if got2.Status != StatusCompleted {
+		t.Errorf("existing dir session status = %v, want StatusCompleted", got2.Status)
 	}
 }

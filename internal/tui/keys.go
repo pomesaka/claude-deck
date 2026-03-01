@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -490,6 +491,10 @@ func (m *Model) openTerminal() tea.Cmd {
 	}
 	if workDir == "" {
 		m.statusMsg = "作業ディレクトリが不明です"
+		return clearStatusCmd()
+	}
+	if _, err := os.Stat(workDir); os.IsNotExist(err) {
+		m.statusMsg = fmt.Sprintf("ディレクトリが見つかりません: %s", workDir)
 		return clearStatusCmd()
 	}
 	if err := m.ghostty.Open(workDir, snap.TerminalTitle); err != nil {
