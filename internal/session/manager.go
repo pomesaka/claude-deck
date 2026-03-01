@@ -156,6 +156,10 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, cols, rows
 	sess.maxLogLines = m.config.MaxLogLines
 	sess.maxScrollback = m.config.MaxScrollback
 
+	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("リポジトリが見つかりません: %s", repoPath)
+	}
+
 	wsName := sess.Name
 	wsPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
 
@@ -289,6 +293,12 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	}
 	if workDir == "" {
 		return fmt.Errorf("no work directory available for session %s", sessionID)
+	}
+
+	if _, err := os.Stat(workDir); os.IsNotExist(err) {
+		sess.SetErrorStatus(fmt.Sprintf("ディレクトリが見つかりません: %s", workDir))
+		m.persist(sess)
+		return fmt.Errorf("作業ディレクトリが見つかりません: %s", workDir)
 	}
 
 	// JSONL ストリーミングは継続する。PTY は入力・プロセス管理用で、

@@ -3,6 +3,7 @@ package session
 import (
 	json "encoding/json/v2"
 	"encoding/json/jsontext"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -65,6 +66,24 @@ func (m *Manager) LoadExisting() error {
 				s.Status = StatusCompleted
 				now := time.Now()
 				s.FinishedAt = &now
+			}
+		}
+
+		// 作業ディレクトリが存在しないセッションをエラー状態にする
+		if !isProcessAlive(s.PID) {
+			workDir := s.WorkspacePath
+			if workDir == "" {
+				workDir = s.RepoPath
+			}
+			if workDir != "" {
+				if _, statErr := os.Stat(workDir); os.IsNotExist(statErr) {
+					s.Status = StatusError
+					if s.FinishedAt == nil {
+						now := time.Now()
+						s.FinishedAt = &now
+					}
+					s.ErrorMessage = fmt.Sprintf("ディレクトリが見つかりません: %s", workDir)
+				}
 			}
 		}
 
