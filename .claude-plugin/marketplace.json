@@ -1,0 +1,14 @@
+{
+  "name": "claude-deck",
+  "owner": {
+    "name": "pomesaka"
+  },
+  "plugins": [
+    {
+      "name": "claude-deck",
+      "source": "./plugin",
+      "description": "Hooks for claude-deck TUI dashboard — reports session lifecycle events for multi-session monitoring",
+      "version": "1.0.0"
+    }
+  ]
+}
