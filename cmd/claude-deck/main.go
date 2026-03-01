@@ -42,15 +42,6 @@ func main() {
 }
 
 func run() error {
-	// --remove-legacy-hooks: settings.json からレガシー hooks を削除して終了
-	if len(os.Args) > 1 && os.Args[1] == "--remove-legacy-hooks" {
-		if err := hooks.RemoveLegacyHooks(); err != nil {
-			return fmt.Errorf("removing legacy hooks: %w", err)
-		}
-		fmt.Println("Legacy hooks removed from ~/.claude/settings.json")
-		return nil
-	}
-
 	// Initialize debug logging (controlled by CLAUDE_DECK_DEBUG env var)
 	if err := debuglog.Init(); err != nil {
 		return fmt.Errorf("debuglog init: %w", err)
@@ -177,12 +168,10 @@ func hookWarningMessage(status hooks.HookStatus) string {
 			"  Run:\n" +
 			"    claude plugin marketplace add pomesaka/claude-deck\n" +
 			"    claude plugin install claude-deck\n"
-	case hooks.HookStatusLegacy:
-		return "⚠ Legacy hooks detected in ~/.claude/settings.json.\n" +
+	case hooks.HookStatusOutdated:
+		return "⚠ claude-deck plugin is outdated (latest: " + hooks.PluginVersion + ").\n" +
 			"  Run:\n" +
-			"    claude plugin marketplace add pomesaka/claude-deck\n" +
-			"    claude plugin install claude-deck\n" +
-			"    claude-deck --remove-legacy-hooks\n"
+			"    claude plugin update claude-deck\n"
 	default:
 		return ""
 	}

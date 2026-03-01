@@ -12,11 +12,9 @@ import (
 	"bufio"
 	"context"
 	json "encoding/json/v2"
-	"encoding/json/jsontext"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -42,129 +40,59 @@ func EventsFilePath(dataDir string) string {
 	return filepath.Join(dataDir, EventsFileName)
 }
 
-// settingsPath returns the path to Claude Code's global settings file.
-func settingsPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".claude", "settings.json"), nil
-}
-
-// hookMarker is used to identify legacy hooks in settings.json.
-const hookMarker = "claude-deck-events"
+// PluginVersion is the current plugin version.
+// marketplace.json の version と一致させること。
+const PluginVersion = "1.0.0"
 
 // HookStatus describes the state of hook configuration.
 type HookStatus int
 
 const (
-	// HookStatusNone means no hooks are configured (new user).
+	// HookStatusNone means the plugin is not installed.
 	HookStatusNone HookStatus = iota
-	// HookStatusLegacy means hooks are injected in ~/.claude/settings.json (pre-plugin).
-	HookStatusLegacy
-	// HookStatusPlugin means legacy hooks are absent (assumed plugin-managed).
+	// HookStatusOutdated means the plugin is installed but outdated.
+	HookStatusOutdated
+	// HookStatusPlugin means the plugin is installed and up to date.
 	HookStatusPlugin
 )
 
-// CheckHooks inspects ~/.claude/settings.json for legacy claude-deck hooks.
-// Returns the hook status without modifying any files.
+// installedPlugins は installed_plugins.json の最小構造。
+type installedPlugins struct {
+	Plugins map[string][]struct {
+		Version string `json:"version"`
+	} `json:"plugins"`
+}
+
+// CheckHooks checks whether the claude-deck plugin is installed
+// by looking for its entry in ~/.claude/plugins/installed_plugins.json.
+// バージョンが PluginVersion と一致しなければ HookStatusOutdated を返す。
 func CheckHooks() HookStatus {
-	path, err := settingsPath()
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return HookStatusNone
 	}
 
+	path := filepath.Join(home, ".claude", "plugins", "installed_plugins.json")
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) == 0 {
 		return HookStatusNone
 	}
 
-	if strings.Contains(string(data), hookMarker) {
-		return HookStatusLegacy
+	var ip installedPlugins
+	if err := json.Unmarshal(data, &ip); err != nil {
+		return HookStatusNone
+	}
+
+	entries, ok := ip.Plugins["claude-deck@claude-deck"]
+	if !ok || len(entries) == 0 {
+		return HookStatusNone
+	}
+
+	if entries[0].Version != PluginVersion {
+		return HookStatusOutdated
 	}
 
 	return HookStatusPlugin
-}
-
-// RemoveLegacyHooks removes claude-deck hooks from ~/.claude/settings.json.
-// Call this after the user has installed the plugin to clean up.
-func RemoveLegacyHooks() error {
-	path, err := settingsPath()
-	if err != nil {
-		return fmt.Errorf("resolving settings path: %w", err)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("reading settings: %w", err)
-	}
-
-	var settings map[string]jsontext.Value
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return fmt.Errorf("parsing settings: %w", err)
-	}
-
-	var hooksMap map[string]jsontext.Value
-	if raw, ok := settings["hooks"]; ok {
-		if err := json.Unmarshal(raw, &hooksMap); err != nil {
-			return fmt.Errorf("parsing hooks: %w", err)
-		}
-	}
-	if hooksMap == nil {
-		return nil
-	}
-
-	changed := false
-	for eventName, raw := range hooksMap {
-		var entries []jsontext.Value
-		if err := json.Unmarshal(raw, &entries); err != nil {
-			continue
-		}
-		cleaned := removeEntriesWithMarker(entries, hookMarker)
-		if len(cleaned) != len(entries) {
-			changed = true
-			if len(cleaned) == 0 {
-				delete(hooksMap, eventName)
-			} else {
-				entriesJSON, _ := json.Marshal(cleaned)
-				hooksMap[eventName] = jsontext.Value(entriesJSON)
-			}
-		}
-	}
-
-	if !changed {
-		return nil
-	}
-
-	if len(hooksMap) == 0 {
-		delete(settings, "hooks")
-	} else {
-		hooksJSON, _ := json.Marshal(hooksMap)
-		settings["hooks"] = jsontext.Value(hooksJSON)
-	}
-
-	out, err := json.Marshal(settings, jsontext.WithIndent("  "))
-	if err != nil {
-		return fmt.Errorf("marshaling settings: %w", err)
-	}
-
-	if err := os.WriteFile(path, out, 0o644); err != nil {
-		return fmt.Errorf("writing settings: %w", err)
-	}
-
-	debuglog.Printf("[hooks] removed legacy hooks from settings.json")
-	return nil
-}
-
-// removeEntriesWithMarker filters out entries whose JSON contains the marker.
-func removeEntriesWithMarker(entries []jsontext.Value, marker string) []jsontext.Value {
-	var result []jsontext.Value
-	for _, e := range entries {
-		if !strings.Contains(string(e), marker) {
-			result = append(result, e)
-		}
-	}
-	return result
 }
 
 // WatchEvents watches the events JSONL file for new lines and calls onEvent

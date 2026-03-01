@@ -106,6 +106,15 @@ Completed / Error      (hook: Stop → Idle)
 ~/.claude/projects/<project>/<uuid>.jsonl   Claude Code JSONL
 ```
 
+### プラグインバージョン管理
+
+プラグインのバージョンは以下の2箇所で管理しており、**常に同期させること**:
+
+- `.claude-plugin/marketplace.json` の `"version"` — ユーザーに配布されるバージョン
+- `internal/hooks/hooks.go` の `PluginVersion` 定数 — 起動時のバージョンチェックに使用
+
+バージョンを上げるときは両方を同時に更新する。
+
 ### 上限値（デフォルト値、config.toml の `[session]` で変更可）
 
 - セッション数: 30（LRU で古いものを prune）

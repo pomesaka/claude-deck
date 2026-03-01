@@ -76,11 +76,6 @@ Or for local development, use `--plugin-dir`:
 claude --plugin-dir /path/to/claude-deck/plugin
 ```
 
-> **Migrating from legacy hooks?** If you previously used claude-deck with auto-injected hooks in `~/.claude/settings.json`, install the plugin first, then clean up:
-> ```bash
-> claude-deck --remove-legacy-hooks
-> ```
-
 ### First run
 
 1. Make sure your repository is initialized with jj:
