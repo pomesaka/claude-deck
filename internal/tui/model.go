@@ -176,6 +176,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
+	case tea.PasteMsg:
+		if m.ptyInputActive && msg.Content != "" {
+			data := []byte(msg.Content)
+			mgr := m.manager
+			sid := m.selectedID
+			cmds = append(cmds, func() tea.Msg {
+				err := mgr.WriteToSession(sid, data)
+				return ptyInputSentMsg{err: err}
+			})
+		}
+
 	case tea.MouseWheelMsg:
 		if m.focusDetail && m.mode == viewDashboard {
 			var cmd tea.Cmd
