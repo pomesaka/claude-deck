@@ -1,0 +1,10 @@
+{
+  "name": "claude-deck",
+  "description": "Hooks for claude-deck TUI dashboard — reports session lifecycle events for multi-session monitoring",
+  "version": "1.0.0",
+  "author": {
+    "name": "pomesaka"
+  },
+  "repository": "https://github.com/pomesaka/sandbox",
+  "license": "MIT"
+}

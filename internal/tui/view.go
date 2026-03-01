@@ -1,0 +1,590 @@
+package tui
+
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"github.com/pomesaka/sandbox/claude-deck/internal/session"
+)
+
+// View renders the TUI.
+func (m Model) View() tea.View {
+	if m.quitting {
+		return tea.NewView("claude-deck を終了します。\n")
+	}
+
+	// WindowSizeMsg 未受信の状態でレンダリングすると cellbuf に壊れたセルが残る
+	if m.width == 0 || m.height == 0 {
+		return tea.View{}
+	}
+
+	var sections []string
+
+	sections = append(sections, m.renderHeader())
+	if m.mode == viewSelectRepo {
+		sections = append(sections, m.repoList.View())
+	} else {
+		sections = append(sections, m.renderMain())
+	}
+
+	sections = append(sections, m.renderFooter())
+
+	v := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, sections...))
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
+}
+
+func (m Model) renderHeader() string {
+	title := headerStyle.Render("🎛  claude-deck")
+
+	var totalIn, totalOut int
+	var totalCost float64
+	var attentionCount int
+	for _, s := range m.sessions {
+		snap := s.Snapshot()
+		totalIn += snap.TokenUsage.InputTokens
+		totalOut += snap.TokenUsage.OutputTokens
+		totalCost += snap.TokenUsage.EstimatedCostUSD
+		if snap.Status.NeedsAttention() {
+			attentionCount++
+		}
+	}
+
+	infoStr := fmt.Sprintf("Sessions: %d  %s $%.2f", len(m.sessions), formatTokens(totalIn, totalOut), totalCost)
+	info := tokenStyle.Render(infoStr)
+
+	var badge string
+	if attentionCount > 0 {
+		badge = statusApproveStyle.Render(fmt.Sprintf(" [%d 要手動介入 → Enter で再開]", attentionCount))
+	}
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, title, "  ", info, badge)
+}
+
+func (m Model) renderMain() string {
+	// Height() はボーダー込みの全体高さを設定するため、ヘッダー行(1) + フッター行(1) のみ差し引く。
+	contentHeight := m.height - 2
+	if contentHeight < 3 {
+		contentHeight = 3
+	}
+
+	// Width() はボーダー・パディング込みの全体幅を設定するため、フレーム分の減算は不要。
+	// ペイン間スペースの " " 分のみ差し引く。
+	const frameOverhead = 1
+	available := m.width - frameOverhead
+	if available < 20 {
+		available = 20
+	}
+
+	listWidth := available * 35 / 100
+	if listWidth < 20 {
+		listWidth = 20
+	}
+	detailWidth := available - listWidth
+	if detailWidth < 20 {
+		detailWidth = 20
+	}
+
+	list := m.renderSessionList(listWidth, contentHeight)
+	detail := m.renderDetailPane(detailWidth, contentHeight)
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, list, " ", detail)
+}
+
+func (m Model) renderSessionList(width, height int) string {
+	style := sessionListStyle
+	if !m.focusDetail {
+		style = sessionListFocusedStyle
+	}
+
+	sessions := m.visibleSessions()
+
+	// フィルタバーの高さを確保
+	var filterBar string
+	filterBarHeight := 0
+	if m.filterActive {
+		filterBar = m.filterInput.View()
+		filterBarHeight = 1
+	} else if m.filterText != "" {
+		filterBar = dimStyle.Render("/ " + m.filterText)
+		filterBarHeight = 1
+	}
+
+	if len(sessions) == 0 {
+		var msg string
+		if m.filterText != "" || m.filterActive {
+			msg = dimStyle.Render("一致するセッションなし")
+		} else {
+			msg = dimStyle.Render("セッションなし。'n'で新規作成")
+		}
+		if filterBar != "" {
+			content := lipgloss.JoinVertical(lipgloss.Left, msg, filterBar)
+			return style.Width(width).Height(height).AlignVertical(lipgloss.Bottom).Render(content)
+		}
+		return style.Width(width).Height(height).Render(msg)
+	}
+
+	const itemHeight = 2
+
+	// フィルタバー分を除いた利用可能高さ
+	listHeight := height - filterBarHeight
+
+	// スクロール範囲を算出（タブ行分を差し引く）
+	offset := m.scrollOffset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(sessions) {
+		offset = max(0, len(sessions)-1)
+	}
+
+	availHeight := listHeight
+	hasAbove := offset > 0
+	if hasAbove {
+		availHeight-- // 上インジケータ分
+	}
+
+	visibleCount := availHeight / itemHeight
+	if visibleCount < 1 {
+		visibleCount = 1
+	}
+
+	end := offset + visibleCount
+	if end > len(sessions) {
+		end = len(sessions)
+	}
+
+	// 下にまだあるなら、インジケータ分を確保して再計算
+	if end < len(sessions) {
+		revised := (availHeight - 1) / itemHeight
+		if revised < 1 {
+			revised = 1
+		}
+		end = offset + revised
+		if end > len(sessions) {
+			end = len(sessions)
+		}
+	}
+
+	var items []string
+
+	if hasAbove {
+		items = append(items, dimStyle.Render(fmt.Sprintf("  ↑ 他%d件", offset)))
+	}
+
+	// リストペインのコンテンツ幅: border(2) + padding(2) を引く
+	itemWidth := width - 4
+	if itemWidth < 10 {
+		itemWidth = 10
+	}
+	for i := offset; i < end; i++ {
+		snap := sessions[i].Snapshot()
+		items = append(items, renderSessionItem(snap, i == m.cursor, itemWidth))
+	}
+
+	if remaining := len(sessions) - end; remaining > 0 {
+		items = append(items, dimStyle.Render(fmt.Sprintf("  ↓ 他%d件", remaining)))
+	}
+
+	if filterBar != "" {
+		items = append(items, filterBar)
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, items...)
+	// アイテムが少ない場合は下寄せで表示（AlignVertical は Height 内のコンテンツ配置を制御）
+	return style.Width(width).Height(height).AlignVertical(lipgloss.Bottom).Render(content)
+}
+
+func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
+
+	// ステータスアイコン（セッション名の前に付ける、全ステータスで幅を揃える）
+	var statusIcon string
+	// statusMessage: line2 末尾に表示するメッセージ（Approve待ち、エラー等）
+	var statusMessage string
+	switch snap.Status {
+	case session.StatusRunning:
+		statusIcon = statusRunningStyle.Render("●")
+	case session.StatusIdle:
+		statusIcon = statusIdleStyle.Render("●")
+	case session.StatusWaitingApproval:
+		statusIcon = statusApproveStyle.Render("●")
+	case session.StatusWaitingAnswer:
+		statusIcon = statusQuestionStyle.Render("●")
+	case session.StatusCompleted:
+		statusIcon = statusDoneStyle.Render("●")
+	case session.StatusError:
+		statusIcon = statusErrorStyle.Render("●")
+		if snap.ErrorMessage != "" {
+			statusMessage = statusErrorStyle.Render(truncate(snap.ErrorMessage, width-20))
+		} else {
+			statusMessage = statusErrorStyle.Render("エラー")
+		}
+	case session.StatusUnmanaged:
+		statusIcon = unmanagedIconStyle.Render("●")
+	}
+
+	// line1: [icon] [repoPath/session 固定幅] [title 残り幅]
+	iconCol := statusIcon + " "
+	iconWidth := lipgloss.Width(iconCol)
+
+	// RepoPath を短縮表示（ホームディレクトリを ~ に置換）
+	repoPath := snap.RepoPath
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(repoPath, home) {
+		repoPath = "~" + repoPath[len(home):]
+	}
+	pathName := repoPath + "/" + snap.Name
+	if repoPath == "" {
+		pathName = snap.Name
+	}
+
+	// パスカラム: 全体幅の50%を固定確保し、truncateLeft で末尾を残す
+	// セッション名部分だけ白太字、リポジトリパス部分はグレー
+	pathWidth := (width - iconWidth) / 2
+	if pathWidth < 10 {
+		pathWidth = 10
+	}
+	truncated := truncateLeft(pathName, pathWidth)
+	var pathCol string
+	if idx := strings.LastIndex(truncated, "/"); idx >= 0 {
+		pathCol = dimStyle.Render(truncated[:idx+1]) + lipgloss.NewStyle().Foreground(colorPrimary).Bold(true).Render(truncated[idx+1:])
+	} else {
+		pathCol = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true).Render(truncated)
+	}
+	pathCol = padRight(pathCol, pathWidth)
+
+	// タイトルカラム: 残り幅
+	titleWidth := width - iconWidth - pathWidth - 1
+	var titleCol string
+	if snap.TerminalTitle != "" && titleWidth > 4 {
+		titleCol = " " + lipgloss.NewStyle().Foreground(colorText).Render(truncate(snap.TerminalTitle, titleWidth))
+	}
+
+	line1 := iconCol + pathCol + titleCol
+
+	// line2
+	const timeWidth = 14
+	lastAct := padRight(dimStyle.Render(formatTimeCompact(snap)), timeWidth)
+	const costWidth = 7
+	cost := padRight(tokenStyle.Render(fmt.Sprintf("$%.2f", snap.TokenUsage.EstimatedCostUSD)), costWidth)
+	tokens := dimStyle.Render(formatTokens(snap.TokenUsage.InputTokens, snap.TokenUsage.OutputTokens))
+
+	// line2: インデント(icon幅) + 時間 + コスト + トークン + [メッセージ]
+	indent := strings.Repeat(" ", iconWidth)
+	var line2 string
+	if statusMessage != "" {
+		line2 = fmt.Sprintf("%s%s %s %s %s", indent, lastAct, cost, tokens, statusMessage)
+	} else {
+		line2 = fmt.Sprintf("%s%s %s %s", indent, lastAct, cost, tokens)
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, line1, line2)
+
+	style := sessionItemStyle
+	if selected {
+		style = sessionItemSelectedStyle
+	}
+	// width は親リストペインのコンテンツ幅。アイテムはその幅いっぱいに表示する。
+	return style.Width(width).Render(content)
+}
+
+func (m Model) renderDetailPane(width, height int) string {
+	style := detailPaneStyle
+	if m.focusDetail {
+		style = detailPaneFocusedStyle
+	}
+
+	if m.selectedID == "" {
+		return style.Width(width).Height(height).Render(dimStyle.Render("セッションを選択してください"))
+	}
+
+	sess := m.manager.GetSession(m.selectedID)
+	if sess == nil {
+		return style.Width(width).Height(height).Render(dimStyle.Render("セッションが見つかりません"))
+	}
+
+	snap := sess.Snapshot()
+	var sections []string
+
+	// Width() はボーダー・パディング込みなので、コンテンツ幅は border(2) + padding(2) を引く
+	innerWidth := width - 4
+	if innerWidth < 10 {
+		innerWidth = 10
+	}
+
+	hasActiveProcess := m.selectedID != "" && m.manager.HasActiveProcess(m.selectedID)
+
+	if hasActiveProcess {
+		// アクティブプロセス → PTY 全画面表示（ヘッダー非表示）
+		sections = append(sections, m.ptyViewport.View())
+
+		// 入力ステータス行
+		separator := dimStyle.Render(strings.Repeat("─", innerWidth))
+		if m.ptyInputActive {
+			inputLine := inputPromptStyle.Render("  PTY 直接入力中 (Ctrl+D で終了)")
+			sections = append(sections, separator, inputLine)
+		} else {
+			var placeholder string
+			if !m.ptyFollow {
+				placeholder = dimStyle.Render("  Enter で入力モード / G で最新に戻る")
+			} else {
+				placeholder = dimStyle.Render("  Enter で入力モード開始")
+			}
+			sections = append(sections, separator, placeholder)
+		}
+	} else {
+		// 完了済み → ヘッダー + JSONL ログ表示
+		sections = append(sections, titleStyle.Render(truncate(fmt.Sprintf("📋 %s (%s)", snap.Name, snap.RepoName), innerWidth)))
+		sections = append(sections, dimStyle.Render(truncate(fmt.Sprintf("   パス: %s", snap.WorkspacePath), innerWidth)))
+		sections = append(sections, dimStyle.Render(truncate(fmt.Sprintf("   ID: %s  Claude: %s", snap.ID, snap.ClaudeSessionID), innerWidth)))
+
+		if snap.CurrentTool != "" {
+			sections = append(sections, statusRunningStyle.Render(truncate(fmt.Sprintf("   🔧 %s", snap.CurrentTool), innerWidth)))
+		}
+
+		if snap.Status.NeedsAttention() {
+			sections = append(sections, statusApproveStyle.Render(truncate("   👆 Enter で再開", innerWidth)))
+		}
+
+		if snap.Status == session.StatusError && snap.ErrorMessage != "" {
+			sections = append(sections, statusErrorStyle.Render(truncate("   ✗ "+snap.ErrorMessage, innerWidth)))
+		}
+
+		sections = append(sections, "")
+		sections = append(sections, m.logViewport.View())
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, sections...)
+	return style.Width(width).Height(height).Render(content)
+}
+
+func (m Model) renderFooter() string {
+	var helpText string
+	if m.ptyInputActive {
+		helpText = "PTY 直接入力中 / Ctrl+D:終了"
+	} else if m.filterActive {
+		helpText = "Enter:確定 Esc:キャンセル"
+	} else if m.filterText != "" {
+		helpText = fmt.Sprintf("フィルタ: %s / Esc:解除 ?:ヘルプ", m.filterText)
+	} else {
+		helpText = "h/l:ペイン切替 j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter/i:入力/再開 r:再開 t:ターミナル R:再描画 dd:削除 x:終了 C-c:quit"
+	}
+	left := dimStyle.Render(helpText)
+
+	var right string
+	if m.statusMsg != "" {
+		right = statusApproveStyle.Render(m.statusMsg)
+	}
+
+	footer := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
+	return footerStyle.Render(footer)
+}
+
+func formatTimeCompact(snap session.Snapshot) string {
+	t := snap.LastActivity
+	if t.IsZero() && snap.FinishedAt != nil {
+		t = *snap.FinishedAt
+	}
+	if t.IsZero() {
+		t = snap.StartedAt
+	}
+	if t.IsZero() {
+		return "-"
+	}
+	return t.Format("01/02 15:04")
+}
+
+// formatCompact formats a number in compact form: 0, 1, 999, 1.2k, 12k, 123k, 1.2M etc.
+func formatCompact(n int) string {
+	switch {
+	case n < 1000:
+		return fmt.Sprintf("%d", n)
+	case n < 10_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1000)
+	case n < 1_000_000:
+		return fmt.Sprintf("%dK", n/1000)
+	case n < 10_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	default:
+		return fmt.Sprintf("%dM", n/1_000_000)
+	}
+}
+
+// formatTokens formats token counts as "N/M".
+func formatTokens(in, out int) string {
+	return fmt.Sprintf("%s/%s", formatCompact(in), formatCompact(out))
+}
+
+func truncate(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen-1]) + "…"
+}
+
+// truncateLeft truncates from the left, keeping the trailing (more important) part.
+// e.g. "~/github.com/org/repo/session" → "…org/repo/session"
+func truncateLeft(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return "…" + string(runes[len(runes)-maxLen+1:])
+}
+
+// padRight pads a (possibly styled) string to exactly w cell-width with trailing spaces.
+// If the string is already wider than w, it is returned as-is.
+func padRight(s string, w int) string {
+	cur := lipgloss.Width(s)
+	if cur >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-cur)
+}
+
+// detailPaneMetrics calculates the inner width, log height, and PTY viewport height for the detail pane.
+// PTY 出力がある場合は下部 20% を ptyViewport に割り当て、残りを logViewport に使う。
+func (m *Model) detailPaneMetrics() (innerWidth, logHeight, ptyHeight int) {
+	// Width() はボーダー・パディング込みの全体幅を設定するため、フレーム分の減算は不要。
+	// ペイン間スペースの " " 分のみ差し引く。
+	const frameOverhead = 1
+	available := m.width - frameOverhead
+	if available < 20 {
+		available = 20
+	}
+	listWidth := available * 35 / 100
+	if listWidth < 20 {
+		listWidth = 20
+	}
+	detailWidth := available - listWidth
+	if detailWidth < 20 {
+		detailWidth = 20
+	}
+	// Width() はボーダー・パディング込みなので、コンテンツ幅は border(2) + padding(2) を引く
+	innerWidth = detailWidth - 4
+	if innerWidth < 10 {
+		innerWidth = 10
+	}
+
+	// Height() はボーダー込みの全体高さを設定するため、ヘッダー行(1) + フッター行(1) のみ差し引く。
+	contentHeight := m.height - 2
+	if contentHeight < 3 {
+		contentHeight = 3
+	}
+
+	// アクティブプロセス判定
+	hasActiveProcess := false
+	if m.selectedID != "" {
+		hasActiveProcess = m.manager.HasActiveProcess(m.selectedID)
+	}
+
+	// contentHeight はペインの全体高さ（ボーダー込み）。コンテンツ領域はボーダー(上下各1)分を引く。
+	availableLines := contentHeight - 2
+
+	if hasActiveProcess {
+		// アクティブプロセスあり → PTY 全画面表示
+		// ヘッダー非表示、入力ステータス行(separator + line = 2)のみ確保
+		availableLines -= 2
+		logHeight = 0
+		ptyHeight = availableLines
+	} else {
+		// 完了済みセッション → ヘッダー + JSONL ログ表示
+		headerLines := 4 // タイトル + パス + ID行 + 空行
+		if m.selectedID != "" {
+			if sess := m.manager.GetSession(m.selectedID); sess != nil {
+				snap := sess.Snapshot()
+				if snap.CurrentTool != "" {
+					headerLines++
+				}
+				if snap.Status.NeedsAttention() {
+					headerLines++
+				}
+				if snap.Status == session.StatusError && snap.ErrorMessage != "" {
+					headerLines++
+				}
+			}
+		}
+		availableLines -= headerLines
+		logHeight = availableLines
+		ptyHeight = 0
+	}
+
+	if ptyHeight < 0 {
+		ptyHeight = 0
+	}
+	if logHeight < 0 {
+		logHeight = 0
+	}
+	return
+}
+
+// syncLogViewport updates both viewport contents and dimensions from the selected session's logs.
+// アクティブプロセスあり → ptyViewport に PTY 全画面表示
+// 完了済みセッション → logViewport に JSONL ログ表示
+func (m *Model) syncLogViewport() {
+	// WindowSizeMsg 前は正しいサイズが分からないのでスキップ
+	if m.width == 0 {
+		return
+	}
+	innerWidth, logHeight, ptyHeight := m.detailPaneMetrics()
+
+	m.logViewport.SetWidth(innerWidth)
+	m.logViewport.SetHeight(logHeight)
+	m.ptyViewport.SetWidth(innerWidth)
+	m.ptyViewport.SetHeight(ptyHeight)
+
+	// PTY プロセスとエミュレータのサイズをビューポートに同期
+	if ptyHeight > 0 && m.selectedID != "" {
+		m.manager.ResizeSession(m.selectedID, innerWidth, ptyHeight)
+	}
+
+	if m.selectedID == "" {
+		m.logViewport.SetContent("")
+		m.ptyViewport.SetContent("")
+		return
+	}
+	sess := m.manager.GetSession(m.selectedID)
+	if sess == nil {
+		m.logViewport.SetContent("")
+		m.ptyViewport.SetContent("")
+		return
+	}
+
+	if ptyHeight > 0 {
+		// ── アクティブプロセス: PTY 全画面 ──
+		lines := sess.GetPTYDisplayLines()
+		if len(lines) > 0 {
+			m.ptyViewport.SetContent(strings.Join(lines, "\n"))
+		} else {
+			m.ptyViewport.SetContent(dimStyle.Render("(PTY 出力待ち)"))
+		}
+		if m.ptyFollow {
+			m.ptyViewport.GotoBottom()
+		}
+		m.logViewport.SetContent("")
+	} else {
+		// ── 完了済み: JSONL ログ表示 ──
+		entries := sess.GetStructuredLogs()
+		if len(entries) > 0 {
+			rendered := RenderLogs(entries, innerWidth, &m.logCache)
+			m.logViewport.SetContent(rendered)
+		} else {
+			m.logViewport.SetContent(dimStyle.Render("(出力なし)"))
+		}
+		if m.logFollow {
+			m.logViewport.GotoBottom()
+		}
+		m.ptyViewport.SetContent("")
+	}
+}

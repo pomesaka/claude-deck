@@ -1,0 +1,63 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -c '{session_id, cwd, hook_event_name, source, reason, notification_type, claude_deck_session_id: env.CLAUDE_DECK_SESSION_ID}' >> \"${XDG_DATA_HOME:-$HOME/.local/share}/claude-deck/claude-deck-events.jsonl\""
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -c '{session_id, cwd, hook_event_name, source, reason, notification_type, claude_deck_session_id: env.CLAUDE_DECK_SESSION_ID}' >> \"${XDG_DATA_HOME:-$HOME/.local/share}/claude-deck/claude-deck-events.jsonl\""
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -c '{session_id, cwd, hook_event_name, source, reason, notification_type, claude_deck_session_id: env.CLAUDE_DECK_SESSION_ID}' >> \"${XDG_DATA_HOME:-$HOME/.local/share}/claude-deck/claude-deck-events.jsonl\""
+          }
+        ]
+      },
+      {
+        "matcher": "elicitation_dialog",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -c '{session_id, cwd, hook_event_name, source, reason, notification_type, claude_deck_session_id: env.CLAUDE_DECK_SESSION_ID}' >> \"${XDG_DATA_HOME:-$HOME/.local/share}/claude-deck/claude-deck-events.jsonl\""
+          }
+        ]
+      },
+      {
+        "matcher": "idle_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -c '{session_id, cwd, hook_event_name, source, reason, notification_type, claude_deck_session_id: env.CLAUDE_DECK_SESSION_ID}' >> \"${XDG_DATA_HOME:-$HOME/.local/share}/claude-deck/claude-deck-events.jsonl\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -c '{session_id, cwd, hook_event_name, source, reason, notification_type, claude_deck_session_id: env.CLAUDE_DECK_SESSION_ID}' >> \"${XDG_DATA_HOME:-$HOME/.local/share}/claude-deck/claude-deck-events.jsonl\""
+          }
+        ]
+      }
+    ]
+  }
+}

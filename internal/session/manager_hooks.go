@@ -1,0 +1,206 @@
+package session
+
+import (
+	"context"
+
+	"github.com/pomesaka/sandbox/claude-deck/internal/debuglog"
+	"github.com/pomesaka/sandbox/claude-deck/internal/hooks"
+)
+
+// StartEventWatcher watches the hook events file and updates ClaudeSessionID
+// when /clear or compact causes Claude Code to issue a new session ID.
+// SessionEnd→SessionStart ペアリングにより旧 ID → 新 ID の紐付けを行う。
+func (m *Manager) StartEventWatcher(ctx context.Context) error {
+	eventsPath := hooks.EventsFilePath(m.config.DataDir)
+
+	// 起動時に古いイベントを破棄（新規イベントのみ処理）
+	if err := hooks.TruncateEventsFile(eventsPath); err != nil {
+		debuglog.Printf("[event-watcher] truncate failed: %v", err)
+	}
+
+	return hooks.WatchEvents(ctx, eventsPath, func(ev hooks.Event) {
+		m.handleHookEvent(ev)
+	})
+}
+
+// handleHookEvent processes hook events using SessionEnd→SessionStart pairing.
+//
+// /clear や compact では以下の順序でイベントが発火する:
+//  1. SessionEnd  {session_id: OLD, reason: "clear"}
+//  2. SessionStart {session_id: NEW, source: "clear"}
+//
+// SessionEnd の session_id (OLD) で managed セッションを特定し、
+// SessionStart の session_id (NEW) に ClaudeSessionID を更新する。
+// CWD ではなく ID ベースでマッチングするため、同一ディレクトリの
+// 複数インスタンスが混同されない。
+func (m *Manager) handleHookEvent(ev hooks.Event) {
+	switch ev.HookEventName {
+	case "Notification":
+		sess := m.findSessionByClaudeID(ev.SessionID)
+		if sess == nil {
+			debuglog.Printf("[event-watcher] Notification: no managed session for %s", ev.SessionID)
+			return
+		}
+		switch ev.NotificationType {
+		case "permission_prompt":
+			sess.SetStatus(StatusWaitingApproval)
+		case "elicitation_dialog":
+			sess.SetStatus(StatusWaitingAnswer)
+		case "idle_prompt":
+			sess.SetStatus(StatusIdle)
+		default:
+			debuglog.Printf("[event-watcher] Notification: unknown type %q", ev.NotificationType)
+			return
+		}
+		debuglog.Printf("[event-watcher] Notification: session=%s type=%s → %s",
+			ev.SessionID, ev.NotificationType, sess.GetStatus())
+		m.notifyChange()
+
+	case "Stop":
+		sess := m.findSessionByClaudeID(ev.SessionID)
+		if sess == nil {
+			debuglog.Printf("[event-watcher] Stop: no managed session for %s", ev.SessionID)
+			return
+		}
+		sess.SetStatus(StatusIdle)
+		debuglog.Printf("[event-watcher] Stop: session=%s → StatusIdle", ev.SessionID)
+		m.notifyChange()
+
+	case "SessionEnd":
+		if ev.ClaudeDeckSessionID == "" {
+			debuglog.Printf("[event-watcher] SessionEnd: no ClaudeDeckSessionID, skipping pairing (session_id=%s)", ev.SessionID)
+			return
+		}
+		m.mu.Lock()
+		if m.pendingEndEvents == nil {
+			m.pendingEndEvents = make(map[string]*hooks.Event)
+		}
+		m.pendingEndEvents[ev.ClaudeDeckSessionID] = &ev
+		m.mu.Unlock()
+		debuglog.Printf("[event-watcher] SessionEnd: session_id=%s reason=%s deck_session=%s", ev.SessionID, ev.Reason, ev.ClaudeDeckSessionID)
+
+	case "SessionStart":
+		debuglog.Printf("[event-watcher] SessionStart: session_id=%s source=%s claude_deck_session_id=%s",
+			ev.SessionID, ev.Source, ev.ClaudeDeckSessionID)
+
+		// startup/resume: 環境変数で渡した ClaudeDeckSessionID でセッションを特定し、
+		// Claude Code が割り当てた session_id を紐付ける
+		if ev.Source == "startup" || ev.Source == "resume" {
+			if ev.ClaudeDeckSessionID == "" {
+				debuglog.Printf("[event-watcher] SessionStart source=%s but no ClaudeDeckSessionID, skipping", ev.Source)
+				return
+			}
+			m.mu.RLock()
+			sess := m.sessions[ev.ClaudeDeckSessionID]
+			m.mu.RUnlock()
+			if sess == nil {
+				debuglog.Printf("[event-watcher] SessionStart: no session for ClaudeDeckSessionID=%s", ev.ClaudeDeckSessionID)
+				return
+			}
+			sess.mu.Lock()
+			sess.ClaudeSessionID = ev.SessionID
+			sess.mu.Unlock()
+			debuglog.Printf("[event-watcher] session %s: ClaudeSessionID set to %s (source=%s)",
+				ev.ClaudeDeckSessionID, ev.SessionID, ev.Source)
+			m.persist(sess)
+			m.notifyChange()
+			return
+		}
+
+		// source が "clear" or "compact" でなければ更新不要
+		if ev.Source != "clear" && ev.Source != "compact" {
+			return
+		}
+
+		// ペアリング: ClaudeDeckSessionID で対応する SessionEnd を取り出す
+		m.mu.Lock()
+		var pendEnd *hooks.Event
+		if ev.ClaudeDeckSessionID != "" && m.pendingEndEvents != nil {
+			pendEnd = m.pendingEndEvents[ev.ClaudeDeckSessionID]
+			delete(m.pendingEndEvents, ev.ClaudeDeckSessionID)
+		}
+		m.mu.Unlock()
+
+		if pendEnd == nil {
+			debuglog.Printf("[event-watcher] no pending SessionEnd for source=%s deck_session=%s, skipping", ev.Source, ev.ClaudeDeckSessionID)
+			return
+		}
+
+		oldCSID := pendEnd.SessionID
+		newCSID := ev.SessionID
+		if oldCSID == newCSID {
+			return
+		}
+
+		// ClaudeDeckSessionID で managed セッションを直接特定
+		m.mu.RLock()
+		sess := m.sessions[ev.ClaudeDeckSessionID]
+		m.mu.RUnlock()
+		if sess == nil {
+			debuglog.Printf("[event-watcher] no managed session for ClaudeDeckSessionID %s", ev.ClaudeDeckSessionID)
+			return
+		}
+
+		sessionID := ev.ClaudeDeckSessionID
+
+		debuglog.Printf("[event-watcher] session %s: ClaudeSessionID %s → %s (source=%s)",
+			sessionID, oldCSID, newCSID, ev.Source)
+
+		sess.mu.Lock()
+		sess.PreviousClaudeSessionID = oldCSID
+		sess.ClaudeSessionID = newCSID
+		// /clear 時はログをリセット（新セッションのログのみ表示）
+		sess.JSONLLogEntries = nil
+		sess.mu.Unlock()
+
+		// 旧 ID を記録して外部セッションとして再インポートされるのを防ぐ
+		m.mu.Lock()
+		if m.oldSessionIDs == nil {
+			m.oldSessionIDs = make(map[string]bool)
+		}
+		m.oldSessionIDs[oldCSID] = true
+		m.mu.Unlock()
+
+		m.persist(sess)
+
+		// JSONL ストリーミングを新セッションに切り替え
+		m.mu.RLock()
+		activeID := m.activeStreamID
+		m.mu.RUnlock()
+		if activeID == sessionID {
+			m.stopActiveStream(sessionID)
+			m.StreamSession(sessionID)
+		}
+
+		m.notifyChange()
+	}
+}
+
+// findSessionByClaudeID returns the managed session (with an active process)
+// matching the given Claude Code session ID, or nil if not found.
+func (m *Manager) findSessionByClaudeID(claudeSessionID string) *Session {
+	// m.mu と s.mu を同時に保持しない（ABBA 回避）
+	m.mu.RLock()
+	var candidates []*Session
+	for id, proc := range m.processes {
+		select {
+		case <-proc.Done():
+			continue
+		default:
+		}
+		if s, ok := m.sessions[id]; ok {
+			candidates = append(candidates, s)
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, s := range candidates {
+		s.mu.RLock()
+		csID := s.ClaudeSessionID
+		s.mu.RUnlock()
+		if csID == claudeSessionID {
+			return s
+		}
+	}
+	return nil
+}
