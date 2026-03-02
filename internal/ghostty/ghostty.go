@@ -3,9 +3,10 @@ package ghostty
 import (
 	"fmt"
 	"os/exec"
+	"runtime"
 )
 
-// Launcher handles opening Ghostty terminal windows.
+// Launcher handles opening Ghostty terminal tabs/windows.
 type Launcher struct {
 	command string
 }
@@ -19,13 +20,20 @@ func NewLauncher(command string) *Launcher {
 }
 
 // Open launches a new Ghostty terminal in the specified directory.
-// title が非空の場合、ウィンドウタイトルを設定する。
+// macOS では `open -a Ghostty <dir>` で既存ウィンドウにタブとして開く。
+// それ以外では ghostty CLI を直接起動する。
 func (l *Launcher) Open(workDir string, title string) error {
-	args := []string{"--working-directory=" + workDir}
-	if title != "" {
-		args = append(args, "--title="+title)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "darwin" {
+		// macOS: `open -a` は既存 Ghostty インスタンスに新規タブとして開く
+		cmd = exec.Command("open", "-a", "Ghostty", workDir)
+	} else {
+		args := []string{"--working-directory=" + workDir}
+		if title != "" {
+			args = append(args, "--title="+title)
+		}
+		cmd = exec.Command(l.command, args...)
 	}
-	cmd := exec.Command(l.command, args...)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("launching ghostty: %w", err)
 	}
