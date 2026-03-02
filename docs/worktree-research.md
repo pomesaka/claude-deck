@@ -6,6 +6,10 @@
 
 Claude Code は `--worktree` フラグ（短縮形 `-w`）で **git worktree** を自動作成し、同一リポジトリで複数の独立した作業ディレクトリを持てる機能を提供している。
 
+- **v2.1.49** (2026-02-19): CLI worktree 対応
+- **v2.1.50** (2026-02-20): `WorktreeCreate` / `WorktreeRemove` フックイベント追加
+- Desktop アプリ、IDE 拡張、Web、モバイルでも利用可能
+
 ### CLI での使い方
 
 ```bash
@@ -48,10 +52,45 @@ isolation: worktree
 
 ### Hooks
 
-| Hook | 用途 |
-|------|------|
-| `WorktreeCreate` | worktree 作成時のカスタム処理（非 git VCS 対応等） |
-| `WorktreeRemove` | worktree 削除時のクリーンアップ |
+| Hook | 用途 | 備考 |
+|------|------|------|
+| `WorktreeCreate` | worktree 作成時のカスタム処理（非 git VCS 対応等） | stdout に worktree パスを出力する必要あり。`command` タイプのみ |
+| `WorktreeRemove` | worktree 削除時のクリーンアップ | 入力 JSON に `worktree_path` を含む。`command` タイプのみ |
+
+設定例（`.claude/settings.json`）:
+
+```json
+{
+  "hooks": {
+    "WorktreeCreate": [{
+      "hooks": [{
+        "type": "command",
+        "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/worktree.sh",
+        "timeout": 30
+      }]
+    }],
+    "WorktreeRemove": [{
+      "hooks": [{
+        "type": "command",
+        "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/worktree-cleanup.sh",
+        "timeout": 15
+      }]
+    }]
+  }
+}
+```
+
+### 既知の制限
+
+- **`ExitWorktree` ツールがない** — worktree に入った後、同一セッション内で抜けられない（[#29436](https://github.com/anthropics/claude-code/issues/29436)）
+- 各 worktree で依存関係のセットアップ（`npm install` 等）が別途必要
+- リソース消費: 複数 worktree の並行実行は CPU/メモリ/API コストが大きい
+
+### 関連ツール
+
+- [claude-worktree-hooks](https://github.com/tfriedel/claude-worktree-hooks) — worktree 自動セットアップ（env、依存関係、ポート）
+- [parallel-code](https://github.com/johannesjo/parallel-code) — Claude Code / Codex / Gemini を worktree で並行実行
+- [agenttools/worktree](https://github.com/agenttools/worktree) — GitHub Issues + Claude Code 連携の worktree 管理 CLI
 
 ## claude-deck の現在のアーキテクチャ
 
