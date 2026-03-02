@@ -5,8 +5,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/vt"
-	"github.com/pomesaka/sandbox/claude-deck/internal/debuglog"
-	"github.com/pomesaka/sandbox/claude-deck/internal/usage"
+	"github.com/pomesaka/claude-deck/internal/debuglog"
+	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
 // Status represents the current state of a Claude Code session.

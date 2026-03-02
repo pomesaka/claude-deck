@@ -3,7 +3,7 @@ package tui
 import (
 	"charm.land/lipgloss/v2"
 
-	"github.com/pomesaka/sandbox/claude-deck/internal/config"
+	"github.com/pomesaka/claude-deck/internal/config"
 )
 
 var (

@@ -50,7 +50,7 @@ claude-deck solves this with a single dashboard that monitors all sessions, high
 This project uses Go 1.26's `encoding/json/v2`, so `GOEXPERIMENT=jsonv2` is required.
 
 ```bash
-GOEXPERIMENT=jsonv2 go install github.com/pomesaka/sandbox/claude-deck/cmd/claude-deck@latest
+GOEXPERIMENT=jsonv2 go install github.com/pomesaka/claude-deck/cmd/claude-deck@latest
 ```
 
 Or build from source:

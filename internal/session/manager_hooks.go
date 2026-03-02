@@ -3,8 +3,8 @@ package session
 import (
 	"context"
 
-	"github.com/pomesaka/sandbox/claude-deck/internal/debuglog"
-	"github.com/pomesaka/sandbox/claude-deck/internal/hooks"
+	"github.com/pomesaka/claude-deck/internal/debuglog"
+	"github.com/pomesaka/claude-deck/internal/hooks"
 )
 
 // StartEventWatcher watches the hook events file and updates ClaudeSessionID

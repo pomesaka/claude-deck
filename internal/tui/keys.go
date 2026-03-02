@@ -7,8 +7,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/pomesaka/sandbox/claude-deck/internal/debuglog"
-	"github.com/pomesaka/sandbox/claude-deck/internal/session"
+	"github.com/pomesaka/claude-deck/internal/debuglog"
+	"github.com/pomesaka/claude-deck/internal/session"
 )
 
 // handleKey processes keyboard input and dispatches to the appropriate handler.

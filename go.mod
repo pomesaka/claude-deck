@@ -1,4 +1,4 @@
-module github.com/pomesaka/sandbox/claude-deck
+module github.com/pomesaka/claude-deck
 
 go 1.26
 

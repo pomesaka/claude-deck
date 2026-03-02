@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/pomesaka/sandbox/claude-deck/internal/usage"
+	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
 // StartFileWatcher creates a MultiWatcher for JSONL files and starts it

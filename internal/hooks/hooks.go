@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/pomesaka/sandbox/claude-deck/internal/debuglog"
+	"github.com/pomesaka/claude-deck/internal/debuglog"
 )
 
 // Event represents a hook event written by Claude Code.

@@ -8,7 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/pomesaka/sandbox/claude-deck/internal/session"
+	"github.com/pomesaka/claude-deck/internal/session"
 )
 
 // View renders the TUI.

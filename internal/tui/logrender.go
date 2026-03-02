@@ -7,7 +7,7 @@ import (
 
 	"github.com/charmbracelet/glamour"
 
-	"github.com/pomesaka/sandbox/claude-deck/internal/usage"
+	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
 // renderCache caches rendered output keyed by (entries hash + width).

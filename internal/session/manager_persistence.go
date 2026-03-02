@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pomesaka/sandbox/claude-deck/internal/debuglog"
+	"github.com/pomesaka/claude-deck/internal/debuglog"
 )
 
 // encodePathForDir encodes an absolute path into a directory-safe name.

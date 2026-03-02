@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pomesaka/sandbox/claude-deck/internal/store"
+	"github.com/pomesaka/claude-deck/internal/store"
 )
 
 func TestStatus_String(t *testing.T) {

@@ -11,16 +11,16 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/pomesaka/sandbox/claude-deck/internal/claudecode"
-	"github.com/pomesaka/sandbox/claude-deck/internal/config"
-	"github.com/pomesaka/sandbox/claude-deck/internal/debuglog"
-	"github.com/pomesaka/sandbox/claude-deck/internal/hooks"
-	"github.com/pomesaka/sandbox/claude-deck/internal/jj"
-	"github.com/pomesaka/sandbox/claude-deck/internal/pty"
-	"github.com/pomesaka/sandbox/claude-deck/internal/session"
-	"github.com/pomesaka/sandbox/claude-deck/internal/store"
-	"github.com/pomesaka/sandbox/claude-deck/internal/tui"
-	"github.com/pomesaka/sandbox/claude-deck/internal/usage"
+	"github.com/pomesaka/claude-deck/internal/claudecode"
+	"github.com/pomesaka/claude-deck/internal/config"
+	"github.com/pomesaka/claude-deck/internal/debuglog"
+	"github.com/pomesaka/claude-deck/internal/hooks"
+	"github.com/pomesaka/claude-deck/internal/jj"
+	"github.com/pomesaka/claude-deck/internal/pty"
+	"github.com/pomesaka/claude-deck/internal/session"
+	"github.com/pomesaka/claude-deck/internal/store"
+	"github.com/pomesaka/claude-deck/internal/tui"
+	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
 func main() {

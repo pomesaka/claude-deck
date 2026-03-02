@@ -10,10 +10,10 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/pomesaka/sandbox/claude-deck/internal/config"
-	"github.com/pomesaka/sandbox/claude-deck/internal/debuglog"
-	"github.com/pomesaka/sandbox/claude-deck/internal/ghostty"
-	"github.com/pomesaka/sandbox/claude-deck/internal/session"
+	"github.com/pomesaka/claude-deck/internal/config"
+	"github.com/pomesaka/claude-deck/internal/debuglog"
+	"github.com/pomesaka/claude-deck/internal/ghostty"
+	"github.com/pomesaka/claude-deck/internal/session"
 )
 
 

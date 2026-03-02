@@ -11,12 +11,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pomesaka/sandbox/claude-deck/internal/debuglog"
-	"github.com/pomesaka/sandbox/claude-deck/internal/hooks"
-	"github.com/pomesaka/sandbox/claude-deck/internal/jj"
-	"github.com/pomesaka/sandbox/claude-deck/internal/pty"
-	"github.com/pomesaka/sandbox/claude-deck/internal/store"
-	"github.com/pomesaka/sandbox/claude-deck/internal/usage"
+	"github.com/pomesaka/claude-deck/internal/debuglog"
+	"github.com/pomesaka/claude-deck/internal/hooks"
+	"github.com/pomesaka/claude-deck/internal/jj"
+	"github.com/pomesaka/claude-deck/internal/pty"
+	"github.com/pomesaka/claude-deck/internal/store"
+	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
 // notifyInterval はデバウンス間隔。16ms ≈ 60fps で UI を駆動する。

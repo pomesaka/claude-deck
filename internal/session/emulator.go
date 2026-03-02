@@ -5,7 +5,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/x/vt"
-	"github.com/pomesaka/sandbox/claude-deck/internal/debuglog"
+	"github.com/pomesaka/claude-deck/internal/debuglog"
 )
 
 // Default PTY dimensions (must match pty.StartOptions defaults).

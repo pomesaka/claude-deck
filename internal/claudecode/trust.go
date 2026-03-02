@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/pomesaka/sandbox/claude-deck/internal/debuglog"
+	"github.com/pomesaka/claude-deck/internal/debuglog"
 )
 
 // configPath returns the path to ~/.claude.json.
