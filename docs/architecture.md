@@ -48,7 +48,8 @@ User 'n' キー
   → handleRepoSelectKey: リポジトリ選択
   → Manager.CreateSession(ctx, repoPath, cols, rows)
     1. NewSession(repoPath, repoName)     // deck session 作成
-    2. jj.CreateWorkspaceAt(repo, name, path)  // ワークスペース作成
+    2. jj.CreateWorkspaceAt(repo, name, path, extraSymlinks)  // ワークスペース作成
+       extraSymlinks は config.toml [projects] で指定された .env 等の symlink リスト
     3. pty.Start(ctx, opts, handleOutput)  // claude --agent <name> 起動
        opts.Env = ["CLAUDE_DECK_SESSION_ID=<sessID>"]
     4. sessions[sessID] = sess, processes[sessID] = proc

@@ -97,6 +97,7 @@ func run() error {
 		MaxScrollback:         cfg.Session.MaxScrollback,
 		DiscoveryDays:         cfg.Session.DiscoveryDays,
 		RefreshInterval:       refreshInterval,
+		WorkspaceSymlinksFunc: cfg.WorkspaceSymlinks,
 	})
 
 	// Load session metadata from store (fast: local JSON files only)

@@ -36,6 +36,7 @@ type ManagerConfig struct {
 	MaxScrollback         int
 	DiscoveryDays         int
 	RefreshInterval       time.Duration
+	WorkspaceSymlinksFunc func(repoPath string) []string
 }
 
 // Manager coordinates multiple Claude Code sessions.
@@ -163,7 +164,11 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, cols, rows
 	wsName := sess.Name
 	wsPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
 
-	if err := jj.CreateWorkspaceAt(repoPath, wsName, wsPath); err != nil {
+	var extraSymlinks []string
+	if m.config.WorkspaceSymlinksFunc != nil {
+		extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
+	}
+	if err := jj.CreateWorkspaceAt(repoPath, wsName, wsPath, extraSymlinks); err != nil {
 		return nil, fmt.Errorf("creating jj workspace: %w", err)
 	}
 	sess.WorkspacePath = wsPath

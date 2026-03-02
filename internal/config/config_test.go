@@ -212,6 +212,69 @@ func TestEnsureDataDir(t *testing.T) {
 	}
 }
 
+func TestLoadFrom_ProjectsConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	content := `
+[projects."/Users/foo/myrepo"]
+workspace_symlinks = [".env", ".env.local", "secrets/"]
+
+[projects."/Users/foo/other-repo"]
+workspace_symlinks = [".env"]
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		t.Fatalf("LoadFrom error: %v", err)
+	}
+
+	if len(cfg.Projects) != 2 {
+		t.Fatalf("Projects count = %d, want 2", len(cfg.Projects))
+	}
+
+	pc, ok := cfg.Projects["/Users/foo/myrepo"]
+	if !ok {
+		t.Fatal("project /Users/foo/myrepo not found")
+	}
+	want := []string{".env", ".env.local", "secrets/"}
+	if len(pc.WorkspaceSymlinks) != len(want) {
+		t.Fatalf("WorkspaceSymlinks = %v, want %v", pc.WorkspaceSymlinks, want)
+	}
+	for i, w := range want {
+		if pc.WorkspaceSymlinks[i] != w {
+			t.Errorf("WorkspaceSymlinks[%d] = %q, want %q", i, pc.WorkspaceSymlinks[i], w)
+		}
+	}
+}
+
+func TestWorkspaceSymlinks(t *testing.T) {
+	cfg := Default()
+	cfg.Projects = map[string]ProjectConfig{
+		"/repo/a": {WorkspaceSymlinks: []string{".env", ".env.local"}},
+	}
+
+	// 一致するパス
+	got := cfg.WorkspaceSymlinks("/repo/a")
+	if len(got) != 2 || got[0] != ".env" || got[1] != ".env.local" {
+		t.Errorf("WorkspaceSymlinks(/repo/a) = %v, want [.env .env.local]", got)
+	}
+
+	// 一致しないパス
+	if got := cfg.WorkspaceSymlinks("/repo/b"); got != nil {
+		t.Errorf("WorkspaceSymlinks(/repo/b) = %v, want nil", got)
+	}
+
+	// Projects が nil のデフォルト
+	cfg2 := Default()
+	if got := cfg2.WorkspaceSymlinks("/repo/a"); got != nil {
+		t.Errorf("WorkspaceSymlinks on default config = %v, want nil", got)
+	}
+}
+
 func TestDefaultConfigDir(t *testing.T) {
 	dir := DefaultConfigDir()
 	if dir == "" {

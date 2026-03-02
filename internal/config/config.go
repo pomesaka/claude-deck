@@ -10,14 +10,20 @@ import (
 
 // Config holds the application configuration.
 type Config struct {
-	Defaults   DefaultConfig  `toml:"defaults"`
-	Ghostty    GhosttyConfig  `toml:"ghostty"`
-	Keybinds   KeybindConfig  `toml:"keybinds"`
-	Theme      ThemeConfig    `toml:"theme"`
-	Commands   CommandsConfig `toml:"commands"`
-	Session    SessionConfig  `toml:"session"`
-	Pricing    PricingConfig  `toml:"pricing"`
-	DataDir    string         `toml:"data_dir"`
+	Defaults   DefaultConfig             `toml:"defaults"`
+	Ghostty    GhosttyConfig             `toml:"ghostty"`
+	Keybinds   KeybindConfig             `toml:"keybinds"`
+	Theme      ThemeConfig               `toml:"theme"`
+	Commands   CommandsConfig            `toml:"commands"`
+	Session    SessionConfig             `toml:"session"`
+	Pricing    PricingConfig             `toml:"pricing"`
+	Projects   map[string]ProjectConfig  `toml:"projects"`
+	DataDir    string                    `toml:"data_dir"`
+}
+
+// ProjectConfig holds per-project settings keyed by repository path.
+type ProjectConfig struct {
+	WorkspaceSymlinks []string `toml:"workspace_symlinks"`
 }
 
 // ThemeConfig holds UI color settings.
@@ -189,6 +195,19 @@ func LoadFrom(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// WorkspaceSymlinks returns the list of extra symlink paths configured for the given repository.
+// Returns nil if no project config exists for the path.
+func (c *Config) WorkspaceSymlinks(repoPath string) []string {
+	if c.Projects == nil {
+		return nil
+	}
+	pc, ok := c.Projects[repoPath]
+	if !ok {
+		return nil
+	}
+	return pc.WorkspaceSymlinks
 }
 
 // EnsureDataDir creates the data directory if it doesn't exist.

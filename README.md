@@ -26,6 +26,7 @@ claude-deck solves this with a single dashboard that monitors all sessions, high
 - **Session discovery** — Automatically finds Claude Code sessions started outside claude-deck
 - **Token & cost tracking** — Per-session token usage with cost estimates
 - **Ghostty integration** — Open a full terminal for any session with `t`
+- **Workspace symlinks** — Auto-symlink `.env` and other untracked files into workspaces via per-project config
 - **Customizable theme** — Nord, Dracula, or your own palette via `config.toml`
 
 ## Demo
@@ -164,6 +165,12 @@ input_per_mtok = 15.0
 output_per_mtok = 75.0
 cache_write_per_mtok = 18.75
 cache_read_per_mtok = 1.50
+
+# Per-project workspace symlinks
+# jj workspace にはリポジトリの untracked ファイル (.env 等) がコピーされない。
+# プロジェクトごとに symlink したいファイルを指定できる。
+[projects."/Users/you/your-repo"]
+workspace_symlinks = [".env", ".env.local", "secrets/"]
 ```
 
 ## Known Limitations

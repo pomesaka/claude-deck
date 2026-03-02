@@ -115,6 +115,23 @@ Completed / Error      (hook: Stop → Idle)
 
 バージョンを上げるときは両方を同時に更新する。
 
+### ワークスペース symlink 設定
+
+`jj workspace add` で作成されるワークスペースには `.env` 等の untracked ファイルがコピーされない。
+`config.toml` の `[projects]` セクションでプロジェクトごとに symlink 対象を指定できる。
+
+```toml
+[projects."/Users/foo/myrepo"]
+workspace_symlinks = [".env", ".env.local", "secrets/"]
+```
+
+- パスはリポジトリルートからの相対パス
+- ソースが存在しなければスキップ（`.env` が無いリポジトリでも安全）
+- 宛先が既に存在すればスキップ（jj が tracked ファイルを作成済みの場合）
+- 絶対パスや `..` を含むパスはセキュリティのためスキップ
+
+関連ファイル: `config.go` (`ProjectConfig`, `WorkspaceSymlinks()`), `jj.go` (`createExtraSymlink`)
+
 ### 上限値（デフォルト値、config.toml の `[session]` で変更可）
 
 - セッション数: 30（LRU で古いものを prune）
