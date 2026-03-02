@@ -156,81 +156,162 @@ jj と git worktree は現状 **二者択一** である。
 - [Discussion #6286](https://github.com/jj-vcs/jj/discussions/6286) — セカンダリワークスペースに `.git` が欲しいという要望
 - [Claude Code #27466](https://github.com/anthropics/claude-code/issues/27466) — `--worktree` が jj colocated repo で失敗
 
-## git worktree 対応の検討
+## 実装方針: Claude Code `--worktree` への委譲
 
-### メリット
+### 基本戦略
 
-1. **jj 不要** — git さえあれば動作する。ユーザーの導入ハードルが大幅に下がる
-2. **Claude Code との親和性** — Claude Code 自体が git worktree を前提に設計されている
-3. **標準的なワークフロー** — git ブランチベースの差分管理は一般的で馴染みやすい
+ワークスペース作成を claude-deck 側で行わず、Claude Code の `--worktree` に委譲する。
 
-### 実装方針
+- **git リポジトリ** → `claude --worktree <name>` でビルトイン git worktree を使用
+- **jj リポジトリ** → `claude --worktree <name>` + `WorktreeCreate`/`WorktreeRemove` フックで jj workspace を使用
 
-#### 1. WorkspaceProvider インターフェースを定義
+### セッション起動フローの変更
 
-```go
-// internal/workspace/provider.go
-type Provider interface {
-    Create(repoPath, name, wsPath string) error
-    Remove(repoPath, name string) error
-    List(repoPath string) ([]string, error)
-    Status(wsPath string) (string, error)
-}
+```
+# 現在
+Manager.CreateSession()
+  → jj.CreateWorkspaceAt(repoPath, wsName, wsPath)  # claude-deck が管理
+  → pty.Start(WorkDir: wsPath, args: ["--agent", name])
+
+# 新規
+Manager.CreateSession()
+  → pty.Start(WorkDir: repoPath, args: ["--worktree", name, "--agent", name])
+  # Claude Code が worktree を作成し、その中で起動
 ```
 
-#### 2. git worktree 実装を追加
+### jj 統合: WorktreeCreate/WorktreeRemove フック
 
-```go
-// internal/workspace/git.go
-type GitProvider struct{}
+Claude Code の `WorktreeCreate` フックはビルトイン git worktree 動作を **置き換える**。
+jj リポジトリではこのフックで `jj workspace add` を呼ぶ。
 
-func (g *GitProvider) Create(repoPath, name, wsPath string) error {
-    // git worktree add -b worktree-<name> <wsPath>
-}
+#### フックスクリプト案
 
-func (g *GitProvider) Remove(repoPath, name string) error {
-    // git worktree remove <path>
-}
+```bash
+#!/bin/bash
+# claude-deck-worktree-create.sh
+INPUT=$(cat)
+NAME=$(echo "$INPUT" | jq -r .name)
+CWD=$(echo "$INPUT" | jq -r .cwd)
+
+if [ -d "$CWD/.jj" ]; then
+    # jj リポジトリ: jj workspace で分離
+    DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/claude-deck"
+    ENCODED=$(echo "$CWD" | sed 's|^/|-|; s|/|-|g')
+    WS_PATH="$DATA_DIR/workspace/$ENCODED/$NAME"
+    mkdir -p "$(dirname "$WS_PATH")"
+    jj workspace add --name "$NAME" "$WS_PATH" --repository "$CWD"
+    echo "$WS_PATH"
+else
+    # git リポジトリ: git worktree で分離
+    WS_PATH="$CWD/.claude/worktrees/$NAME"
+    mkdir -p "$(dirname "$WS_PATH")"
+    git -C "$CWD" worktree add -b "worktree-$NAME" "$WS_PATH"
+    echo "$WS_PATH"
+fi
 ```
 
-#### 3. jj 実装をラップ
+```bash
+#!/bin/bash
+# claude-deck-worktree-remove.sh
+INPUT=$(cat)
+WS_PATH=$(echo "$INPUT" | jq -r .worktree_path)
 
-```go
-// internal/workspace/jj.go
-type JJProvider struct{}
+if [ -z "$WS_PATH" ] || [ "$WS_PATH" = "null" ]; then
+    exit 0
+fi
 
-// 既存の internal/jj/jj.go の関数をラップ
+# jj workspace かどうかは親リポジトリの .jj で判定
+# WorktreeRemove は worktree_path しか受け取れないため、
+# パスから逆引きする必要がある
+if echo "$WS_PATH" | grep -q "/.local/share/claude-deck/workspace/"; then
+    # claude-deck 管理パス → jj workspace
+    WS_NAME=$(basename "$WS_PATH")
+    # jj workspace forget は repoPath が必要 → パスからデコード
+    # （実装時に要検討）
+    :
+else
+    # .claude/worktrees/ 配下 → git worktree
+    REPO_PATH=$(echo "$WS_PATH" | sed 's|/.claude/worktrees/.*||')
+    git -C "$REPO_PATH" worktree remove "$WS_PATH" 2>/dev/null || true
+fi
 ```
 
-#### 4. Config で切り替え
+### フックのインストール方法
+
+#### 方針 A: プラグインに常時インストール（推奨）
+
+`plugin/hooks/hooks.json` に `WorktreeCreate`/`WorktreeRemove` を追加。
+スクリプト内で `.jj/` の有無を判定して分岐する。
+
+**メリット**: シンプル。ユーザーの追加設定不要。
+**デメリット**: git リポジトリでも Claude Code のビルトイン動作を上書きする。将来の CC 機能拡張に追従しない可能性。
+
+#### 方針 B: jj リポジトリのみプロジェクトレベルで動的インストール
+
+claude-deck が jj リポジトリを検知した場合のみ、`.claude/settings.local.json` に
+WorktreeCreate/WorktreeRemove フックを書き出す。git リポジトリではビルトインを維持。
+
+**メリット**: git では Claude Code のネイティブ体験を維持。
+**デメリット**: `.claude/settings.local.json` を動的に管理する複雑さ。
+
+### Config
 
 ```toml
 [commands]
-workspace_backend = "git"  # or "jj" (default: "git")
+workspace_backend = "auto"  # "auto" | "git" | "jj"
+# auto: .jj/ があれば jj, なければ git
+# git:  常に git worktree（Claude Code --worktree ビルトイン）
+# jj:   常に jj workspace（WorktreeCreate フック経由）
 ```
 
-### 変更が必要なファイル
+### Manager の変更
 
-| ファイル | 変更内容 |
-|----------|----------|
-| 新規 `internal/workspace/` | Provider インターフェース + git/jj 実装 |
-| `internal/session/manager.go` | Provider を注入して使用 |
-| `internal/config/config.go` | `workspace_backend` 設定追加 |
-| `cmd/claude-deck/main.go` | 設定に基づいて Provider を選択 |
+```go
+// Manager.CreateSession() の変更点
+func (m *Manager) CreateSession(ctx context.Context, repoPath string, cols, rows int) (*Session, error) {
+    sess := NewSession(repoPath, repoName)
 
-### バックエンド選択の方針
+    // ワークスペース作成は Claude Code に委譲
+    // --worktree <name> で Claude Code が作成・CWD 変更を行う
+    args := []string{"--worktree", sess.Name, "--agent", sess.Name}
 
-jj と git worktree は併用できないため、リポジトリの種類に応じて自動選択する:
+    proc, err := pty.Start(ctx, pty.StartOptions{
+        WorkDir:        repoPath,  // リポジトリルートから起動
+        AdditionalArgs: args,
+        Env:            []string{"CLAUDE_DECK_SESSION_ID=" + sess.ID},
+        // ...
+    })
+    // ...
 
-- `.jj/` が存在する → **jj workspace**（現行のまま）
-- `.jj/` がない（git-only） → **git worktree**（新規追加）
-- config で明示的に上書きも可能
+    // WorkspacePath は Claude Code が作成した先のパス
+    // git: <repo>/.claude/worktrees/<name>/
+    // jj:  ~/.local/share/claude-deck/workspace/<encoded>/<name>/
+    sess.WorkspacePath = computeWorktreePath(repoPath, sess.Name, backend)
+}
+```
 
-### 注意点
+### DeleteSession の変更
 
-- git worktree は **同一ブランチを複数 worktree でチェックアウトできない** 制約がある
-- worktree 内の `.claude/projects/` パス解決が変わる可能性がある
-- jj 利用者向けに後方互換を維持する（jj リポジトリでは自動的に jj workspace を使う）
-- worktree の配置先を `<repo>/.claude/worktrees/<name>/` にするか `~/.local/share/claude-deck/workspace/` に置くかの検討が必要
-  - Claude Code と同じ `<repo>/.claude/worktrees/` に合わせると自然だが、`.gitignore` 設定が必要
-  - 現在のように `~/.local/share/` に置けばリポジトリを汚さない
+```go
+// 現在: jj.ForgetWorkspace() を直接呼ぶ
+// 新規: バックエンドに応じたクリーンアップ
+func (m *Manager) DeleteSession(sessionID string) (string, error) {
+    // ...
+    switch m.config.WorkspaceBackend {
+    case "jj":
+        jj.ForgetWorkspace(repoPath, wsName)
+        os.RemoveAll(wsPath)
+    case "git":
+        // git worktree remove + branch delete
+        exec.Command("git", "-C", repoPath, "worktree", "remove", wsPath).Run()
+        exec.Command("git", "-C", repoPath, "branch", "-D", "worktree-"+wsName).Run()
+    }
+}
+```
+
+### 未解決事項
+
+- `--worktree` と `--agent` フラグの併用が可能か要検証
+- `--worktree` と `--resume` の組み合わせ — resume 時は worktree が既存なので `--worktree` 不要?
+- プラグインのフックスクリプトの配布方法（バイナリに埋め込み? 外部ファイル?）
+- git worktree の `<repo>/.claude/worktrees/` が `.gitignore` に入っているか（Claude Code が管理?）
