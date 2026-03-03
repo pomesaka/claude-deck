@@ -47,6 +47,18 @@ func CreateWorkspaceAt(repoPath, name, wsPath string, extraSymlinks []string) er
 		}
 	}
 
+	// リモートから最新を取得し、trunk 上に新 revision を作成
+	// fetch 失敗はネットワーク不通等で起こりうるので無視して続行
+	fetch := exec.Command(Command, "git", "fetch")
+	fetch.Dir = wsPath
+	_ = fetch.Run()
+
+	newCmd := exec.Command(Command, "new", "trunk()")
+	newCmd.Dir = wsPath
+	if output, err := newCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("jj new trunk(): %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
 	return nil
 }
 

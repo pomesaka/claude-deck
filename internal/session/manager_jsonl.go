@@ -82,6 +82,7 @@ func (m *Manager) StreamSession(sessionID string) {
 
 	sess.mu.RLock()
 	csID := sess.ClaudeSessionID
+	prevCSID := sess.PreviousClaudeSessionID
 	sess.mu.RUnlock()
 
 	if csID == "" {
@@ -93,6 +94,16 @@ func (m *Manager) StreamSession(sessionID string) {
 		return
 	}
 
+	// /clear 前の旧セッションのログエントリを先頭に連結するための prefix を取得
+	var prefixEntries []usage.LogEntry
+	if prevCSID != "" {
+		if prevPath := m.usage.ResolveSessionPath(prevCSID); prevPath != "" {
+			prev := usage.NewLogStreamer(prevPath)
+			prev.ReadAll()
+			prefixEntries = prev.Entries()
+		}
+	}
+
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.mu.Lock()
 	m.activeStreamID = sessionID
@@ -100,8 +111,18 @@ func (m *Manager) StreamSession(sessionID string) {
 	m.mu.Unlock()
 
 	onChange := func(entries []usage.LogEntry) {
+		merged := entries
+		if len(prefixEntries) > 0 {
+			merged = make([]usage.LogEntry, 0, len(prefixEntries)+len(entries))
+			merged = append(merged, prefixEntries...)
+			merged = append(merged, entries...)
+			// MaxEntries は末尾優先で cap
+			if len(merged) > usage.MaxEntries {
+				merged = merged[len(merged)-usage.MaxEntries:]
+			}
+		}
 		sess.mu.Lock()
-		sess.JSONLLogEntries = entries
+		sess.JSONLLogEntries = merged
 		sess.mu.Unlock()
 		m.notifyChange()
 	}

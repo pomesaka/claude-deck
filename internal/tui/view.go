@@ -200,6 +200,14 @@ func (m Model) renderSessionList(width, height int) string {
 	return style.Width(width).Height(height).AlignVertical(lipgloss.Bottom).Render(content)
 }
 
+// selBg returns the style with the selected background applied when selected is true.
+func selBg(s lipgloss.Style, selected bool) lipgloss.Style {
+	if selected {
+		return s.Background(colorBgSelected)
+	}
+	return s
+}
+
 func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 
 	// ステータスアイコン（セッション名の前に付ける、全ステータスで幅を揃える）
@@ -208,24 +216,24 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	var statusMessage string
 	switch snap.Status {
 	case session.StatusRunning:
-		statusIcon = statusRunningStyle.Render("●")
+		statusIcon = selBg(statusRunningStyle, selected).Render("●")
 	case session.StatusIdle:
-		statusIcon = statusIdleStyle.Render("●")
+		statusIcon = selBg(statusIdleStyle, selected).Render("●")
 	case session.StatusWaitingApproval:
-		statusIcon = statusApproveStyle.Render("●")
+		statusIcon = selBg(statusApproveStyle, selected).Render("●")
 	case session.StatusWaitingAnswer:
-		statusIcon = statusQuestionStyle.Render("●")
+		statusIcon = selBg(statusQuestionStyle, selected).Render("●")
 	case session.StatusCompleted:
-		statusIcon = statusDoneStyle.Render("●")
+		statusIcon = selBg(statusDoneStyle, selected).Render("●")
 	case session.StatusError:
-		statusIcon = statusErrorStyle.Render("●")
+		statusIcon = selBg(statusErrorStyle, selected).Render("●")
 		if snap.ErrorMessage != "" {
-			statusMessage = statusErrorStyle.Render(truncate(snap.ErrorMessage, width-20))
+			statusMessage = selBg(statusErrorStyle, selected).Render(truncate(snap.ErrorMessage, width-20))
 		} else {
-			statusMessage = statusErrorStyle.Render("エラー")
+			statusMessage = selBg(statusErrorStyle, selected).Render("エラー")
 		}
 	case session.StatusUnmanaged:
-		statusIcon = unmanagedIconStyle.Render("●")
+		statusIcon = selBg(unmanagedIconStyle, selected).Render("●")
 	}
 
 	// line1: [icon] [repoPath/session 固定幅] [title 残り幅]
@@ -269,8 +277,9 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 
 	// truncate 後の文字列をスタイル適用
 	// セッション名（末尾）→ 強調部分（中間）→ プレフィックス（先頭）の順でマッチ
-	emphStyle := lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
-	nameStyle := lipgloss.NewStyle().Foreground(colorSecondary)
+	emphStyle := selBg(lipgloss.NewStyle().Foreground(colorPrimary).Bold(true), selected)
+	nameStyle := selBg(lipgloss.NewStyle().Foreground(colorSecondary), selected)
+	dim := selBg(dimStyle, selected)
 
 	var pathCol string
 	if lastSlash := strings.LastIndex(truncated, "/"); lastSlash >= 0 {
@@ -280,7 +289,7 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 		if empIdx := strings.Index(beforeSession, repoName); empIdx >= 0 {
 			prefix := beforeSession[:empIdx]
 			empPart := beforeSession[empIdx:]
-			pathCol = dimStyle.Render(prefix) + emphStyle.Render(empPart) + nameStyle.Render(sessionPart)
+			pathCol = dim.Render(prefix) + emphStyle.Render(empPart) + nameStyle.Render(sessionPart)
 		} else {
 			// truncateLeft で prefix が切られた場合、全体を強調+セッション名
 			pathCol = emphStyle.Render(beforeSession) + nameStyle.Render(sessionPart)
@@ -294,17 +303,17 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	titleWidth := width - iconWidth - pathWidth - 1
 	var titleCol string
 	if snap.TerminalTitle != "" && titleWidth > 4 {
-		titleCol = " " + lipgloss.NewStyle().Foreground(colorText).Render(truncate(snap.TerminalTitle, titleWidth))
+		titleCol = " " + selBg(lipgloss.NewStyle().Foreground(colorText), selected).Render(truncate(snap.TerminalTitle, titleWidth))
 	}
 
 	line1 := iconCol + pathCol + titleCol
 
 	// line2
 	const timeWidth = 14
-	lastAct := padRight(dimStyle.Render(formatTimeCompact(snap)), timeWidth)
+	lastAct := padRight(dim.Render(formatTimeCompact(snap)), timeWidth)
 	const costWidth = 7
-	cost := padRight(tokenStyle.Render(fmt.Sprintf("$%.2f", snap.TokenUsage.EstimatedCostUSD)), costWidth)
-	tokens := dimStyle.Render(formatTokens(snap.TokenUsage.InputTokens, snap.TokenUsage.OutputTokens))
+	cost := padRight(selBg(tokenStyle, selected).Render(fmt.Sprintf("$%.2f", snap.TokenUsage.EstimatedCostUSD)), costWidth)
+	tokens := dim.Render(formatTokens(snap.TokenUsage.InputTokens, snap.TokenUsage.OutputTokens))
 
 	// line2: インデント(icon幅) + 時間 + コスト + トークン + [メッセージ]
 	indent := strings.Repeat(" ", iconWidth)
