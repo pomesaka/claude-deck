@@ -79,6 +79,7 @@ type Session struct {
 	RepoName         string     `json:"repo_name"`
 	WorkspacePath    string     `json:"workspace_path"`
 	WorkspaceName    string     `json:"workspace_name"`
+	SubProjectDir    string     `json:"sub_project_dir,omitempty"` // リポジトリ内サブプロジェクトの相対パス
 	ClaudeSessionID         string `json:"claude_session_id,omitempty"`
 	PreviousClaudeSessionID string `json:"previous_claude_session_id,omitempty"` // /clear で更新される前の ID（resume フォールバック用）
 	Status                  Status `json:"status"`
@@ -268,6 +269,7 @@ type Snapshot struct {
 	RepoPath          string
 	RepoName          string
 	WorkspacePath     string
+	SubProjectDir     string
 	ClaudeSessionID   string
 	Status            Status
 	Managed           bool
@@ -310,6 +312,7 @@ func (s *Session) Snapshot() Snapshot {
 		RepoPath:          s.RepoPath,
 		RepoName:          s.RepoName,
 		WorkspacePath:     s.WorkspacePath,
+		SubProjectDir:     s.SubProjectDir,
 		ClaudeSessionID:   s.ClaudeSessionID,
 		Status:            s.Status,
 		Managed:           s.managed,
@@ -345,6 +348,29 @@ func (s *Session) sortTime() time.Time {
 		return *s.FinishedAt
 	}
 	return s.StartedAt
+}
+
+// sortGroup returns a numeric priority for status-based sorting.
+// Lower values appear at the top of the list (least important).
+// Higher values appear at the bottom (most important, closest to user's eyes).
+//
+//	0: Unmanaged / Completed / Error（非アクティブ）
+//	1: Idle
+//	2: Running
+//	3: WaitingApproval / WaitingAnswer（要手動介入）
+func (s *Session) sortGroup() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	switch s.Status {
+	case StatusWaitingApproval, StatusWaitingAnswer:
+		return 3
+	case StatusRunning:
+		return 2
+	case StatusIdle:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // NewSession creates a new session with the given parameters.

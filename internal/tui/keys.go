@@ -415,7 +415,7 @@ func (m *Model) handleRepoSelectKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.mode = viewDashboard
 		return nil
 
-	case "enter":
+	case "enter", "ctrl+enter":
 		item := m.repoList.SelectedItem()
 		if item == nil {
 			return nil
@@ -424,7 +424,8 @@ func (m *Model) handleRepoSelectKey(msg tea.KeyPressMsg) tea.Cmd {
 		if !ok {
 			return nil
 		}
-		return m.selectRepo(string(ri))
+		withWorkspace := key == "enter"
+		return m.selectRepo(ri, withWorkspace)
 
 	case "tab", "down", "ctrl+n":
 		m.repoList.CursorDown()
@@ -435,7 +436,9 @@ func (m *Model) handleRepoSelectKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 
 	// その他のキーは list.Update に委譲（フィルタ入力等）
-	return nil
+	var cmd tea.Cmd
+	m.repoList, cmd = m.repoList.Update(msg)
+	return cmd
 }
 
 // resumeSelected resumes the currently selected completed session.

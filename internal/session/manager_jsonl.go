@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
@@ -31,19 +32,24 @@ func (m *Manager) StartFileWatcher(ctx context.Context) error {
 // handleFileWrite updates LastActivity for the session matching the written JSONL file.
 // ロック順序: m.mu を先に解放してから s.mu を取る（ABBA 回避）。
 func (m *Manager) handleFileWrite(ev usage.FileEvent) {
-	for _, s := range m.copySessionsList() {
+	sessions := m.copySessionsList()
+	debuglog.Printf("[filewrite] ev.SessionID=%s modTime=%s sessions=%d", ev.SessionID, ev.ModTime.Format("15:04:05"), len(sessions))
+	for _, s := range sessions {
 		s.mu.RLock()
 		csID := s.ClaudeSessionID
 		s.mu.RUnlock()
 
 		if csID == ev.SessionID {
 			s.mu.Lock()
+			old := s.LastActivity
 			s.LastActivity = ev.ModTime
 			s.mu.Unlock()
+			debuglog.Printf("[filewrite] matched session %s (deck=%s) LastActivity %s -> %s", csID, s.ID, old.Format("15:04:05"), ev.ModTime.Format("15:04:05"))
 			m.notifyChange()
 			return
 		}
 	}
+	debuglog.Printf("[filewrite] no matching session for %s", ev.SessionID)
 }
 
 // StreamSession starts JSONL streaming for the given session (detail pane selection).

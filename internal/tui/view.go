@@ -237,23 +237,56 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(repoPath, home) {
 		repoPath = "~" + repoPath[len(home):]
 	}
-	pathName := repoPath + "/" + snap.Name
-	if repoPath == "" {
-		pathName = snap.Name
+
+	// パスを3層に分解: repoPrefix / repoName{/subProjectDir} / sessionName
+	// repoName+subProjectDir を最も強調し、sessionName はやや控えめ
+	repoName := snap.RepoName
+	var repoPrefix string // repoName の前のパス部分（末尾 / 含む）
+	if repoPath != "" && repoName != "" {
+		if idx := strings.LastIndex(repoPath, repoName); idx > 0 {
+			repoPrefix = repoPath[:idx]
+		}
+	}
+
+	// 強調部分: repoName + subProjectDir
+	emphasized := repoName
+	if snap.SubProjectDir != "" {
+		emphasized += "/" + snap.SubProjectDir
 	}
 
 	// パスカラム: 全体幅の50%を固定確保し、truncateLeft で末尾を残す
-	// セッション名部分だけ白太字、リポジトリパス部分はグレー
 	pathWidth := (width - iconWidth) / 2
 	if pathWidth < 10 {
 		pathWidth = 10
 	}
-	truncated := truncateLeft(pathName, pathWidth)
+
+	// フルパス組み立て: prefix + emphasized + / + sessionName
+	fullPath := repoPrefix + emphasized + "/" + snap.Name
+	if repoPath == "" {
+		fullPath = snap.Name
+	}
+	truncated := truncateLeft(fullPath, pathWidth)
+
+	// truncate 後の文字列をスタイル適用
+	// セッション名（末尾）→ 強調部分（中間）→ プレフィックス（先頭）の順でマッチ
+	emphStyle := lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
+	nameStyle := lipgloss.NewStyle().Foreground(colorSecondary)
+
 	var pathCol string
-	if idx := strings.LastIndex(truncated, "/"); idx >= 0 {
-		pathCol = dimStyle.Render(truncated[:idx+1]) + lipgloss.NewStyle().Foreground(colorPrimary).Bold(true).Render(truncated[idx+1:])
+	if lastSlash := strings.LastIndex(truncated, "/"); lastSlash >= 0 {
+		sessionPart := truncated[lastSlash+1:]
+		beforeSession := truncated[:lastSlash+1]
+		// beforeSession 内で強調部分を探す
+		if empIdx := strings.Index(beforeSession, repoName); empIdx >= 0 {
+			prefix := beforeSession[:empIdx]
+			empPart := beforeSession[empIdx:]
+			pathCol = dimStyle.Render(prefix) + emphStyle.Render(empPart) + nameStyle.Render(sessionPart)
+		} else {
+			// truncateLeft で prefix が切られた場合、全体を強調+セッション名
+			pathCol = emphStyle.Render(beforeSession) + nameStyle.Render(sessionPart)
+		}
 	} else {
-		pathCol = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true).Render(truncated)
+		pathCol = nameStyle.Render(truncated)
 	}
 	pathCol = padRight(pathCol, pathWidth)
 
@@ -364,7 +397,9 @@ func (m Model) renderDetailPane(width, height int) string {
 
 func (m Model) renderFooter() string {
 	var helpText string
-	if m.ptyInputActive {
+	if m.mode == viewSelectRepo {
+		helpText = "Enter:ワークスペース作成+起動 C-Enter:直接起動 Esc:戻る"
+	} else if m.ptyInputActive {
 		helpText = "PTY 直接入力中 / Ctrl+D:終了"
 	} else if m.filterActive {
 		helpText = "Enter:確定 Esc:キャンセル"

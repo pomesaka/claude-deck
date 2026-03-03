@@ -150,8 +150,9 @@ func (m *Manager) StartSpinnerIdleLoop(ctx context.Context) {
 }
 
 // CreateSession creates and starts a new Claude Code session.
-// PTY は対話モード（--agent）で起動し、prompt は空。
-func (m *Manager) CreateSession(ctx context.Context, repoPath string, cols, rows int) (*Session, error) {
+// repoPath は .jj のあるリポジトリルート、workingDir は claude を起動するディレクトリ（サブプロジェクト対応）。
+// withWorkspace が true なら jj workspace を作成して隔離環境で起動する。
+func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir string, withWorkspace bool, cols, rows int) (*Session, error) {
 	repoName := filepath.Base(repoPath)
 	sess := NewSession(repoPath, repoName)
 	sess.maxLogLines = m.config.MaxLogLines
@@ -161,21 +162,40 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, cols, rows
 		return nil, fmt.Errorf("リポジトリが見つかりません: %s", repoPath)
 	}
 
-	wsName := sess.Name
-	wsPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
+	var actualWorkDir string
+	if withWorkspace {
+		wsName := sess.Name
+		wsPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
 
-	var extraSymlinks []string
-	if m.config.WorkspaceSymlinksFunc != nil {
-		extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
+		var extraSymlinks []string
+		if m.config.WorkspaceSymlinksFunc != nil {
+			extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
+		}
+		if err := jj.CreateWorkspaceAt(repoPath, wsName, wsPath, extraSymlinks); err != nil {
+			return nil, fmt.Errorf("creating jj workspace: %w", err)
+		}
+		sess.WorkspaceName = wsName
+
+		// サブプロジェクト対応: workingDir がリポジトリルートと異なる場合、
+		// ワークスペース内の対応サブディレクトリを作業ディレクトリにする
+		relPath, err := filepath.Rel(repoPath, workingDir)
+		if err != nil || relPath == "." {
+			actualWorkDir = wsPath
+		} else {
+			actualWorkDir = filepath.Join(wsPath, relPath)
+			sess.SubProjectDir = relPath
+		}
+		sess.WorkspacePath = actualWorkDir
+	} else {
+		// ワークスペースなし → workingDir をそのまま使用
+		actualWorkDir = workingDir
+		if relPath, err := filepath.Rel(repoPath, workingDir); err == nil && relPath != "." {
+			sess.SubProjectDir = relPath
+		}
 	}
-	if err := jj.CreateWorkspaceAt(repoPath, wsName, wsPath, extraSymlinks); err != nil {
-		return nil, fmt.Errorf("creating jj workspace: %w", err)
-	}
-	sess.WorkspacePath = wsPath
-	sess.WorkspaceName = wsName
 
 	proc, err := pty.Start(ctx, pty.StartOptions{
-		WorkDir:        wsPath,
+		WorkDir:        actualWorkDir,
 		Prompt:         "",
 		PermissionMode: m.config.DefaultPermissionMode,
 		AdditionalArgs: []string{"--agent", sess.Name},
@@ -186,7 +206,9 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, cols, rows
 		m.handleOutput(sess, line)
 	})
 	if err != nil {
-		_ = jj.ForgetWorkspace(repoPath, wsName)
+		if withWorkspace {
+			_ = jj.ForgetWorkspace(repoPath, sess.Name)
+		}
 		return nil, fmt.Errorf("starting claude code: %w", err)
 	}
 
@@ -362,6 +384,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols,
 	srcClaudeID := srcSess.ClaudeSessionID
 	repoPath := srcSess.RepoPath
 	srcWorkDir := srcSess.WorkspacePath
+	srcSubProjectDir := srcSess.SubProjectDir
 	if srcWorkDir == "" {
 		srcWorkDir = srcSess.RepoPath
 	}
@@ -396,6 +419,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols,
 	}
 	sess.WorkspacePath = wsPath
 	sess.WorkspaceName = wsName
+	sess.SubProjectDir = srcSubProjectDir
 
 	proc, err := pty.Start(ctx, pty.StartOptions{
 		WorkDir:         srcWorkDir,
@@ -623,7 +647,8 @@ func (m *Manager) GetSession(id string) *Session {
 	return m.sessions[id]
 }
 
-// ListSessions returns all sessions sorted with attention-needed first, then by start time.
+// ListSessions returns all sessions sorted by status group, then by last activity (newest first).
+// Group order (top→bottom): Unmanaged/Completed/Error → Idle → Running → WaitingApproval/Answer.
 func (m *Manager) ListSessions() []*Session {
 	m.mu.RLock()
 	list := make([]*Session, 0, len(m.sessions))
@@ -632,13 +657,17 @@ func (m *Manager) ListSessions() []*Session {
 	}
 	m.mu.RUnlock()
 
-	// m.mu を解放してからソート（sortTime/getName は s.mu を取るため ABBA 回避）
+	// m.mu を解放してからソート（sortGroup/sortTime/getName は s.mu を取るため ABBA 回避）
 	sort.Slice(list, func(i, j int) bool {
+		gi, gj := list[i].sortGroup(), list[j].sortGroup()
+		if gi != gj {
+			return gi < gj
+		}
 		ti, tj := list[i].sortTime(), list[j].sortTime()
 		if ti.Equal(tj) {
 			return list[i].getName() < list[j].getName()
 		}
-		return ti.Before(tj)
+		return ti.Before(tj) // 新しいものが下
 	})
 
 	return list

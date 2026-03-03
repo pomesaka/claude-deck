@@ -45,11 +45,14 @@ main() → run()
 
 ```
 User 'n' キー
-  → handleRepoSelectKey: リポジトリ選択
-  → Manager.CreateSession(ctx, repoPath, cols, rows)
+  → handleRepoSelectKey: リポジトリ/サブプロジェクト選択
+    Enter: ワークスペース作成+起動, Ctrl+Enter: 直接起動
+  → Manager.CreateSession(ctx, repoPath, workingDir, withWorkspace, cols, rows)
     1. NewSession(repoPath, repoName)     // deck session 作成
-    2. jj.CreateWorkspaceAt(repo, name, path, extraSymlinks)  // ワークスペース作成
+    2. withWorkspace なら:
+       jj.CreateWorkspaceAt(repo, name, path, extraSymlinks)  // ワークスペース作成
        extraSymlinks は config.toml [projects] で指定された .env 等の symlink リスト
+       サブプロジェクト対応: workingDir の相対パスをワークスペース内に対応付け
     3. pty.Start(ctx, opts, handleOutput)  // claude --agent <name> 起動
        opts.Env = ["CLAUDE_DECK_SESSION_ID=<sessID>"]
     4. sessions[sessID] = sess, processes[sessID] = proc

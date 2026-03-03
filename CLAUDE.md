@@ -85,7 +85,7 @@ Completed / Error      (hook: Stop → Idle)
 | `gg/G` | 先頭/末尾 |
 | `Enter/i` | PTY 入力モード / 再開 |
 | `Ctrl+D` | PTY 入力モード終了 |
-| `n` | 新規セッション |
+| `n` | 新規セッション（Enter: ワークスペース付, C-Enter: 直接起動） |
 | `r` | セッション再開 |
 | `f` | セッションフォーク |
 | `dd` | セッション削除（JSONL 含む完全削除） |
@@ -115,6 +115,22 @@ Completed / Error      (hook: Stop → Idle)
 - `internal/hooks/hooks.go` の `PluginVersion` 定数 — 起動時のバージョンチェックに使用
 
 バージョンを上げるときは両方を同時に更新する。
+
+### プロジェクト検出（モノレポ対応）
+
+`config.toml` の `[discovery]` セクションでマーカーファイルを指定すると、jj リポジトリ内のサブプロジェクトも候補に表示される。
+
+```toml
+[discovery]
+project_markers = ["go.mod", "package.json", "Cargo.toml"]
+excludes = ["Library", ".cache", "node_modules", ".git"]
+```
+
+- `project_markers` が空（デフォルト）の場合、リポジトリルートのみが候補
+- `project_markers` を設定すると、各リポジトリ内でマーカーファイルを `fd` で検索し、見つかったディレクトリも候補に追加
+- リポジトリルートは常に候補に含まれる
+
+関連ファイル: `config.go` (`DiscoveryConfig`), `wizard.go` (`discoverRepos`, `findProjectDirs`)
 
 ### ワークスペース symlink 設定
 

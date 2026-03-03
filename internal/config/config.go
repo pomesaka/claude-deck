@@ -11,6 +11,7 @@ import (
 // Config holds the application configuration.
 type Config struct {
 	Defaults   DefaultConfig             `toml:"defaults"`
+	Discovery  DiscoveryConfig           `toml:"discovery"`
 	Ghostty    GhosttyConfig             `toml:"ghostty"`
 	Keybinds   KeybindConfig             `toml:"keybinds"`
 	Theme      ThemeConfig               `toml:"theme"`
@@ -19,6 +20,15 @@ type Config struct {
 	Pricing    PricingConfig             `toml:"pricing"`
 	Projects   map[string]ProjectConfig  `toml:"projects"`
 	DataDir    string                    `toml:"data_dir"`
+}
+
+// DiscoveryConfig holds settings for repository and project discovery.
+type DiscoveryConfig struct {
+	// ProjectMarkers are filenames (e.g. "go.mod", "package.json") used to find
+	// project directories within jj repositories. Empty means repo root only.
+	ProjectMarkers []string `toml:"project_markers"`
+	// Excludes are directory names to skip during fd search.
+	Excludes       []string `toml:"excludes"`
 }
 
 // ProjectConfig holds per-project settings keyed by repository path.
@@ -116,6 +126,9 @@ func Default() *Config {
 	return &Config{
 		Defaults: DefaultConfig{
 			PermissionMode: "default",
+		},
+		Discovery: DiscoveryConfig{
+			Excludes: []string{"Library", ".cache", "node_modules", ".git"},
 		},
 		Ghostty: GhosttyConfig{
 			Command: "ghostty",

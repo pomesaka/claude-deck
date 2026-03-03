@@ -301,9 +301,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.mode == viewSelectRepo {
-		var cmd tea.Cmd
-		m.repoList, cmd = m.repoList.Update(msg)
-		cmds = append(cmds, cmd)
+		// KeyPressMsg は handleRepoSelectKey で処理済み。
+		// list.Update には非キーメッセージ（WindowSize 等）のみ委譲する。
+		if _, isKey := msg.(tea.KeyPressMsg); !isKey {
+			var cmd tea.Cmd
+			m.repoList, cmd = m.repoList.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 	}
 
 	return m, tea.Batch(cmds...)

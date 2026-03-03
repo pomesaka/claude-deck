@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/pomesaka/claude-deck/internal/debuglog"
 )
 
 // FileEvent represents a filesystem event for a JSONL session file.
@@ -70,21 +71,27 @@ func (mw *MultiWatcher) Run(ctx context.Context) {
 	coalesceTicker := time.NewTicker(mw.coalesceInterval)
 	defer coalesceTicker.Stop()
 
+	debuglog.Printf("[multiwatch] Run started, watching %d files", len(mw.watched))
+
 	for {
 		select {
 		case <-ctx.Done():
+			debuglog.Printf("[multiwatch] Run stopping: ctx cancelled")
 			return
 
 		case event, ok := <-mw.watcher.Events:
 			if !ok {
+				debuglog.Printf("[multiwatch] Run stopping: Events channel closed")
 				return
 			}
 			mw.handleEvent(event)
 
-		case _, ok := <-mw.watcher.Errors:
+		case err, ok := <-mw.watcher.Errors:
 			if !ok {
+				debuglog.Printf("[multiwatch] Run stopping: Errors channel closed")
 				return
 			}
+			debuglog.Printf("[multiwatch] fsnotify error: %v", err)
 
 		case <-coalesceTicker.C:
 			mw.flushPending()
@@ -98,6 +105,7 @@ func (mw *MultiWatcher) Run(ctx context.Context) {
 // handleEvent records a Write event as pending (stat は flushPending で一括実行).
 func (mw *MultiWatcher) handleEvent(event fsnotify.Event) {
 	path := event.Name
+	debuglog.Printf("[multiwatch] event op=%s path=%s", event.Op, filepath.Base(path))
 
 	if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
 		delete(mw.watched, path)

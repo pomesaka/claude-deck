@@ -107,7 +107,7 @@ Existing Claude Code sessions running outside claude-deck are automatically disc
 | `gg/G` | Jump to top/bottom |
 | `Enter/i` | PTY input mode / resume session |
 | `Ctrl+D` | Exit PTY input mode |
-| `n` | New session |
+| `n` | New session (Enter: with workspace, Ctrl+Enter: direct) |
 | `r` | Resume session |
 | `f` | Fork session |
 | `dd` | Delete session (including JSONL) |
@@ -152,6 +152,12 @@ diff_del = "#F38BA8"
 [commands]
 claude = "claude"
 jj = "jj"
+
+[discovery]
+# Marker files to detect subprojects within jj repositories (monorepo support).
+# Empty = repo root only (default).
+project_markers = ["go.mod", "package.json", "Cargo.toml"]
+excludes = ["Library", ".cache", "node_modules", ".git"]
 
 [session]
 max_sessions = 30
