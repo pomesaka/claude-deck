@@ -220,7 +220,9 @@ func (s *Session) AppendLog(line string) {
 		limit = 1000
 	}
 	if len(s.LogLines) > limit {
-		s.LogLines = s.LogLines[len(s.LogLines)-limit:]
+		newLines := make([]string, limit)
+		copy(newLines, s.LogLines[len(s.LogLines)-limit:])
+		s.LogLines = newLines
 	}
 	debuglog.Printf("[session:%s] AppendLog: %q", s.ID, line)
 
@@ -255,13 +257,6 @@ func (s *Session) GetStructuredLogs() []usage.LogEntry {
 	return entries
 }
 
-// HasPTYLogs returns true if the session has live PTY output.
-func (s *Session) HasPTYLogs() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.LogLines) > 0
-}
-
 // Snapshot is a read-only copy of session state, safe to use without locks.
 type Snapshot struct {
 	ID                string
@@ -283,6 +278,15 @@ type Snapshot struct {
 	ErrorMessage      string
 	TerminalTitle     string
 	Elapsed           time.Duration
+}
+
+// WorkDir returns the effective working directory for this session.
+// WorkspacePath があればそれを、なければ RepoPath をフォールバックとして返す。
+func (s Snapshot) WorkDir() string {
+	if s.WorkspacePath != "" {
+		return s.WorkspacePath
+	}
+	return s.RepoPath
 }
 
 // Snapshot returns a consistent, lock-free copy of the session state.

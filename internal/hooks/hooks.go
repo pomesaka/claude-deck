@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
@@ -31,6 +30,29 @@ type Event struct {
 	NotificationType    string `json:"notification_type,omitempty"` // Notification: "permission_prompt", "elicitation_dialog", "idle_prompt"
 	ClaudeDeckSessionID string `json:"claude_deck_session_id,omitempty"` // PTY 起動時に環境変数から注入
 }
+
+// Hook event name constants.
+const (
+	EventNotification = "Notification"
+	EventStop         = "Stop"
+	EventSessionEnd   = "SessionEnd"
+	EventSessionStart = "SessionStart"
+)
+
+// Notification type constants.
+const (
+	NotifyPermissionPrompt  = "permission_prompt"
+	NotifyElicitationDialog = "elicitation_dialog"
+	NotifyIdlePrompt        = "idle_prompt"
+)
+
+// SessionStart source constants.
+const (
+	SourceStartup = "startup"
+	SourceResume  = "resume"
+	SourceClear   = "clear"
+	SourceCompact = "compact"
+)
 
 // EventsFileName is the basename of the events JSONL file.
 const EventsFileName = "claude-deck-events.jsonl"
@@ -217,13 +239,3 @@ func TruncateEventsFile(eventsPath string) error {
 	return os.Truncate(eventsPath, 0)
 }
 
-// CleanupStaleEvents removes events older than maxAge from the events file.
-// 定期的に呼んでファイルの肥大化を防ぐ。
-func CleanupStaleEvents(eventsPath string, _ time.Duration) {
-	fi, err := os.Stat(eventsPath)
-	if err != nil || fi.Size() < 1024*1024 { // 1MB 未満ならスキップ
-		return
-	}
-	// 単純にトランケート（イベントは即時処理するため古いデータは不要）
-	_ = os.Truncate(eventsPath, 0)
-}

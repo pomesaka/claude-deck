@@ -31,18 +31,6 @@ type LogEntry struct {
 	Depth      int    // 0=parent, 1+=subagent nesting level
 }
 
-// ReadSessionLogEntriesByID reads a Claude Code session's JSONL file and returns
-// structured log entries for rich rendering (one-shot convenience wrapper).
-func (r *Reader) ReadSessionLogEntriesByID(sessionID string) []LogEntry {
-	path := r.ResolveSessionPath(sessionID)
-	if path == "" {
-		return nil
-	}
-	s := NewLogStreamer(path)
-	s.ReadAll()
-	return s.Entries()
-}
-
 // ResolveSessionPath returns the JSONL file path for a session ID, or "" if not found.
 func (r *Reader) ResolveSessionPath(sessionID string) string {
 	pattern := filepath.Join(r.baseDir, "*", sessionID+".jsonl")

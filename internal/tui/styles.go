@@ -13,8 +13,6 @@ var (
 	colorSuccess     = lipgloss.Color("#10B981") // green
 	colorWarning     = lipgloss.Color("#F59E0B") // amber
 	colorDanger      = lipgloss.Color("#EF4444") // red
-	colorMuted       = lipgloss.Color("#6B7280") // gray
-	colorBg          = lipgloss.Color("#1E1E2E") // dark bg
 	colorBgSelected  = lipgloss.Color("#313244") // selected bg
 	colorBorder      = lipgloss.Color("#45475A") // border
 	colorBorderFocus = lipgloss.Color("#7C3AED") // focused border

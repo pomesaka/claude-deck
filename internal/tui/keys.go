@@ -522,10 +522,7 @@ func (m *Model) openTerminal() tea.Cmd {
 		return nil
 	}
 	snap := sess.Snapshot()
-	workDir := snap.WorkspacePath
-	if workDir == "" {
-		workDir = snap.RepoPath
-	}
+	workDir := snap.WorkDir()
 	if workDir == "" {
 		m.statusMsg = "作業ディレクトリが不明です"
 		return clearStatusCmd()

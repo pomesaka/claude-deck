@@ -63,6 +63,9 @@ type Model struct {
 	logFollow       bool // ログビューポート末尾追従モード
 	ptyFollow       bool // PTY ビューポート末尾追従モード
 	refreshInterval time.Duration
+	lastResizeCols  int // 前回 ResizeSession に渡した幅
+	lastResizeRows  int // 前回 ResizeSession に渡した高さ
+	lastResizeID    string // 前回 ResizeSession に渡したセッション ID
 
 	// Log rendering cache (JSONL structured logs)
 	logCache renderCache

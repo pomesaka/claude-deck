@@ -50,8 +50,13 @@ func newEmulatorWithCallbacks(s *Session, cols, rows int) *vt.Emulator {
 			s.scrollbackStyled = append(s.scrollbackStyled, styled)
 			if len(s.scrollbackPlain) > limit {
 				drop := len(s.scrollbackPlain) - limit
-				s.scrollbackPlain = s.scrollbackPlain[drop:]
-				s.scrollbackStyled = s.scrollbackStyled[drop:]
+				// 新しいスライスにコピーしてバッキング配列を解放
+				newPlain := make([]string, limit)
+				copy(newPlain, s.scrollbackPlain[drop:])
+				s.scrollbackPlain = newPlain
+				newStyled := make([]string, limit)
+				copy(newStyled, s.scrollbackStyled[drop:])
+				s.scrollbackStyled = newStyled
 			}
 		},
 	})
@@ -150,14 +155,3 @@ func (s *Session) GetPTYDisplayLines() []string {
 	return result
 }
 
-// PTYCursorPosition returns the emulator's cursor position (x, y, 0-indexed).
-// Returns (-1, -1) if no emulator is active.
-func (s *Session) PTYCursorPosition() (x, y int) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.emulator == nil {
-		return -1, -1
-	}
-	pos := s.emulator.CursorPosition()
-	return pos.X, pos.Y
-}

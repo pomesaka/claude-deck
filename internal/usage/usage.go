@@ -113,19 +113,7 @@ func (r *Reader) ReadSessionByID(sessionID string) *TokenStats {
 	return r.aggregateFile(matches[0])
 }
 
-// ReadSessionInfoByWorkDir finds the Claude Code session whose cwd matches workDir
-// and returns full session metadata from the JSONL file. Returns nil if not found.
-func (r *Reader) ReadSessionInfoByWorkDir(workDir string) *SessionInfo {
-	jsonlFiles, _ := filepath.Glob(filepath.Join(r.baseDir, "*", "*.jsonl"))
 
-	for _, path := range jsonlFiles {
-		info := r.scanFileInfo(path, workDir)
-		if info != nil {
-			return info
-		}
-	}
-	return nil
-}
 
 // ReadSessionInfoByID reads full session metadata for a specific Claude Code session.
 func (r *Reader) ReadSessionInfoByID(sessionID string) *SessionInfo {
@@ -236,7 +224,7 @@ func (r *Reader) ListAllSessions(maxAge time.Duration, limit, offset int) []*Ses
 	}
 	var filtered []fileEntry
 	for _, path := range jsonlFiles {
-		if strings.Contains(path, string(filepath.Separator)+"subagents"+string(filepath.Separator)) {
+		if isSubagentPath(path) {
 			continue
 		}
 		fi, err := os.Stat(path)
@@ -280,7 +268,7 @@ func (r *Reader) ListAllSessions(maxAge time.Duration, limit, offset int) []*Ses
 // to get basic session metadata (CWD, prompt, permissions).
 // mtime is used as LastActivity approximation to avoid reading the entire file.
 func (r *Reader) extractInfoQuick(path string, mtime time.Time) *SessionInfo {
-	fileSessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	fileSessionID := sessionIDFromPath(path)
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -325,57 +313,12 @@ func (r *Reader) extractInfoQuick(path string, mtime time.Time) *SessionInfo {
 	return &info
 }
 
-// scanFileInfo reads a JSONL file and extracts full session info if cwd matches.
-func (r *Reader) scanFileInfo(path, workDir string) *SessionInfo {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-
-	dec := jsontext.NewDecoder(f)
-	var info SessionInfo
-	matched := false
-
-	for {
-		var entry jsonlEntry
-		if err := json.UnmarshalDecode(dec, &entry); err != nil {
-			if err == io.EOF {
-				break
-			}
-			continue
-		}
-
-		if !matched && entry.CWD != "" {
-			if pathMatches(entry.CWD, workDir) {
-				matched = true
-				info.SessionID = entry.SessionID
-				info.CWD = entry.CWD
-			}
-		}
-
-		if !matched {
-			continue
-		}
-
-		r.accumulateEntry(&info, &entry)
-	}
-
-	if !matched {
-		return nil
-	}
-
-	info.Tokens.SessionID = info.SessionID
-	info.Tokens.EstimatedCostUSD = estimateCost(info.Tokens)
-	return &info
-}
-
 // extractInfo reads all session metadata from a JSONL file.
 // The session ID is derived from the filename (not from entry content),
 // because --resume can mix entries from a previous session into the file.
 func (r *Reader) extractInfo(path string) *SessionInfo {
 	// ファイル名がセッション ID（例: 259bcba0-...aa94.jsonl → 259bcba0-...aa94）
-	fileSessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	fileSessionID := sessionIDFromPath(path)
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -517,7 +460,7 @@ func (r *Reader) aggregateFile(path string) *TokenStats {
 
 	dec := jsontext.NewDecoder(f)
 	stats := TokenStats{
-		SessionID: strings.TrimSuffix(filepath.Base(path), ".jsonl"),
+		SessionID: sessionIDFromPath(path),
 	}
 
 	for {
@@ -554,6 +497,17 @@ func pathMatches(cwd, workDir string) bool {
 	cwd = filepath.Clean(cwd)
 	workDir = filepath.Clean(workDir)
 	return cwd == workDir || strings.HasPrefix(workDir, cwd+string(filepath.Separator))
+}
+
+// sessionIDFromPath extracts the session UUID from a JSONL file path.
+// e.g., "/path/to/259bcba0-aa94.jsonl" → "259bcba0-aa94"
+func sessionIDFromPath(path string) string {
+	return strings.TrimSuffix(filepath.Base(path), ".jsonl")
+}
+
+// isSubagentPath returns true if the path is inside a "subagents" directory.
+func isSubagentPath(path string) bool {
+	return strings.Contains(path, string(filepath.Separator)+"subagents"+string(filepath.Separator))
 }
 
 // Pricing variables (per million tokens, USD). Override via SetPricing.

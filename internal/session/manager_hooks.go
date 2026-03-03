@@ -35,18 +35,18 @@ func (m *Manager) StartEventWatcher(ctx context.Context) error {
 // 複数インスタンスが混同されない。
 func (m *Manager) handleHookEvent(ev hooks.Event) {
 	switch ev.HookEventName {
-	case "Notification":
+	case hooks.EventNotification:
 		sess := m.findSessionByClaudeID(ev.SessionID)
 		if sess == nil {
 			debuglog.Printf("[event-watcher] Notification: no managed session for %s", ev.SessionID)
 			return
 		}
 		switch ev.NotificationType {
-		case "permission_prompt":
+		case hooks.NotifyPermissionPrompt:
 			sess.SetStatus(StatusWaitingApproval)
-		case "elicitation_dialog":
+		case hooks.NotifyElicitationDialog:
 			sess.SetStatus(StatusWaitingAnswer)
-		case "idle_prompt":
+		case hooks.NotifyIdlePrompt:
 			sess.SetStatus(StatusIdle)
 		default:
 			debuglog.Printf("[event-watcher] Notification: unknown type %q", ev.NotificationType)
@@ -56,7 +56,7 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 			ev.SessionID, ev.NotificationType, sess.GetStatus())
 		m.notifyChange()
 
-	case "Stop":
+	case hooks.EventStop:
 		sess := m.findSessionByClaudeID(ev.SessionID)
 		if sess == nil {
 			debuglog.Printf("[event-watcher] Stop: no managed session for %s", ev.SessionID)
@@ -66,7 +66,7 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 		debuglog.Printf("[event-watcher] Stop: session=%s → StatusIdle", ev.SessionID)
 		m.notifyChange()
 
-	case "SessionEnd":
+	case hooks.EventSessionEnd:
 		if ev.ClaudeDeckSessionID == "" {
 			debuglog.Printf("[event-watcher] SessionEnd: no ClaudeDeckSessionID, skipping pairing (session_id=%s)", ev.SessionID)
 			return
@@ -79,13 +79,13 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 		m.mu.Unlock()
 		debuglog.Printf("[event-watcher] SessionEnd: session_id=%s reason=%s deck_session=%s", ev.SessionID, ev.Reason, ev.ClaudeDeckSessionID)
 
-	case "SessionStart":
+	case hooks.EventSessionStart:
 		debuglog.Printf("[event-watcher] SessionStart: session_id=%s source=%s claude_deck_session_id=%s",
 			ev.SessionID, ev.Source, ev.ClaudeDeckSessionID)
 
 		// startup/resume: 環境変数で渡した ClaudeDeckSessionID でセッションを特定し、
 		// Claude Code が割り当てた session_id を紐付ける
-		if ev.Source == "startup" || ev.Source == "resume" {
+		if ev.Source == hooks.SourceStartup || ev.Source == hooks.SourceResume {
 			if ev.ClaudeDeckSessionID == "" {
 				debuglog.Printf("[event-watcher] SessionStart source=%s but no ClaudeDeckSessionID, skipping", ev.Source)
 				return
@@ -113,8 +113,8 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 			return
 		}
 
-		// source が "clear" or "compact" でなければ更新不要
-		if ev.Source != "clear" && ev.Source != "compact" {
+		// source が clear/compact でなければ更新不要
+		if ev.Source != hooks.SourceClear && ev.Source != hooks.SourceCompact {
 			return
 		}
 

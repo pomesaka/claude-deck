@@ -657,17 +657,28 @@ func (m *Manager) ListSessions() []*Session {
 	}
 	m.mu.RUnlock()
 
-	// m.mu を解放してからソート（sortGroup/sortTime/getName は s.mu を取るため ABBA 回避）
+	// ソートキーを事前計算（比較ごとのロック取得を排除）
+	type sortKey struct {
+		group int
+		t     time.Time
+		name  string
+	}
+	keys := make([]sortKey, len(list))
+	for i, s := range list {
+		keys[i] = sortKey{
+			group: s.sortGroup(),
+			t:     s.sortTime(),
+			name:  s.getName(),
+		}
+	}
 	sort.Slice(list, func(i, j int) bool {
-		gi, gj := list[i].sortGroup(), list[j].sortGroup()
-		if gi != gj {
-			return gi < gj
+		if keys[i].group != keys[j].group {
+			return keys[i].group < keys[j].group
 		}
-		ti, tj := list[i].sortTime(), list[j].sortTime()
-		if ti.Equal(tj) {
-			return list[i].getName() < list[j].getName()
+		if keys[i].t.Equal(keys[j].t) {
+			return keys[i].name < keys[j].name
 		}
-		return ti.Before(tj) // 新しいものが下
+		return keys[i].t.Before(keys[j].t)
 	})
 
 	return list

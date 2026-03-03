@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -132,7 +131,7 @@ func (mw *MultiWatcher) flushPending() {
 			continue
 		}
 
-		sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+		sessionID := sessionIDFromPath(path)
 		if mw.OnWrite != nil {
 			mw.OnWrite(FileEvent{
 				SessionID: sessionID,
@@ -159,7 +158,7 @@ func (mw *MultiWatcher) refreshWatchList() {
 	var entries []fileEntry
 	for _, path := range jsonlFiles {
 		// subagents パスは除外
-		if strings.Contains(path, string(filepath.Separator)+"subagents"+string(filepath.Separator)) {
+		if isSubagentPath(path) {
 			continue
 		}
 		fi, err := os.Stat(path)
@@ -205,7 +204,7 @@ func (mw *MultiWatcher) refreshWatchList() {
 		// 初回 refresh 時は OnNewFile をスキップ。
 		// 初回のセッション追加は DiscoverExternalSessions に任せる。
 		if mw.initialized && mw.OnNewFile != nil {
-			sessionID := strings.TrimSuffix(filepath.Base(e.path), ".jsonl")
+			sessionID := sessionIDFromPath(e.path)
 			mw.OnNewFile(FileEvent{
 				SessionID: sessionID,
 				Path:      e.path,

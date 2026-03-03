@@ -63,9 +63,6 @@ func discoverRepos(cfg *config.Config) func() tea.Msg {
 		}
 
 		excludes := cfg.Discovery.Excludes
-		if len(excludes) == 0 {
-			excludes = []string{"Library", ".cache", "node_modules", ".git"}
-		}
 
 		// Step 1: .jj リポジトリルートを検出
 		repoRoots, err := findJJRepos(fdPath, home, excludes)

@@ -579,9 +579,13 @@ func (m *Model) syncLogViewport() {
 	m.ptyViewport.SetWidth(innerWidth)
 	m.ptyViewport.SetHeight(ptyHeight)
 
-	// PTY プロセスとエミュレータのサイズをビューポートに同期
-	if ptyHeight > 0 && m.selectedID != "" {
+	// PTY プロセスとエミュレータのサイズをビューポートに同期（寸法変更時のみ）
+	if ptyHeight > 0 && m.selectedID != "" &&
+		(m.selectedID != m.lastResizeID || innerWidth != m.lastResizeCols || ptyHeight != m.lastResizeRows) {
 		m.manager.ResizeSession(m.selectedID, innerWidth, ptyHeight)
+		m.lastResizeID = m.selectedID
+		m.lastResizeCols = innerWidth
+		m.lastResizeRows = ptyHeight
 	}
 
 	if m.selectedID == "" {
