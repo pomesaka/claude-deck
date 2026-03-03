@@ -371,7 +371,7 @@ func (m Model) renderFooter() string {
 	} else if m.filterText != "" {
 		helpText = fmt.Sprintf("フィルタ: %s / Esc:解除 ?:ヘルプ", m.filterText)
 	} else {
-		helpText = "h/l:ペイン切替 j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter/i:入力/再開 r:再開 t:ターミナル R:再描画 dd:削除 x:終了 C-c:quit"
+		helpText = "h/l:ペイン切替 j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter/i:入力/再開 r:再開 f:フォーク t:ターミナル R:再描画 dd:削除 x:終了 C-c:quit"
 	}
 	left := dimStyle.Render(helpText)
 

@@ -347,6 +347,91 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	return nil
 }
 
+// ForkSession creates a new session that forks from an existing session's conversation.
+// Uses claude --resume <sourceClaudeSessionID> --fork-session to inherit conversation
+// history while creating a new Claude Code session ID and JSONL file.
+func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols, rows int) (*Session, error) {
+	m.mu.RLock()
+	srcSess, ok := m.sessions[sourceSessionID]
+	m.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("session not found: %s", sourceSessionID)
+	}
+
+	srcSess.mu.RLock()
+	srcClaudeID := srcSess.ClaudeSessionID
+	repoPath := srcSess.RepoPath
+	srcWorkDir := srcSess.WorkspacePath
+	if srcWorkDir == "" {
+		srcWorkDir = srcSess.RepoPath
+	}
+	srcSess.mu.RUnlock()
+
+	if srcClaudeID == "" {
+		return nil, fmt.Errorf("ソースセッションに ClaudeSessionID がありません")
+	}
+
+	if repoPath == "" {
+		return nil, fmt.Errorf("ソースセッションにリポジトリパスがありません")
+	}
+
+	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("リポジトリが見つかりません: %s", repoPath)
+	}
+
+	repoName := filepath.Base(repoPath)
+	sess := NewSession(repoPath, repoName)
+	sess.maxLogLines = m.config.MaxLogLines
+	sess.maxScrollback = m.config.MaxScrollback
+
+	wsName := sess.Name
+	wsPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
+
+	var extraSymlinks []string
+	if m.config.WorkspaceSymlinksFunc != nil {
+		extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
+	}
+	if err := jj.CreateWorkspaceAt(repoPath, wsName, wsPath, extraSymlinks); err != nil {
+		return nil, fmt.Errorf("creating jj workspace: %w", err)
+	}
+	sess.WorkspacePath = wsPath
+	sess.WorkspaceName = wsName
+
+	proc, err := pty.Start(ctx, pty.StartOptions{
+		WorkDir:         srcWorkDir,
+		ResumeSessionID: srcClaudeID,
+		ForkSession:     true,
+		Env:             []string{"CLAUDE_DECK_SESSION_ID=" + sess.ID},
+		Cols:            uint16(cols),
+		Rows:            uint16(rows),
+	}, func(line string) {
+		m.handleOutput(sess, line)
+	})
+	if err != nil {
+		_ = jj.ForgetWorkspace(repoPath, wsName)
+		return nil, fmt.Errorf("starting forked session: %w", err)
+	}
+
+	sess.mu.Lock()
+	sess.PID = proc.PID()
+	sess.managed = true
+	sess.emulator = newEmulatorWithCallbacks(sess, cols, rows)
+	sess.mu.Unlock()
+
+	m.mu.Lock()
+	m.sessions[sess.ID] = sess
+	m.processes[sess.ID] = proc
+	m.mu.Unlock()
+
+	m.persist(sess)
+	m.pruneOldSessions()
+	m.notifyChange()
+
+	go m.watchProcess(sess, proc)
+
+	return sess, nil
+}
+
 // RemoveSession removes a deck session from the manager and store, but keeps
 // Claude Code JSONL files and jj workspace intact. Use for cleaning up duplicate
 // deck sessions without losing Claude Code data.

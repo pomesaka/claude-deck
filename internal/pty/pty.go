@@ -35,6 +35,7 @@ type StartOptions struct {
 	Prompt           string
 	PermissionMode   string
 	ResumeSessionID  string // if set, resume an existing Claude Code session
+	ForkSession      bool   // if true, add --fork-session flag (use with ResumeSessionID)
 	AdditionalArgs   []string
 	Env              []string // additional environment variables (KEY=VALUE)
 	Cols             uint16   // PTY 幅。0 の場合デフォルト 120
@@ -48,6 +49,9 @@ func Start(ctx context.Context, opts StartOptions, handler OutputHandler) (*Proc
 	args := []string{}
 	if opts.ResumeSessionID != "" {
 		args = append(args, "--resume", opts.ResumeSessionID)
+		if opts.ForkSession {
+			args = append(args, "--fork-session")
+		}
 	} else if opts.Prompt != "" {
 		args = append(args, "-p", opts.Prompt)
 	}

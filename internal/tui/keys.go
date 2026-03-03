@@ -239,6 +239,9 @@ func (m *Model) handleDashboardKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "r":
 		return m.resumeSelected()
 
+	case m.config.Keybinds.Fork:
+		return m.forkSelected()
+
 	case "R":
 		m.syncLogViewport()
 		return tea.ClearScreen
@@ -275,7 +278,7 @@ func (m *Model) handleDashboardKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 
 	case "?":
-		m.statusMsg = "h/l:ペイン切替 j/k:移動 gg/G:先頭/末尾 /:フィルタ C-b/C-u:半頁 n:新規 Enter/i:入力/再開 r:再開 t:ターミナル R:再描画 dd:削除 dD:deckのみ削除 x:終了 C-c:quit"
+		m.statusMsg = "h/l:ペイン切替 j/k:移動 gg/G:先頭/末尾 /:フィルタ C-b/C-u:半頁 n:新規 Enter/i:入力/再開 r:再開 f:フォーク t:ターミナル R:再描画 dd:削除 dD:deckのみ削除 x:終了 C-c:quit"
 		return clearStatusCmd()
 	}
 
@@ -458,6 +461,37 @@ func (m *Model) resumeSelected() tea.Cmd {
 	return func() tea.Msg {
 		err := mgr.ResumeSession(ctx, id, cols, rows)
 		return sessionResumedMsg{err: err}
+	}
+}
+
+// forkSelected creates a new session forking from the selected session's conversation.
+func (m *Model) forkSelected() tea.Cmd {
+	if m.selectedID == "" {
+		return nil
+	}
+	sess := m.manager.GetSession(m.selectedID)
+	if sess == nil {
+		return nil
+	}
+
+	snap := sess.Snapshot()
+	if snap.ClaudeSessionID == "" {
+		m.statusMsg = "ClaudeSessionID がないためフォークできません"
+		return clearStatusCmd()
+	}
+
+	m.statusMsg = "セッションフォーク中..."
+	mgr := m.manager
+	ctx := m.ctx
+	id := m.selectedID
+	cols, _, rows := m.detailPaneMetrics()
+	return func() tea.Msg {
+		newSess, err := mgr.ForkSession(ctx, id, cols, rows)
+		var newID string
+		if newSess != nil {
+			newID = newSess.ID
+		}
+		return sessionForkedMsg{sessionID: newID, err: err}
 	}
 }
 

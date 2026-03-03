@@ -88,6 +88,12 @@ type sessionResumedMsg struct {
 	err error
 }
 
+// sessionForkedMsg is sent when an async session fork completes.
+type sessionForkedMsg struct {
+	sessionID string
+	err       error
+}
+
 // ptyInputSentMsg is sent when PTY input write completes.
 type ptyInputSentMsg struct {
 	err error
@@ -236,6 +242,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "再開エラー: " + msg.err.Error()
 		} else {
 			m.statusMsg = "セッションを再開しました"
+			m.focusDetail = true
+			m.ptyInputActive = true
+		}
+		cmds = append(cmds, clearStatusCmd())
+
+	case sessionForkedMsg:
+		if msg.err != nil {
+			m.statusMsg = "フォークエラー: " + msg.err.Error()
+		} else {
+			m.statusMsg = "セッションをフォークしました"
+			m.selectedID = msg.sessionID
+			m.refreshSessions()
 			m.focusDetail = true
 			m.ptyInputActive = true
 		}

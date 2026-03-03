@@ -87,6 +87,7 @@ Completed / Error      (hook: Stop → Idle)
 | `Ctrl+D` | PTY 入力モード終了 |
 | `n` | 新規セッション |
 | `r` | セッション再開 |
+| `f` | セッションフォーク |
 | `dd` | セッション削除（JSONL 含む完全削除） |
 | `dD` | deck メタデータのみ削除（JSONL 残す、再発見される） |
 | `x` | プロセス終了 |

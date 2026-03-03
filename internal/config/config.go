@@ -87,6 +87,7 @@ type KeybindConfig struct {
 	Reply      string `toml:"reply"`
 	Prompt     string `toml:"prompt"`
 	OpenTerm   string `toml:"open_term"`
+	Fork       string `toml:"fork"`
 	Kill       string `toml:"kill"`
 	Quit       string `toml:"quit"`
 	Help       string `toml:"help"`
@@ -126,6 +127,7 @@ func Default() *Config {
 			Reply:      "r",
 			Prompt:     "p",
 			OpenTerm:   "t",
+			Fork:       "f",
 			Kill:       "x",
 			Quit:       "q",
 			Help:       "?",

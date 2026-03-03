@@ -109,6 +109,7 @@ Existing Claude Code sessions running outside claude-deck are automatically disc
 | `Ctrl+D` | Exit PTY input mode |
 | `n` | New session |
 | `r` | Resume session |
+| `f` | Fork session |
 | `dd` | Delete session (including JSONL) |
 | `dD` | Remove deck metadata only (JSONL preserved) |
 | `x` | Kill process |
