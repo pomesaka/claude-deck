@@ -658,28 +658,35 @@ func (m *Manager) ListSessions() []*Session {
 	m.mu.RUnlock()
 
 	// ソートキーを事前計算（比較ごとのロック取得を排除）
-	type sortKey struct {
-		group int
-		t     time.Time
-		name  string
+	// sort.Slice は list 内の要素をスワップするが、別配列の keys はスワップしないため
+	// キーと要素がずれる。session とキーをペアにした構造体をソートする。
+	type sortItem struct {
+		session *Session
+		group   int
+		t       time.Time
+		name    string
 	}
-	keys := make([]sortKey, len(list))
+	items := make([]sortItem, len(list))
 	for i, s := range list {
-		keys[i] = sortKey{
-			group: s.sortGroup(),
-			t:     s.sortTime(),
-			name:  s.getName(),
+		items[i] = sortItem{
+			session: s,
+			group:   s.sortGroup(),
+			t:       s.sortTime(),
+			name:    s.getName(),
 		}
 	}
-	sort.Slice(list, func(i, j int) bool {
-		if keys[i].group != keys[j].group {
-			return keys[i].group < keys[j].group
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].group != items[j].group {
+			return items[i].group < items[j].group
 		}
-		if keys[i].t.Equal(keys[j].t) {
-			return keys[i].name < keys[j].name
+		if items[i].t.Equal(items[j].t) {
+			return items[i].name < items[j].name
 		}
-		return keys[i].t.Before(keys[j].t)
+		return items[i].t.Before(items[j].t)
 	})
+	for i, item := range items {
+		list[i] = item.session
+	}
 
 	return list
 }

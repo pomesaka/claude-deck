@@ -64,6 +64,11 @@ func discoverRepos(cfg *config.Config) func() tea.Msg {
 
 		excludes := cfg.Discovery.Excludes
 
+		// DataDir 配下のワークスペースが jj リポジトリとして検出されるのを防ぐ
+		if rel, err := filepath.Rel(home, cfg.DataDir); err == nil && !strings.HasPrefix(rel, "..") {
+			excludes = append(append([]string{}, excludes...), rel)
+		}
+
 		// Step 1: .jj リポジトリルートを検出
 		repoRoots, err := findJJRepos(fdPath, home, excludes)
 		if err != nil {
