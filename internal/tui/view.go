@@ -209,6 +209,12 @@ func selBg(s lipgloss.Style, selected bool) lipgloss.Style {
 }
 
 func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
+	// selected 時にスタイル未適用の隙間（スペース、パディング）にも背景を付けるための
+	// "背景のみ" スタイル。非選択時は空スタイル（何もしない）。
+	bg := lipgloss.NewStyle()
+	if selected {
+		bg = bg.Background(colorBgSelected)
+	}
 
 	// ステータスアイコン（セッション名の前に付ける、全ステータスで幅を揃える）
 	var statusIcon string
@@ -237,7 +243,7 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	}
 
 	// line1: [icon] [repoPath/session 固定幅] [title 残り幅]
-	iconCol := statusIcon + " "
+	iconCol := statusIcon + bg.Render(" ")
 	iconWidth := lipgloss.Width(iconCol)
 
 	// RepoPath を短縮表示（ホームディレクトリを ~ に置換）
@@ -297,32 +303,34 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	} else {
 		pathCol = nameStyle.Render(truncated)
 	}
-	pathCol = padRight(pathCol, pathWidth)
+	pathCol = padRightBg(pathCol, pathWidth, bg)
 
 	// タイトルカラム: 残り幅
 	titleWidth := width - iconWidth - pathWidth - 1
 	var titleCol string
 	if snap.TerminalTitle != "" && titleWidth > 4 {
-		titleCol = " " + selBg(lipgloss.NewStyle().Foreground(colorText), selected).Render(truncate(snap.TerminalTitle, titleWidth))
+		titleCol = bg.Render(" ") + selBg(lipgloss.NewStyle().Foreground(colorText), selected).Render(truncate(snap.TerminalTitle, titleWidth))
 	}
 
-	line1 := iconCol + pathCol + titleCol
+	line1 := padRightBg(iconCol+pathCol+titleCol, width, bg)
 
 	// line2
 	const timeWidth = 14
-	lastAct := padRight(dim.Render(formatTimeCompact(snap)), timeWidth)
+	lastAct := padRightBg(dim.Render(formatTimeCompact(snap)), timeWidth, bg)
 	const costWidth = 7
-	cost := padRight(selBg(tokenStyle, selected).Render(fmt.Sprintf("$%.2f", snap.TokenUsage.EstimatedCostUSD)), costWidth)
+	cost := padRightBg(selBg(tokenStyle, selected).Render(fmt.Sprintf("$%.2f", snap.TokenUsage.EstimatedCostUSD)), costWidth, bg)
 	tokens := dim.Render(formatTokens(snap.TokenUsage.InputTokens, snap.TokenUsage.OutputTokens))
 
 	// line2: インデント(icon幅) + 時間 + コスト + トークン + [メッセージ]
-	indent := strings.Repeat(" ", iconWidth)
+	indent := bg.Render(strings.Repeat(" ", iconWidth))
+	sp := bg.Render(" ")
 	var line2 string
 	if statusMessage != "" {
-		line2 = fmt.Sprintf("%s%s %s %s %s", indent, lastAct, cost, tokens, statusMessage)
+		line2 = indent + lastAct + sp + cost + sp + tokens + sp + statusMessage
 	} else {
-		line2 = fmt.Sprintf("%s%s %s %s", indent, lastAct, cost, tokens)
+		line2 = indent + lastAct + sp + cost + sp + tokens
 	}
+	line2 = padRightBg(line2, width, bg)
 
 	content := lipgloss.JoinVertical(lipgloss.Left, line1, line2)
 
@@ -487,14 +495,15 @@ func truncateLeft(s string, maxLen int) string {
 	return "…" + string(runes[len(runes)-maxLen+1:])
 }
 
-// padRight pads a (possibly styled) string to exactly w cell-width with trailing spaces.
-// If the string is already wider than w, it is returned as-is.
-func padRight(s string, w int) string {
+// padRightBg pads a (possibly styled) string to exactly w cell-width with trailing spaces,
+// applying the given style to the padding. 選択行でパディング部分にも背景色を付けるために使う。
+// bg が空スタイルの場合は素のスペースと同等。
+func padRightBg(s string, w int, bg lipgloss.Style) string {
 	cur := lipgloss.Width(s)
 	if cur >= w {
 		return s
 	}
-	return s + strings.Repeat(" ", w-cur)
+	return s + bg.Render(strings.Repeat(" ", w-cur))
 }
 
 // detailPaneMetrics calculates the inner width, log height, and PTY viewport height for the detail pane.
