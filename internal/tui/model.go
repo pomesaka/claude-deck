@@ -57,6 +57,9 @@ type Model struct {
 	// Status bar
 	statusMsg string
 
+	// Quit confirmation
+	confirmQuit bool
+
 	// Vim-style key sequence state
 	pendingG        bool
 	pendingD        bool
@@ -79,6 +82,7 @@ type SessionRefreshMsg struct{}
 
 // statusClearMsg clears the status message.
 type statusClearMsg struct{}
+
 
 // sessionCreatedMsg is sent when an async session creation completes.
 type sessionCreatedMsg struct {
@@ -305,8 +309,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.mode == viewSelectRepo {
 		// KeyPressMsg は handleRepoSelectKey で処理済み。
-		// list.Update には非キーメッセージ（WindowSize 等）のみ委譲する。
-		if _, isKey := msg.(tea.KeyPressMsg); !isKey {
+		// カスタムメッセージを list.Model に渡すとフィルタ状態がリセットされるため、
+		// bubbletea 内部メッセージ（WindowSize, マウス, カーソル点滅等）のみ委譲する。
+		switch msg.(type) {
+		case tea.KeyPressMsg,
+			metadataTickMsg, SessionRefreshMsg, statusClearMsg,
+			sessionCreatedMsg, sessionResumedMsg, sessionForkedMsg, ptyInputSentMsg, repoListMsg:
+			// skip: 処理済み or repoList に無関係
+		default:
 			var cmd tea.Cmd
 			m.repoList, cmd = m.repoList.Update(msg)
 			cmds = append(cmds, cmd)
@@ -321,6 +331,7 @@ func clearStatusCmd() tea.Cmd {
 		return statusClearMsg{}
 	})
 }
+
 
 func (m *Model) refreshSessions() {
 	m.sessions = m.manager.ListSessions()

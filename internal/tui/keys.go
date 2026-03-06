@@ -22,8 +22,23 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
 	switch key {
 	case "ctrl+c":
+		m.confirmQuit = true
+		m.statusMsg = "終了しますか? (y/n)"
+		return nil
+	case "ctrl+z":
 		m.quitting = true
 		return tea.Quit
+	}
+
+	// 終了確認中: y で終了、それ以外でキャンセル
+	if m.confirmQuit {
+		m.confirmQuit = false
+		if key == "y" || key == "Y" {
+			m.quitting = true
+			return tea.Quit
+		}
+		m.statusMsg = ""
+		return nil
 	}
 
 	switch m.mode {

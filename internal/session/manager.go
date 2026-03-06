@@ -189,6 +189,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	} else {
 		// ワークスペースなし → workingDir をそのまま使用
 		actualWorkDir = workingDir
+		sess.WorkspacePath = actualWorkDir
 		if relPath, err := filepath.Rel(repoPath, workingDir); err == nil && relPath != "." {
 			sess.SubProjectDir = relPath
 		}
