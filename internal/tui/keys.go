@@ -546,7 +546,11 @@ func (m *Model) openTerminal() tea.Cmd {
 		m.statusMsg = fmt.Sprintf("ディレクトリが見つかりません: %s", workDir)
 		return clearStatusCmd()
 	}
-	if err := m.ghostty.Open(workDir, snap.TerminalTitle); err != nil {
+	ghosttyTitle := snap.BookmarkName
+	if ghosttyTitle == "" {
+		ghosttyTitle = snap.TerminalTitle
+	}
+	if err := m.ghostty.Open(workDir, ghosttyTitle); err != nil {
 		m.statusMsg = fmt.Sprintf("ターミナル起動エラー: %v", err)
 		return clearStatusCmd()
 	}

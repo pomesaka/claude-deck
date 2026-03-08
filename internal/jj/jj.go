@@ -94,6 +94,34 @@ func createExtraSymlink(repoPath, wsPath, rel string) error {
 	return nil
 }
 
+// GetNearestBookmark returns the local bookmark name of the closest ancestor
+// (including @) that has a bookmark. Returns empty string if none found.
+func GetNearestBookmark(dir string) (string, error) {
+	cmd := exec.Command(Command, "log", "--no-graph", "--color=never",
+		"-r", "latest(::@ & bookmarks())",
+		"-T", "bookmarks")
+	cmd.Dir = dir
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+
+	raw := strings.TrimSpace(string(output))
+	if raw == "" {
+		return "", nil
+	}
+
+	// bookmarks テンプレートはスペース区切りで出力される。
+	// リモート追跡ブックマークは "@origin" サフィックスが付く。
+	// ローカルブックマーク（@ なし）のうち最初のものを返す。
+	for _, name := range strings.Fields(raw) {
+		if !strings.Contains(name, "@") {
+			return name, nil
+		}
+	}
+	return "", nil
+}
+
 // ForgetWorkspace removes a jj workspace.
 func ForgetWorkspace(repoPath, name string) error {
 	cmd := exec.Command(Command, "workspace", "forget", name)

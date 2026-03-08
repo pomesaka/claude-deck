@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/pomesaka/claude-deck/internal/debuglog"
+	"github.com/pomesaka/claude-deck/internal/jj"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
@@ -206,6 +207,7 @@ func (m *Manager) RefreshFromJSONL() {
 	defer m.refreshing.Store(false)
 
 	m.HydrateFromJSONL()
+	m.refreshBookmarks()
 
 	_, hasMore := m.DiscoverExternalSessions()
 	if hasMore {
@@ -214,6 +216,40 @@ func (m *Manager) RefreshFromJSONL() {
 	} else {
 		// 全件読み込み完了。先頭に戻して新規セッションの検知を継続する
 		m.discoveryOffset = 0
+	}
+}
+
+// refreshBookmarks updates BookmarkName for active sessions with workspaces.
+// 完了/エラーのセッションはブックマークが変わらないためスキップする。
+func (m *Manager) refreshBookmarks() {
+	for _, sess := range m.copySessionsList() {
+		sess.mu.RLock()
+		wsPath := sess.WorkspacePath
+		status := sess.Status
+		sess.mu.RUnlock()
+
+		if wsPath == "" {
+			continue
+		}
+		if status == StatusCompleted || status == StatusError {
+			continue
+		}
+
+		bookmark, err := jj.GetNearestBookmark(wsPath)
+		if err != nil {
+			debuglog.Printf("[refreshBookmarks] session %s: %v", sess.ID, err)
+			continue
+		}
+		if bookmark == "" {
+			continue
+		}
+
+		sess.mu.Lock()
+		if sess.BookmarkName != bookmark {
+			debuglog.Printf("[refreshBookmarks] session %s: %s -> %s", sess.ID, sess.BookmarkName, bookmark)
+			sess.BookmarkName = bookmark
+		}
+		sess.mu.Unlock()
 	}
 }
 

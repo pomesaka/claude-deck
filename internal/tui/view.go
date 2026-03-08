@@ -131,8 +131,10 @@ func (m Model) renderSessionList(width, height int) string {
 
 	const itemHeight = 2
 
-	// フィルタバー分を除いた利用可能高さ
-	listHeight := height - filterBarHeight
+	// Height() はボーダー込みの外寸。コンテンツ領域はボーダー(上下各1)分を差し引く。
+	// フィルタバー分も除いた利用可能高さ。
+	const borderHeight = 2
+	listHeight := height - borderHeight - filterBarHeight
 
 	// スクロール範囲を算出（タブ行分を差し引く）
 	offset := m.scrollOffset
@@ -209,6 +211,14 @@ func selBg(s lipgloss.Style, selected bool) lipgloss.Style {
 }
 
 func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
+	// width は sessionItemStyle の外寸（border-box）。
+	// Padding(0,1) の内側がコンテンツ領域なので 2 を引く。
+	const itemPadding = 2
+	cw := width - itemPadding
+	if cw < 4 {
+		cw = 4
+	}
+
 	// selected 時にスタイル未適用の隙間（スペース、パディング）にも背景を付けるための
 	// "背景のみ" スタイル。非選択時は空スタイル（何もしない）。
 	bg := lipgloss.NewStyle()
@@ -234,7 +244,7 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	case session.StatusError:
 		statusIcon = selBg(statusErrorStyle, selected).Render("●")
 		if snap.ErrorMessage != "" {
-			statusMessage = selBg(statusErrorStyle, selected).Render(truncate(snap.ErrorMessage, width-20))
+			statusMessage = selBg(statusErrorStyle, selected).Render(truncate(snap.ErrorMessage, cw-20))
 		} else {
 			statusMessage = selBg(statusErrorStyle, selected).Render("エラー")
 		}
@@ -269,7 +279,7 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	}
 
 	// パスカラム: 全体幅の50%を固定確保し、truncateLeft で末尾を残す
-	pathWidth := (width - iconWidth) / 2
+	pathWidth := (cw - iconWidth) / 2
 	if pathWidth < 10 {
 		pathWidth = 10
 	}
@@ -305,14 +315,18 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	}
 	pathCol = padRightBg(pathCol, pathWidth, bg)
 
-	// タイトルカラム: 残り幅
-	titleWidth := width - iconWidth - pathWidth - 1
+	// タイトルカラム: BookmarkName を優先、なければ TerminalTitle にフォールバック
+	titleWidth := cw - iconWidth - pathWidth - 1
 	var titleCol string
-	if snap.TerminalTitle != "" && titleWidth > 4 {
-		titleCol = bg.Render(" ") + selBg(lipgloss.NewStyle().Foreground(colorText), selected).Render(truncate(snap.TerminalTitle, titleWidth))
+	displayTitle := snap.BookmarkName
+	if displayTitle == "" {
+		displayTitle = snap.TerminalTitle
+	}
+	if displayTitle != "" && titleWidth > 4 {
+		titleCol = bg.Render(" ") + selBg(lipgloss.NewStyle().Foreground(colorText), selected).Render(truncate(displayTitle, titleWidth))
 	}
 
-	line1 := padRightBg(iconCol+pathCol+titleCol, width, bg)
+	line1 := padRightBg(iconCol+pathCol+titleCol, cw, bg)
 
 	// line2
 	const timeWidth = 14
@@ -330,7 +344,7 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	} else {
 		line2 = indent + lastAct + sp + cost + sp + tokens
 	}
-	line2 = padRightBg(line2, width, bg)
+	line2 = padRightBg(line2, cw, bg)
 
 	content := lipgloss.JoinVertical(lipgloss.Left, line1, line2)
 
@@ -338,7 +352,7 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	if selected {
 		style = sessionItemSelectedStyle
 	}
-	// width は親リストペインのコンテンツ幅。アイテムはその幅いっぱいに表示する。
+	// width は border-box 外寸。Padding(0,1) 込みで width セル幅にする。
 	return style.Width(width).Render(content)
 }
 

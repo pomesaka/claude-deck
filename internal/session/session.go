@@ -85,7 +85,8 @@ type Session struct {
 	Status                  Status `json:"status"`
 	FinishedAt       *time.Time `json:"finished_at,omitempty"`
 	PID              int        `json:"pid,omitempty"`
-	TerminalTitle    string     `json:"terminal_title,omitempty"` // OSC 0/2 で設定されたターミナルタイトル
+	TerminalTitle    string     `json:"terminal_title,omitempty"` // OSC 0/2 で設定されたターミナルタイトル（PTY表示フィルタ用）
+	BookmarkName     string     `json:"bookmark_name,omitempty"`  // jj の最近接ブックマーク名（セッション一覧表示用）
 
 	// --- Hydrated from JSONL (JSONL が最新値を上書きするが、ストアにも保存して再起動時に即表示) ---
 	Prompt         string     `json:"prompt,omitempty"`
@@ -277,6 +278,7 @@ type Snapshot struct {
 	CurrentTool       string
 	ErrorMessage      string
 	TerminalTitle     string
+	BookmarkName      string
 	Elapsed           time.Duration
 }
 
@@ -329,6 +331,7 @@ func (s *Session) Snapshot() Snapshot {
 		CurrentTool:       s.CurrentTool,
 		ErrorMessage:      s.ErrorMessage,
 		TerminalTitle:     s.TerminalTitle,
+		BookmarkName:      s.BookmarkName,
 		Elapsed:           elapsed,
 	}
 	return snap

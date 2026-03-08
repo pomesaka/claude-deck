@@ -220,6 +220,13 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	sess.emulator = newEmulatorWithCallbacks(sess, cols, rows)
 	sess.mu.Unlock()
 
+	// ワークスペースの最近接ブックマークをセッションタイトルに設定
+	if bookmark, err := jj.GetNearestBookmark(actualWorkDir); err == nil && bookmark != "" {
+		sess.mu.Lock()
+		sess.BookmarkName = bookmark
+		sess.mu.Unlock()
+	}
+
 	m.mu.Lock()
 	m.sessions[sess.ID] = sess
 	m.processes[sess.ID] = proc
@@ -442,6 +449,13 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols,
 	sess.managed = true
 	sess.emulator = newEmulatorWithCallbacks(sess, cols, rows)
 	sess.mu.Unlock()
+
+	// ワークスペースの最近接ブックマークをセッションタイトルに設定
+	if bookmark, err := jj.GetNearestBookmark(wsPath); err == nil && bookmark != "" {
+		sess.mu.Lock()
+		sess.BookmarkName = bookmark
+		sess.mu.Unlock()
+	}
 
 	m.mu.Lock()
 	m.sessions[sess.ID] = sess
