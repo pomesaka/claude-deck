@@ -37,6 +37,8 @@ type ManagerConfig struct {
 	DiscoveryDays         int
 	RefreshInterval       time.Duration
 	WorkspaceSymlinksFunc func(repoPath string) []string
+	// AddDirsFunc returns the --add-dir paths for the given repository.
+	AddDirsFunc func(repoPath string) []string
 }
 
 // Manager coordinates multiple Claude Code sessions.
@@ -199,11 +201,12 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	}
 
 	debuglog.Printf("[CreateSession] starting pty workDir=%q", actualWorkDir)
+	addDirArgs := m.buildAddDirArgs(repoPath)
 	proc, err := pty.Start(ctx, pty.StartOptions{
 		WorkDir:        actualWorkDir,
 		Prompt:         "",
 		PermissionMode: m.config.DefaultPermissionMode,
-		AdditionalArgs: []string{"--agent", sess.Name},
+		AdditionalArgs: append([]string{"--agent", sess.Name}, addDirArgs...),
 		Env:            []string{"CLAUDE_DECK_SESSION_ID=" + sess.ID},
 		Cols:           uint16(cols),
 		Rows:           uint16(rows),
@@ -361,6 +364,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	proc, err := pty.Start(ctx, pty.StartOptions{
 		WorkDir:         workDir,
 		ResumeSessionID: csID,
+		AdditionalArgs:  m.buildAddDirArgs(sess.RepoPath),
 		Env:             []string{"CLAUDE_DECK_SESSION_ID=" + sessionID},
 		Cols:            uint16(cols),
 		Rows:            uint16(rows),
@@ -456,6 +460,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols,
 		WorkDir:         srcWorkDir,
 		ResumeSessionID: srcClaudeID,
 		ForkSession:     true,
+		AdditionalArgs:  m.buildAddDirArgs(repoPath),
 		Env:             []string{"CLAUDE_DECK_SESSION_ID=" + sess.ID},
 		Cols:            uint16(cols),
 		Rows:            uint16(rows),
@@ -775,6 +780,22 @@ func (m *Manager) copySessionsList() []*Session {
 
 // isClaudeIDClaimed returns true if the given Claude Code session ID is already
 // used by another deck session (excluding excludeID).
+// buildAddDirArgs returns --add-dir flag pairs for the given repository path.
+func (m *Manager) buildAddDirArgs(repoPath string) []string {
+	if m.config.AddDirsFunc == nil {
+		return nil
+	}
+	dirs := m.config.AddDirsFunc(repoPath)
+	if len(dirs) == 0 {
+		return nil
+	}
+	args := make([]string, 0, len(dirs)*2)
+	for _, d := range dirs {
+		args = append(args, "--add-dir", d)
+	}
+	return args
+}
+
 func (m *Manager) isClaudeIDClaimed(claudeSessionID, excludeID string) bool {
 	for _, s := range m.copySessionsList() {
 		if s.ID == excludeID {

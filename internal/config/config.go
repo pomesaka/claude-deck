@@ -34,6 +34,9 @@ type DiscoveryConfig struct {
 // ProjectConfig holds per-project settings keyed by repository path.
 type ProjectConfig struct {
 	WorkspaceSymlinks []string `toml:"workspace_symlinks"`
+	// AddDirs lists additional directories to pass as --add-dir to Claude Code.
+	// Absolute paths are used as-is; relative paths are resolved from the repository root.
+	AddDirs []string `toml:"add_dirs"`
 }
 
 // ThemeConfig holds UI color settings.
@@ -223,6 +226,28 @@ func (c *Config) WorkspaceSymlinks(repoPath string) []string {
 		return nil
 	}
 	return pc.WorkspaceSymlinks
+}
+
+// ResolvedAddDirs returns the --add-dir paths for the given repository,
+// resolving relative paths against repoPath.
+// Returns nil if no add_dirs are configured for the project.
+func (c *Config) ResolvedAddDirs(repoPath string) []string {
+	if c.Projects == nil {
+		return nil
+	}
+	pc, ok := c.Projects[repoPath]
+	if !ok || len(pc.AddDirs) == 0 {
+		return nil
+	}
+	resolved := make([]string, 0, len(pc.AddDirs))
+	for _, d := range pc.AddDirs {
+		if filepath.IsAbs(d) {
+			resolved = append(resolved, d)
+		} else {
+			resolved = append(resolved, filepath.Join(repoPath, d))
+		}
+	}
+	return resolved
 }
 
 // EnsureDataDir creates the data directory if it doesn't exist.

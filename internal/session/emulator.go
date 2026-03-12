@@ -3,6 +3,7 @@ package session
 import (
 	"io"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/x/vt"
@@ -24,12 +25,14 @@ func newEmulatorWithCallbacks(s *Session, cols, rows int) *vt.Emulator {
 		rows = defaultPTYRows
 	}
 
-	// 新しい emulator を作るたびに stableCursor をリセットする。
+	// 新しい emulator を作るたびにカーソル関連のキャッシュをリセットする。
 	// ResumeSession/ForkSession では既存 Session に新 emulator を差し替えるため、
-	// 前回の確定カーソル位置が残っていると初回フレーム前に誤った位置を返してしまう。
+	// 前回の確定カーソル位置や watermark が残っていると初回フレーム前に誤った値を返す。
 	s.stableCursorReady.Store(false)
 	s.stableCursorX.Store(0)
 	s.stableCursorScreenY.Store(0)
+	s.cursorYHighWatermark.Store(0)
+	s.cursorYHighWatermarkNano.Store(0)
 
 	em := vt.NewEmulator(cols, rows)
 
@@ -76,8 +79,9 @@ func newEmulatorWithCallbacks(s *Session, cols, rows int) *vt.Emulator {
 			s.mu.Unlock()
 		},
 		CursorVisibility: func(visible bool) {
-			// \033[?25h（カーソル表示）= Ink の描画フレーム終了を示す。
-			// この時点のカーソル位置が確定した入力位置（例: "> " の直後）。
+			// \033[?25h（カーソル表示）コールバック。
+			// Claude Code (Ink) は通常 cursor visibility を切り替えないため発火しないが、
+			// 他のターミナルアプリ向けに残しておく。発火した場合は確定カーソル位置として使用。
 			// emuMu 保持中に呼ばれる。em はクロージャでキャプチャ済み。
 			if !visible {
 				return
@@ -100,6 +104,26 @@ func (s *Session) refreshDisplayCacheLocked() {
 	styled := s.emulator.Render()
 	cursor := s.emulator.CursorPosition()
 	cursorY := cursor.Y
+
+	// High-watermark: Ink は再描画時にカーソルを上に移動してから下に描画するため、
+	// 描画途中に cursorY が一時的に下がり表示行数が縮小してちらつく。
+	// watermark で 200ms の間 cursorY の縮小を抑制することでちらつきを防ぐ。
+	const decayNs = 200 * 1_000_000 // 200ms
+	now := time.Now().UnixNano()
+	prevHW := int(s.cursorYHighWatermark.Load())
+	prevTime := s.cursorYHighWatermarkNano.Load()
+	if cursorY >= prevHW {
+		// カーソルが高い位置にある（または同位置）→ watermark を更新
+		s.cursorYHighWatermark.Store(int32(cursorY))
+		s.cursorYHighWatermarkNano.Store(now)
+	} else if now-prevTime < decayNs {
+		// watermark 設定から 200ms 以内 → 縮小を抑制
+		cursorY = prevHW
+	} else {
+		// 200ms 経過しても低いまま → 正当な縮小として受け入れ watermark を更新
+		s.cursorYHighWatermark.Store(int32(cursorY))
+		s.cursorYHighWatermarkNano.Store(now)
+	}
 
 	// mu.RLock で scrollback/title を読む（emuMu は保持中、lock 順: emuMu → mu）
 	s.mu.RLock()
@@ -197,7 +221,7 @@ func buildDisplayLines(plain, styled string, cursorY int, title string, scrollba
 }
 
 // GetPTYDisplayLines returns the current screen state from the virtual terminal.
-// AppendRaw 内で更新された displayCache を返すためブロックしない。
+// ブロックしない。
 func (s *Session) GetPTYDisplayLines() []string {
 	if p := s.displayCache.Load(); p != nil {
 		return *p

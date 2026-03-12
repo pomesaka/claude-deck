@@ -110,9 +110,16 @@ type Session struct {
 	managed  bool         // Manager が PTY プロセスを管理中かどうか
 	emulator *vt.Emulator // PTY 出力を解釈する仮想端末 (charmbracelet/x/vt)
 
-	// displayCache は GetPTYDisplayLines の最新結果。AppendRaw 内の emulator.Write() 完了後に更新。
-	// Bubble Tea イベントループが emuMu を待たずに即読みできるようにするためのキャッシュ。
+	// displayCache は emulator.Write() 完了後に毎回更新される表示キャッシュ。
 	displayCache atomic.Pointer[[]string]
+
+	// cursorYHighWatermark は直近 200ms に観測した最大 cursorY を保持する。
+	// Ink は再描画時にカーソルを上に移動してから描画するため、描画途中に cursorY が
+	// 一時的に下がり表示行数が縮小してちらつく。watermark で縮小を 200ms 抑制することで
+	// フリーム描画中のちらつきを防ぐ。
+	// cursorYHighWatermarkNano は watermark を最後に更新した時刻（UnixNano）。
+	cursorYHighWatermark     atomic.Int32
+	cursorYHighWatermarkNano atomic.Int64
 
 	// displayCursorX/Y はエミュレータカーソルの表示座標（displayCache 内の行番号と列番号）。
 	// TUI でカーソルを正確に配置するために refreshDisplayCacheLocked 内で更新される。

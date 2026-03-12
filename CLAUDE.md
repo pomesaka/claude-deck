@@ -149,6 +149,21 @@ workspace_symlinks = [".env", ".env.local", "secrets/"]
 
 関連ファイル: `config.go` (`ProjectConfig`, `WorkspaceSymlinks()`), `jj.go` (`createExtraSymlink`)
 
+### Claude Code への追加ディレクトリ設定
+
+`config.toml` の `[projects]` セクションで `add_dirs` を指定すると、セッション起動時に `--add-dir` フラグとして渡される。
+
+```toml
+[projects."/Users/foo/myrepo"]
+add_dirs = ["../shared-lib", "/absolute/path/to/docs"]
+```
+
+- 相対パスはリポジトリルートからの相対パスとして解決
+- 絶対パスはそのまま使用
+- Create / Resume / Fork の全セッション起動パターンで適用
+
+関連ファイル: `config.go` (`ProjectConfig`, `ResolvedAddDirs()`), `session/manager.go` (`buildAddDirArgs`)
+
 ### 上限値（デフォルト値、config.toml の `[session]` で変更可）
 
 - セッション数: 30（LRU で古いものを prune）

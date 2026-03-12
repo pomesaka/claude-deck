@@ -98,6 +98,7 @@ func run() error {
 		DiscoveryDays:         cfg.Session.DiscoveryDays,
 		RefreshInterval:       refreshInterval,
 		WorkspaceSymlinksFunc: cfg.WorkspaceSymlinks,
+		AddDirsFunc:           cfg.ResolvedAddDirs,
 	})
 
 	// Load session metadata from store (fast: local JSON files only)
