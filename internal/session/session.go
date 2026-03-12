@@ -1,7 +1,9 @@
 package session
 
 import (
+	"bytes"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/x/vt"
@@ -69,8 +71,13 @@ func (t TokenUsage) TotalTokens() int {
 //     WorkspaceName, ClaudeSessionID, Status, FinishedAt, PID
 //   - JSONL (Claude Code primary): Prompt, PermissionMode, StartedAt, TokenUsage
 //   - Runtime only: LogLines, CurrentTool
+//
+// Lock ordering (ABBA デッドロック防止): emuMu → mu の順で取得すること。
+//   - emuMu: emulator 読み書き専用（Write / String / Render / CursorPosition）
+//   - mu:    それ以外の全フィールド読み書き
 type Session struct {
-	mu sync.RWMutex
+	mu    sync.RWMutex
+	emuMu sync.Mutex // emulator 専用。mu より先に取得すること
 
 	// --- Persisted in store (claude-deck metadata) ---
 	ID               string     `json:"id"`
@@ -102,6 +109,10 @@ type Session struct {
 	ErrorMessage    string           `json:"-"` // パーサーが検知したエラー行
 	managed  bool         // Manager が PTY プロセスを管理中かどうか
 	emulator *vt.Emulator // PTY 出力を解釈する仮想端末 (charmbracelet/x/vt)
+
+	// displayCache は GetPTYDisplayLines の最新結果。AppendRaw 内の emulator.Write() 完了後に更新。
+	// Bubble Tea イベントループが emuMu を待たずに即読みできるようにするためのキャッシュ。
+	displayCache atomic.Pointer[[]string]
 
 	// lastSpinnerTime は最後に Braille スピナーを検出した時刻。
 	// Manager の定期チェックで Running → Idle 自動遷移のタイムアウト判定に使う。
@@ -207,14 +218,62 @@ func (s *Session) AddTokens(input, output int) {
 	s.TokenUsage.OutputTokens += output
 }
 
-// AppendLog adds a line to the session log.
-// Cursor-up シーケンスが含まれる場合、指定行数分の前の行を除去して
-// LogLines が端末の表示状態を反映するようにする。
-// これにより Bubble Tea のスピナー再描画がログに蓄積されるのを防ぐ。
-func (s *Session) AppendLog(line string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// AppendRaw feeds a raw PTY output chunk to the virtual terminal emulator and
+// appends any newline-delimited lines to LogLines.
+// bufio.Scanner が除去していた \n を復元する必要はなく、生バイトをそのまま渡す。
+// これにより \n なしで画面更新するインタラクティブな TUI も正しく処理できる。
+//
+// lock 順: emuMu（emulator.Write） → mu（LogLines 更新）
+// emulator.Write 中に ScrollOut/Title コールバックが mu.Lock() を取るため、
+// mu.Lock() を保持したまま emulator.Write を呼ぶと Snapshot/GetPTYDisplayLines と
+// デッドロックする。
+func (s *Session) AppendRaw(data []byte) {
+	// Step 1: emulator に生バイトを流す（emuMu 保持、mu は未保持）
+	// emulator.Write() 完了後に displayCache を更新する。これにより GetPTYDisplayLines が
+	// emuMu を待たずにキャッシュを返せるため、Bubble Tea イベントループのブロックを防ぐ。
+	s.emuMu.Lock()
+	if s.emulator != nil {
+		debuglog.Printf("[session:%s] emulator.Write %d bytes hex=%x", s.ID, len(data), data)
+		s.emulator.Write(data) //nolint:errcheck
+		debuglog.Printf("[session:%s] emulator.Write done", s.ID)
+		s.refreshDisplayCacheLocked()
+	}
+	s.emuMu.Unlock()
 
+	// Step 2: LogLines を更新（mu 保持）
+	s.mu.Lock()
+	limit := s.maxLogLines
+	if limit <= 0 {
+		limit = 1000
+	}
+	for _, part := range bytes.Split(data, []byte{'\n'}) {
+		line := string(bytes.TrimRight(part, "\r"))
+		if line != "" {
+			s.LogLines = append(s.LogLines, line)
+		}
+	}
+	if len(s.LogLines) > limit {
+		newLines := make([]string, limit)
+		copy(newLines, s.LogLines[len(s.LogLines)-limit:])
+		s.LogLines = newLines
+	}
+	s.mu.Unlock()
+}
+
+// AppendLog adds a single line to the session log and feeds it to the emulator.
+// テスト互換性のため残す。プロダクションコードは AppendRaw を使う。
+// lock 順は AppendRaw と同じ: emuMu → mu。
+func (s *Session) AppendLog(line string) {
+	// Step 1: emulator に書く（emuMu 保持）
+	s.emuMu.Lock()
+	if s.emulator != nil {
+		s.emulator.Write([]byte(line + "\n")) //nolint:errcheck
+		s.refreshDisplayCacheLocked()
+	}
+	s.emuMu.Unlock()
+
+	// Step 2: LogLines を更新（mu 保持）
+	s.mu.Lock()
 	s.LogLines = append(s.LogLines, line)
 	limit := s.maxLogLines
 	if limit <= 0 {
@@ -225,13 +284,7 @@ func (s *Session) AppendLog(line string) {
 		copy(newLines, s.LogLines[len(s.LogLines)-limit:])
 		s.LogLines = newLines
 	}
-	debuglog.Printf("[session:%s] AppendLog: %q", s.ID, line)
-
-	// 仮想端末に生データを流す（Scanner が除去した \n を復元）
-	if s.emulator != nil {
-		s.emulator.Write([]byte(line + "\n")) //nolint:errcheck
-	}
-
+	s.mu.Unlock()
 }
 
 // GetLogs returns a copy of the PTY log lines (used for running sessions).

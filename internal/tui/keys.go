@@ -241,13 +241,17 @@ func (m *Model) handleDashboardKey(msg tea.KeyPressMsg) tea.Cmd {
 
 	case "enter", "i":
 		// 生きた PTY プロセスあり → 詳細ペインに切り替えて PTY 直接入力モード開始
+		debuglog.Printf("[key:%s] selectedID=%q hasActiveProcess=%v", key, m.selectedID, m.selectedID != "" && m.manager.HasActiveProcess(m.selectedID))
 		if m.selectedID != "" && m.manager.HasActiveProcess(m.selectedID) {
+			debuglog.Printf("[key:%s] activating PTY input mode", key)
 			m.focusDetail = true
 			m.ptyInputActive = true
 			m.syncLogViewport()
+			debuglog.Printf("[key:%s] PTY input mode activated", key)
 			return nil
 		}
 		if key == "enter" {
+			debuglog.Printf("[key:enter] no active process, calling resumeSelected")
 			return m.resumeSelected()
 		}
 

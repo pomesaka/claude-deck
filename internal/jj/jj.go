@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/pomesaka/claude-deck/internal/debuglog"
 )
 
 // Command is the jj executable path. Override from config before use.
@@ -17,17 +19,21 @@ var Command = "jj"
 // gh 等の git 依存ツールが動作するようにする。
 // extraSymlinks にはリポジトリルートからの相対パスを指定し、ワークスペースに symlink を作成する。
 func CreateWorkspaceAt(repoPath, name, wsPath string, extraSymlinks []string) error {
+	debuglog.Printf("[jj.CreateWorkspaceAt] repoPath=%q name=%q wsPath=%q", repoPath, name, wsPath)
 	if err := os.MkdirAll(filepath.Dir(wsPath), 0o755); err != nil {
 		return fmt.Errorf("creating workspace parent dir: %w", err)
 	}
 
+	debuglog.Printf("[jj.CreateWorkspaceAt] running: jj workspace add --name %s %s", name, wsPath)
 	cmd := exec.Command(Command, "workspace", "add", "--name", name, wsPath)
 	cmd.Dir = repoPath
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		debuglog.Printf("[jj.CreateWorkspaceAt] jj workspace add failed: %v output=%q", err, string(output))
 		return fmt.Errorf("jj workspace add: %s: %w", strings.TrimSpace(string(output)), err)
 	}
+	debuglog.Printf("[jj.CreateWorkspaceAt] jj workspace add done")
 
 	// colocated リポジトリなら .git への symlink を作成
 	gitDir := filepath.Join(repoPath, ".git")
@@ -49,15 +55,20 @@ func CreateWorkspaceAt(repoPath, name, wsPath string, extraSymlinks []string) er
 
 	// リモートから最新を取得し、trunk 上に新 revision を作成
 	// fetch 失敗はネットワーク不通等で起こりうるので無視して続行
+	debuglog.Printf("[jj.CreateWorkspaceAt] running: jj git fetch (may hang on network)")
 	fetch := exec.Command(Command, "git", "fetch")
 	fetch.Dir = wsPath
-	_ = fetch.Run()
+	fetchOut, fetchErr := fetch.CombinedOutput()
+	debuglog.Printf("[jj.CreateWorkspaceAt] jj git fetch done: err=%v output=%q", fetchErr, strings.TrimSpace(string(fetchOut)))
 
+	debuglog.Printf("[jj.CreateWorkspaceAt] running: jj new trunk()")
 	newCmd := exec.Command(Command, "new", "trunk()")
 	newCmd.Dir = wsPath
 	if output, err := newCmd.CombinedOutput(); err != nil {
+		debuglog.Printf("[jj.CreateWorkspaceAt] jj new trunk() failed: %v output=%q", err, string(output))
 		return fmt.Errorf("jj new trunk(): %s: %w", strings.TrimSpace(string(output)), err)
 	}
+	debuglog.Printf("[jj.CreateWorkspaceAt] jj new trunk() done")
 
 	return nil
 }
@@ -97,16 +108,19 @@ func createExtraSymlink(repoPath, wsPath, rel string) error {
 // GetNearestBookmark returns the local bookmark name of the closest ancestor
 // (including @) that has a bookmark. Returns empty string if none found.
 func GetNearestBookmark(dir string) (string, error) {
+	debuglog.Printf("[jj.GetNearestBookmark] dir=%q", dir)
 	cmd := exec.Command(Command, "log", "--no-graph", "--color=never",
 		"-r", "latest(::@ & bookmarks())",
 		"-T", "bookmarks")
 	cmd.Dir = dir
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", err
+		debuglog.Printf("[jj.GetNearestBookmark] failed: %v output=%q", err, strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 	}
 
 	raw := strings.TrimSpace(string(output))
+	debuglog.Printf("[jj.GetNearestBookmark] raw=%q", raw)
 	if raw == "" {
 		return "", nil
 	}

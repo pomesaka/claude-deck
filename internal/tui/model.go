@@ -229,6 +229,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncLogViewport()
 
 	case metadataTickMsg:
+		debuglog.Printf("[tui] metadataTickMsg (event loop alive)")
 		go m.manager.RefreshFromJSONL()
 		cmds = append(cmds, metadataTickCmd(m.refreshInterval))
 
@@ -267,6 +268,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, clearStatusCmd())
 
 	case ptyInputSentMsg:
+		debuglog.Printf("[tui] ptyInputSentMsg err=%v", msg.err)
 		if msg.err != nil {
 			m.statusMsg = "PTY送信エラー: " + msg.err.Error()
 			cmds = append(cmds, clearStatusCmd())

@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/session"
 )
 
@@ -604,6 +605,7 @@ func (m *Model) syncLogViewport() {
 	if m.width == 0 {
 		return
 	}
+	debuglog.Printf("[syncLogViewport] selectedID=%q ptyInputActive=%v focusDetail=%v", m.selectedID, m.ptyInputActive, m.focusDetail)
 	innerWidth, logHeight, ptyHeight := m.detailPaneMetrics()
 
 	m.logViewport.SetWidth(innerWidth)
@@ -634,7 +636,9 @@ func (m *Model) syncLogViewport() {
 
 	if ptyHeight > 0 {
 		// ── アクティブプロセス: PTY 全画面 ──
+		debuglog.Printf("[syncLogViewport] calling GetPTYDisplayLines")
 		lines := sess.GetPTYDisplayLines()
+		debuglog.Printf("[syncLogViewport] GetPTYDisplayLines returned %d lines", len(lines))
 		if len(lines) > 0 {
 			m.ptyViewport.SetContent(strings.Join(lines, "\n"))
 		} else {

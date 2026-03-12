@@ -1,6 +1,7 @@
 package session
 
 import (
+	"io"
 	"strings"
 	"unicode/utf8"
 
@@ -23,25 +24,31 @@ func newEmulatorWithCallbacks(s *Session, cols, rows int) *vt.Emulator {
 		rows = defaultPTYRows
 	}
 	em := vt.NewEmulator(cols, rows)
+
+	// エミュレータは DA1/DA2 等のターミナルクエリを受け取ると e.pw（io.Pipe 書き込み端）へ
+	// 応答を書く。claude-deck はこの応答を使わないが、誰も e.pr を読まないと
+	// io.Pipe が unbuffered なため Write() が即座にブロックする。
+	// goroutine で Read() を捨て続けることでブロックを防ぐ。
+	go io.Copy(io.Discard, em) //nolint:errcheck
+
 	em.SetCallbacks(vt.Callbacks{
 		Title: func(title string) {
-			// AppendLog → emulator.Write → callback の呼び出しチェーンで
-			// s.mu.Lock() が既に保持されているため直接代入で安全
-
+			// emuMu 保持中に呼ばれる。lock 順 (emuMu → mu) を守り mu を自前で取る。
 			// 行分割で OSC シーケンスが途中切断されると不完全な UTF-8 が渡される。
 			// 不正な UTF-8 は無視して前回のタイトルを維持する。
 			if !utf8.ValidString(title) {
 				debuglog.Printf("[session:%s] OSC title invalid UTF-8, ignoring: %x", s.ID, title)
 				return
 			}
-
 			clean := stripSpinnerPrefix(title)
 			debuglog.Printf("[session:%s] OSC title raw=%q clean=%q", s.ID, title, clean)
+			s.mu.Lock()
 			s.TerminalTitle = clean
+			s.mu.Unlock()
 		},
 		ScrollOut: func(plain, styled string) {
-			// AppendLog → emulator.Write → ScrollUp → callback の呼び出しチェーンで
-			// s.mu.Lock() が既に保持されているため直接代入で安全
+			// emuMu 保持中に呼ばれる。lock 順 (emuMu → mu) を守り mu を自前で取る。
+			s.mu.Lock()
 			limit := s.maxScrollback
 			if limit <= 0 {
 				limit = 2000
@@ -58,37 +65,42 @@ func newEmulatorWithCallbacks(s *Session, cols, rows int) *vt.Emulator {
 				copy(newStyled, s.scrollbackStyled[drop:])
 				s.scrollbackStyled = newStyled
 			}
+			s.mu.Unlock()
 		},
 	})
 	return em
 }
 
-// GetPTYDisplayLines returns the current screen state from the virtual terminal.
-// charmbracelet/x/vt が ANSI エスケープシーケンスを完全に解釈し、
-// bubbletea ベースの TUI 出力を読みやすいスクリーンスナップショットとして返す。
-// Claude Code の入力エリアやステータスバーも含めて全画面を返す。
-// raw PTY 入力モードではユーザーが直接 Claude Code の UI を操作するため、
-// 下部クロームのフィルタリングは行わない。
-func (s *Session) GetPTYDisplayLines() []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.emulator == nil {
-		return nil
-	}
+// refreshDisplayCacheLocked は emuMu を保持した状態で呼ぶ。
+// エミュレータのスナップショットを取り、displayCache を更新する。
+// lock 順: emuMu 保持中に mu.RLock を取得（emuMu → mu の順で正しい）。
+func (s *Session) refreshDisplayCacheLocked() {
 	plain := s.emulator.String()
 	styled := s.emulator.Render()
+	cursorY := s.emulator.CursorPosition().Y
+
+	// mu.RLock で scrollback/title を読む（emuMu は保持中、lock 順: emuMu → mu）
+	s.mu.RLock()
+	title := s.TerminalTitle
+	scrollbackStyled := s.scrollbackStyled
+	s.mu.RUnlock()
+
+	lines := buildDisplayLines(plain, styled, cursorY, title, scrollbackStyled, s.ID)
+	s.displayCache.Store(&lines)
+}
+
+// buildDisplayLines はエミュレータのスナップショットからディスプレイ行を構築する。
+// ロックを取らない純粋関数。refreshDisplayCacheLocked から呼ぶ。
+func buildDisplayLines(plain, styled string, cursorY int, title string, scrollbackStyled []string, sessionID string) []string {
 	if plain == "" {
 		return nil
 	}
 
-	// カーソル Y 座標（0-indexed）を取得。Ink が最後に描画した行がカーソル位置なので、
-	// それより下はリドロー前の残像であり表示すべきでない。
-	cursorY := s.emulator.CursorPosition().Y
-
 	plainLines := strings.Split(plain, "\n")
 	styledLines := strings.Split(styled, "\n")
 
-	// カーソル行より下を切り捨て（残像の根本除去）
+	// カーソル Y 座標（0-indexed）を取得。Ink が最後に描画した行がカーソル位置なので、
+	// それより下はリドロー前の残像であり表示すべきでない。
 	limit := cursorY + 1
 	if limit < len(plainLines) {
 		plainLines = plainLines[:limit]
@@ -113,7 +125,7 @@ func (s *Session) GetPTYDisplayLines() []string {
 	// さらに Ink のインクリメンタルレンダラは行全体を消去せず先頭数文字だけ
 	// 上書きするため、タイトルが部分欠損して残る（例: "Weather Inquiry" → "   ather Inquiry"）。
 	// 双方向の部分文字列マッチで、完全一致・部分欠損の両方を捕捉する。
-	if title := s.TerminalTitle; title != "" {
+	if title != "" {
 		const scanRange = 8
 		scanStart := max(0, len(plainLines)-scanRange)
 		for i := len(plainLines) - 1; i >= scanStart; i-- {
@@ -125,7 +137,7 @@ func (s *Session) GetPTYDisplayLines() []string {
 			// 逆方向: タイトルが行を含む（Ink の部分上書きで先頭欠損したケース）
 			// 逆方向は誤マッチ防止のため最低 4 文字を要求
 			if strings.Contains(line, title) || (len(line) >= 4 && strings.Contains(title, line)) {
-				debuglog.Printf("[session:%s] title filter: removed line[%d] %q (title=%q)", s.ID, i, line, title)
+				debuglog.Printf("[session:%s] title filter: removed line[%d] %q (title=%q)", sessionID, i, line, title)
 				plainLines = append(plainLines[:i], plainLines[i+1:]...)
 				if i < len(styledLines) {
 					styledLines = append(styledLines[:i], styledLines[i+1:]...)
@@ -143,15 +155,24 @@ func (s *Session) GetPTYDisplayLines() []string {
 
 	// スクロールバック（画面上端から消えた行）+ 現画面を結合
 	var result []string
-	if len(s.scrollbackStyled) > 0 {
-		result = make([]string, 0, len(s.scrollbackStyled)+len(styledLines))
-		result = append(result, s.scrollbackStyled...)
+	if len(scrollbackStyled) > 0 {
+		result = make([]string, 0, len(scrollbackStyled)+len(styledLines))
+		result = append(result, scrollbackStyled...)
 		result = append(result, styledLines...)
 	} else {
 		result = styledLines
 	}
-	debuglog.Printf("[session:%s] GetPTYDisplayLines: %d lines (%d scrollback + %d screen, cursorY=%d)",
-		s.ID, len(result), len(s.scrollbackStyled), len(styledLines), cursorY)
+	debuglog.Printf("[session:%s] buildDisplayLines: %d lines (%d scrollback + %d screen, cursorY=%d)",
+		sessionID, len(result), len(scrollbackStyled), len(styledLines), cursorY)
 	return result
+}
+
+// GetPTYDisplayLines returns the current screen state from the virtual terminal.
+// AppendRaw 内で更新された displayCache を返すためブロックしない。
+func (s *Session) GetPTYDisplayLines() []string {
+	if p := s.displayCache.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 

@@ -153,6 +153,7 @@ func (m *Manager) StartSpinnerIdleLoop(ctx context.Context) {
 // repoPath は .jj のあるリポジトリルート、workingDir は claude を起動するディレクトリ（サブプロジェクト対応）。
 // withWorkspace が true なら jj workspace を作成して隔離環境で起動する。
 func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir string, withWorkspace bool, cols, rows int) (*Session, error) {
+	debuglog.Printf("[CreateSession] repoPath=%q workingDir=%q withWorkspace=%v cols=%d rows=%d", repoPath, workingDir, withWorkspace, cols, rows)
 	repoName := filepath.Base(repoPath)
 	sess := NewSession(repoPath, repoName)
 	sess.maxLogLines = m.config.MaxLogLines
@@ -171,9 +172,11 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 		if m.config.WorkspaceSymlinksFunc != nil {
 			extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
 		}
+		debuglog.Printf("[CreateSession] creating jj workspace name=%q path=%q", wsName, wsPath)
 		if err := jj.CreateWorkspaceAt(repoPath, wsName, wsPath, extraSymlinks); err != nil {
 			return nil, fmt.Errorf("creating jj workspace: %w", err)
 		}
+		debuglog.Printf("[CreateSession] jj workspace created")
 		sess.WorkspaceName = wsName
 
 		// サブプロジェクト対応: workingDir がリポジトリルートと異なる場合、
@@ -195,6 +198,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 		}
 	}
 
+	debuglog.Printf("[CreateSession] starting pty workDir=%q", actualWorkDir)
 	proc, err := pty.Start(ctx, pty.StartOptions{
 		WorkDir:        actualWorkDir,
 		Prompt:         "",
@@ -203,15 +207,17 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 		Env:            []string{"CLAUDE_DECK_SESSION_ID=" + sess.ID},
 		Cols:           uint16(cols),
 		Rows:           uint16(rows),
-	}, func(line string) {
-		m.handleOutput(sess, line)
+	}, func(data []byte) {
+		m.handleOutput(sess, data)
 	})
 	if err != nil {
+		debuglog.Printf("[CreateSession] pty.Start failed: %v", err)
 		if withWorkspace {
 			_ = jj.ForgetWorkspace(repoPath, sess.Name)
 		}
 		return nil, fmt.Errorf("starting claude code: %w", err)
 	}
+	debuglog.Printf("[CreateSession] pty started pid=%d", proc.PID())
 
 	sess.mu.Lock()
 	sess.PID = proc.PID()
@@ -221,10 +227,14 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	sess.mu.Unlock()
 
 	// ワークスペースの最近接ブックマークをセッションタイトルに設定
+	debuglog.Printf("[CreateSession] getting nearest bookmark for %q", actualWorkDir)
 	if bookmark, err := jj.GetNearestBookmark(actualWorkDir); err == nil && bookmark != "" {
+		debuglog.Printf("[CreateSession] bookmark=%q", bookmark)
 		sess.mu.Lock()
 		sess.BookmarkName = bookmark
 		sess.mu.Unlock()
+	} else {
+		debuglog.Printf("[CreateSession] GetNearestBookmark: bookmark=%q err=%v", bookmark, err)
 	}
 
 	m.mu.Lock()
@@ -241,12 +251,12 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	return sess, nil
 }
 
-// handleOutput processes a line of output from a session (monitor-only).
+// handleOutput processes a raw PTY output chunk from a session (monitor-only).
 // PTY 出力中の Braille スピナー文字を検知して Running に遷移する。
-func (m *Manager) handleOutput(sess *Session, line string) {
-	sess.AppendLog(line)
+func (m *Manager) handleOutput(sess *Session, data []byte) {
+	sess.AppendRaw(data)
 
-	if containsBrailleSpinner(line) {
+	if containsBrailleSpinner(string(data)) {
 		sess.touchSpinner()
 		status := sess.GetStatus()
 		if status != StatusRunning && status != StatusCompleted && status != StatusError {
@@ -261,7 +271,9 @@ func (m *Manager) handleOutput(sess *Session, line string) {
 // ワークスペースはセッション削除時まで保持する（再開時に必要）。
 // /clear 後にメッセージ未送信で終了した場合、ClaudeSessionID を旧 ID にフォールバックする。
 func (m *Manager) watchProcess(sess *Session, proc *pty.Process) {
+	debuglog.Printf("[watchProcess] waiting for process to exit session=%s pid=%d", sess.ID, proc.PID())
 	<-proc.Done()
+	debuglog.Printf("[watchProcess] process exited session=%s", sess.ID)
 
 	sess.SetManaged(false)
 
@@ -300,7 +312,9 @@ func (m *Manager) watchProcess(sess *Session, proc *pty.Process) {
 
 // ResumeSession resumes a completed Claude Code session using --resume.
 func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, rows int) error {
+	debuglog.Printf("[ResumeSession] sessionID=%s cols=%d rows=%d", sessionID, cols, rows)
 	if m.HasActiveProcess(sessionID) {
+		debuglog.Printf("[ResumeSession] already has active process")
 		return fmt.Errorf("session %s already has an active process", sessionID)
 	}
 
@@ -308,6 +322,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	sess, ok := m.sessions[sessionID]
 	m.mu.RUnlock()
 	if !ok {
+		debuglog.Printf("[ResumeSession] session not found")
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
@@ -316,6 +331,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	wsPath := sess.WorkspacePath
 	repoPath := sess.RepoPath
 	sess.mu.RUnlock()
+	debuglog.Printf("[ResumeSession] csID=%q wsPath=%q repoPath=%q", csID, wsPath, repoPath)
 
 	if csID == "" {
 		return fmt.Errorf("no Claude Code session ID available for resume")
@@ -329,8 +345,10 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	if workDir == "" {
 		return fmt.Errorf("no work directory available for session %s", sessionID)
 	}
+	debuglog.Printf("[ResumeSession] workDir=%q", workDir)
 
 	if _, err := os.Stat(workDir); os.IsNotExist(err) {
+		debuglog.Printf("[ResumeSession] workDir does not exist: %s", workDir)
 		sess.SetErrorStatus(fmt.Sprintf("ディレクトリが見つかりません: %s", workDir))
 		m.persist(sess)
 		return fmt.Errorf("作業ディレクトリが見つかりません: %s", workDir)
@@ -339,18 +357,21 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	// JSONL ストリーミングは継続する。PTY は入力・プロセス管理用で、
 	// 表示は JSONL 構造化ログを優先するため。
 
+	debuglog.Printf("[ResumeSession] calling pty.Start")
 	proc, err := pty.Start(ctx, pty.StartOptions{
 		WorkDir:         workDir,
 		ResumeSessionID: csID,
 		Env:             []string{"CLAUDE_DECK_SESSION_ID=" + sessionID},
 		Cols:            uint16(cols),
 		Rows:            uint16(rows),
-	}, func(line string) {
-		m.handleOutput(sess, line)
+	}, func(data []byte) {
+		m.handleOutput(sess, data)
 	})
 	if err != nil {
+		debuglog.Printf("[ResumeSession] pty.Start failed: %v", err)
 		return fmt.Errorf("resuming claude code: %w", err)
 	}
+	debuglog.Printf("[ResumeSession] pty started pid=%d", proc.PID())
 
 	sess.mu.Lock()
 	sess.setStatusLocked(StatusIdle)
@@ -364,6 +385,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	// JSONLLogEntries は上部ログビューポートで表示に使用し続ける。
 	// PTY 出力は下部の専用ビューポートに表示される。
 	sess.mu.Unlock()
+	debuglog.Printf("[ResumeSession] session state updated")
 
 	m.mu.Lock()
 	m.processes[sessionID] = proc
@@ -371,6 +393,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 
 	m.persist(sess)
 	m.notifyChange()
+	debuglog.Printf("[ResumeSession] done, watching process")
 
 	go m.watchProcess(sess, proc)
 
@@ -436,8 +459,8 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols,
 		Env:             []string{"CLAUDE_DECK_SESSION_ID=" + sess.ID},
 		Cols:            uint16(cols),
 		Rows:            uint16(rows),
-	}, func(line string) {
-		m.handleOutput(sess, line)
+	}, func(data []byte) {
+		m.handleOutput(sess, data)
 	})
 	if err != nil {
 		_ = jj.ForgetWorkspace(repoPath, wsName)
@@ -647,11 +670,13 @@ func (m *Manager) ResizeSession(sessionID string, cols, rows int) {
 	}
 
 	if sess := m.GetSession(sessionID); sess != nil {
-		sess.mu.Lock()
+		// emuMu を使う。mu ではなく emuMu がエミュレータ操作専用ロック。
+		// mu を使うと AppendRaw（emuMu）と並行実行されデータレースになる。
+		sess.emuMu.Lock()
 		if sess.emulator != nil {
 			sess.emulator.Resize(cols, rows)
 		}
-		sess.mu.Unlock()
+		sess.emuMu.Unlock()
 	}
 }
 
