@@ -23,6 +23,14 @@ func newEmulatorWithCallbacks(s *Session, cols, rows int) *vt.Emulator {
 	if rows <= 0 {
 		rows = defaultPTYRows
 	}
+
+	// 新しい emulator を作るたびに stableCursor をリセットする。
+	// ResumeSession/ForkSession では既存 Session に新 emulator を差し替えるため、
+	// 前回の確定カーソル位置が残っていると初回フレーム前に誤った位置を返してしまう。
+	s.stableCursorReady.Store(false)
+	s.stableCursorX.Store(0)
+	s.stableCursorScreenY.Store(0)
+
 	em := vt.NewEmulator(cols, rows)
 
 	// エミュレータは DA1/DA2 等のターミナルクエリを受け取ると e.pw（io.Pipe 書き込み端）へ
@@ -67,6 +75,19 @@ func newEmulatorWithCallbacks(s *Session, cols, rows int) *vt.Emulator {
 			}
 			s.mu.Unlock()
 		},
+		CursorVisibility: func(visible bool) {
+			// \033[?25h（カーソル表示）= Ink の描画フレーム終了を示す。
+			// この時点のカーソル位置が確定した入力位置（例: "> " の直後）。
+			// emuMu 保持中に呼ばれる。em はクロージャでキャプチャ済み。
+			if !visible {
+				return
+			}
+			pos := em.CursorPosition()
+			s.stableCursorX.Store(int32(pos.X))
+			s.stableCursorScreenY.Store(int32(pos.Y))
+			s.stableCursorReady.Store(true)
+			debuglog.Printf("[session:%s] stableCursor: x=%d screenY=%d", s.ID, pos.X, pos.Y)
+		},
 	})
 	return em
 }
@@ -77,7 +98,8 @@ func newEmulatorWithCallbacks(s *Session, cols, rows int) *vt.Emulator {
 func (s *Session) refreshDisplayCacheLocked() {
 	plain := s.emulator.String()
 	styled := s.emulator.Render()
-	cursorY := s.emulator.CursorPosition().Y
+	cursor := s.emulator.CursorPosition()
+	cursorY := cursor.Y
 
 	// mu.RLock で scrollback/title を読む（emuMu は保持中、lock 順: emuMu → mu）
 	s.mu.RLock()
@@ -87,6 +109,13 @@ func (s *Session) refreshDisplayCacheLocked() {
 
 	lines := buildDisplayLines(plain, styled, cursorY, title, scrollbackStyled, s.ID)
 	s.displayCache.Store(&lines)
+
+	// カーソルの表示座標をキャッシュ（TUI でカーソルを正確に配置するため）。
+	// buildDisplayLines は scrollback + screen を結合し cursorY+1 行で切り詰めた後、
+	// 末尾の空行とタイトル行を除去する。除去後の最終行がカーソル行に相当する。
+	displayRow := int32(max(len(lines)-1, 0))
+	s.displayCursorX.Store(int32(cursor.X))
+	s.displayCursorY.Store(displayRow)
 }
 
 // buildDisplayLines はエミュレータのスナップショットからディスプレイ行を構築する。
@@ -174,5 +203,22 @@ func (s *Session) GetPTYDisplayLines() []string {
 		return *p
 	}
 	return nil
+}
+
+// GetPTYCursorPosition returns the cursor's position within the display lines.
+// X はターミナル列（0-indexed）、Y は GetPTYDisplayLines() 内の行インデックス。
+//
+// stableCursorReady が true の場合（\033[?25h を受信済み）は確定カーソル位置を返す。
+// stableCursorScreenY（スクリーン内行）に現在の scrollback 長を加算して display 行を算出する。
+// それ以前は refreshDisplayCacheLocked からのキャッシュをフォールバックとして返す。
+func (s *Session) GetPTYCursorPosition() (x, y int) {
+	if s.stableCursorReady.Load() {
+		screenY := int(s.stableCursorScreenY.Load())
+		s.mu.RLock()
+		scrollbackLen := len(s.scrollbackStyled)
+		s.mu.RUnlock()
+		return int(s.stableCursorX.Load()), scrollbackLen + screenY
+	}
+	return int(s.displayCursorX.Load()), int(s.displayCursorY.Load())
 }
 

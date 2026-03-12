@@ -114,6 +114,19 @@ type Session struct {
 	// Bubble Tea イベントループが emuMu を待たずに即読みできるようにするためのキャッシュ。
 	displayCache atomic.Pointer[[]string]
 
+	// displayCursorX/Y はエミュレータカーソルの表示座標（displayCache 内の行番号と列番号）。
+	// TUI でカーソルを正確に配置するために refreshDisplayCacheLocked 内で更新される。
+	// stableCursorReady が true の場合は stableCursor* が優先される。
+	displayCursorX atomic.Int32
+	displayCursorY atomic.Int32
+
+	// stableCursor* は \033[?25h（カーソル表示）コールバックで設定される確定カーソル位置。
+	// Ink の描画フレーム終了時に発火するため、refreshDisplayCacheLocked より精度が高い。
+	// stableCursorScreenY はエミュレータのスクリーン行（scrollback を含まない 0-indexed）。
+	stableCursorX       atomic.Int32
+	stableCursorScreenY atomic.Int32
+	stableCursorReady   atomic.Bool
+
 	// lastSpinnerTime は最後に Braille スピナーを検出した時刻。
 	// Manager の定期チェックで Running → Idle 自動遷移のタイムアウト判定に使う。
 	lastSpinnerTime time.Time

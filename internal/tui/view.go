@@ -37,6 +37,34 @@ func (m Model) View() tea.View {
 	v := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, sections...))
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
+
+	// PTY 入力モード中はエミュレータのカーソル位置に TUI カーソルを配置する。
+	// これにより Ghostty のカーソルが Claude の入力行に正しく表示される。
+	if m.ptyInputActive && m.selectedID != "" && m.mode == viewDashboard {
+		if sess := m.manager.GetSession(m.selectedID); sess != nil && m.manager.HasActiveProcess(m.selectedID) {
+			cursorX, cursorDisplayRow := sess.GetPTYCursorPosition()
+			_, _, ptyHeight := m.detailPaneMetrics()
+			cursorViewportRow := cursorDisplayRow - m.ptyViewport.YOffset()
+			if cursorViewportRow >= 0 && cursorViewportRow < ptyHeight {
+				// レイアウト: header(1行) + detail枠top(1行) + viewport行
+				// 列: list幅 + ペイン間スペース(1) + detail枠left(1) + padding(1) + cursorX
+				const frameOverhead = 1
+				available := m.width - frameOverhead
+				listWidth := available * 35 / 100
+				if listWidth < 20 {
+					listWidth = 20
+				}
+				tuiCol := listWidth + 3 + cursorX
+				tuiRow := 2 + cursorViewportRow
+				debuglog.Printf("[cursor] cursorX=%d cursorDisplayRow=%d ptyViewportYOffset=%d cursorViewportRow=%d listWidth=%d → tuiCol=%d tuiRow=%d ptyHeight=%d",
+					cursorX, cursorDisplayRow, m.ptyViewport.YOffset(), cursorViewportRow, listWidth, tuiCol, tuiRow, ptyHeight)
+				c := tea.NewCursor(tuiCol, tuiRow)
+				c.Shape = tea.CursorBar
+				v.Cursor = c
+			}
+		}
+	}
+
 	return v
 }
 
