@@ -3,7 +3,6 @@ package session
 import (
 	"io"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/x/vt"
@@ -32,7 +31,6 @@ func newEmulatorWithCallbacks(s *Session, cols, rows int) *vt.Emulator {
 	s.stableCursorX.Store(0)
 	s.stableCursorScreenY.Store(0)
 	s.cursorYHighWatermark.Store(0)
-	s.cursorYHighWatermarkNano.Store(0)
 
 	em := vt.NewEmulator(cols, rows)
 
@@ -107,22 +105,13 @@ func (s *Session) refreshDisplayCacheLocked() {
 
 	// High-watermark: Ink は再描画時にカーソルを上に移動してから下に描画するため、
 	// 描画途中に cursorY が一時的に下がり表示行数が縮小してちらつく。
-	// watermark で 200ms の間 cursorY の縮小を抑制することでちらつきを防ぐ。
-	const decayNs = 200 * 1_000_000 // 200ms
-	now := time.Now().UnixNano()
-	prevHW := int(s.cursorYHighWatermark.Load())
-	prevTime := s.cursorYHighWatermarkNano.Load()
-	if cursorY >= prevHW {
-		// カーソルが高い位置にある（または同位置）→ watermark を更新
-		s.cursorYHighWatermark.Store(int32(cursorY))
-		s.cursorYHighWatermarkNano.Store(now)
-	} else if now-prevTime < decayNs {
-		// watermark 設定から 200ms 以内 → 縮小を抑制
+	// cursorY は単調増加のみ許可し、emulator リセット時（newEmulatorWithCallbacks）にのみリセット。
+	// 時間ベースの decay は不要: buildDisplayLines が trailing blank を除去するため、
+	// watermark が高い値を保持しても余分な空行は表示されない。
+	if prevHW := int(s.cursorYHighWatermark.Load()); cursorY < prevHW {
 		cursorY = prevHW
 	} else {
-		// 200ms 経過しても低いまま → 正当な縮小として受け入れ watermark を更新
 		s.cursorYHighWatermark.Store(int32(cursorY))
-		s.cursorYHighWatermarkNano.Store(now)
 	}
 
 	// mu.RLock で scrollback/title を読む（emuMu は保持中、lock 順: emuMu → mu）

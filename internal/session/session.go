@@ -113,13 +113,12 @@ type Session struct {
 	// displayCache は emulator.Write() 完了後に毎回更新される表示キャッシュ。
 	displayCache atomic.Pointer[[]string]
 
-	// cursorYHighWatermark は直近 200ms に観測した最大 cursorY を保持する。
-	// Ink は再描画時にカーソルを上に移動してから描画するため、描画途中に cursorY が
-	// 一時的に下がり表示行数が縮小してちらつく。watermark で縮小を 200ms 抑制することで
-	// フリーム描画中のちらつきを防ぐ。
-	// cursorYHighWatermarkNano は watermark を最後に更新した時刻（UnixNano）。
-	cursorYHighWatermark     atomic.Int32
-	cursorYHighWatermarkNano atomic.Int64
+	// cursorYHighWatermark は観測した cursorY の最大値を保持する単調増加カウンタ。
+	// Ink は再描画時にカーソルを上に移動してから下に描画するため、描画途中に cursorY が
+	// 一時的に下がり表示行数が縮小してちらつく。cursorY の縮小を常に抑制することで
+	// フレーム描画中のちらつきを防ぐ。emulator リセット時（newEmulatorWithCallbacks）のみ 0 に戻る。
+	// buildDisplayLines が trailing blank を除去するため、値が大きいままでも余分な空行は表示されない。
+	cursorYHighWatermark atomic.Int32
 
 	// displayCursorX/Y はエミュレータカーソルの表示座標（displayCache 内の行番号と列番号）。
 	// TUI でカーソルを正確に配置するために refreshDisplayCacheLocked 内で更新される。
