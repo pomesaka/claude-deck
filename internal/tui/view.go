@@ -71,28 +71,37 @@ func (m Model) View() tea.View {
 func (m Model) renderHeader() string {
 	title := headerStyle.Render("🎛  claude-deck")
 
-	var totalIn, totalOut int
-	var totalCost float64
 	var attentionCount int
 	for _, s := range m.sessions {
-		snap := s.Snapshot()
-		totalIn += snap.TokenUsage.InputTokens
-		totalOut += snap.TokenUsage.OutputTokens
-		totalCost += snap.TokenUsage.EstimatedCostUSD
-		if snap.Status.NeedsAttention() {
+		if s.Snapshot().Status.NeedsAttention() {
 			attentionCount++
 		}
 	}
 
-	infoStr := fmt.Sprintf("Sessions: %d  %s $%.2f", len(m.sessions), formatTokens(totalIn, totalOut), totalCost)
+	var infoStr string
+	cs := m.ccusageStatus
+	if m.config.CCUsage.Enabled && cs.BlockAvailable {
+		infoStr = fmt.Sprintf("Sessions: %d  %s $%.2f", len(m.sessions), formatCompact(cs.BlockTotalTokens), cs.BlockCostUSD)
+	} else {
+		infoStr = fmt.Sprintf("Sessions: %d", len(m.sessions))
+	}
 	info := tokenStyle.Render(infoStr)
 
 	var badge string
 	if attentionCount > 0 {
-		badge = statusApproveStyle.Render(fmt.Sprintf(" [%d 要手動介入 → Enter で再開]", attentionCount))
+		badge = statusApproveStyle.Render(fmt.Sprintf(" [%d asking...]", attentionCount))
 	}
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, title, "  ", info, badge)
+	var ccusage string
+	if m.config.CCUsage.Enabled {
+		ccusage = m.renderCCUsage()
+	}
+
+	right := lipgloss.JoinHorizontal(lipgloss.Top, info, badge)
+	if ccusage != "" {
+		right = lipgloss.JoinHorizontal(lipgloss.Top, right, "  ", ccusage)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, title, "  ", right)
 }
 
 func (m Model) renderMain() string {
@@ -477,6 +486,42 @@ func (m Model) renderFooter() string {
 
 	footer := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
 	return footerStyle.Render(footer)
+}
+
+const usageGaugeWidth = 10
+
+// renderCCUsage renders colored gauge bars for billing block and weekly usage.
+func (m Model) renderCCUsage() string {
+	s := m.ccusageStatus
+	var parts []string
+
+	// Current billing block (cyan)
+	if s.BlockAvailable {
+		parts = append(parts, renderUsageGauge("Blk", s.BlockPercent, "#06B6D4"))
+	}
+
+	// Weekly usage (yellow) — always shown as cost amount
+	if s.WeekAvailable {
+		weekStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
+		parts = append(parts, dimStyle.Render("Week ")+ weekStyle.Render(fmt.Sprintf("$%.2f", s.WeekCostUSD)))
+	}
+
+	return strings.Join(parts, "  ")
+}
+
+// renderUsageGauge renders a labeled gauge bar: `label ○○●●●●●●●● 80%`
+// used is 0–100 (usage percentage). filled dots represent consumed portion.
+func renderUsageGauge(label string, used float64, hexColor string) string {
+	if used < 0 {
+		used = 0
+	}
+	if used > 100 {
+		used = 100
+	}
+	filled := int(used/100*usageGaugeWidth + 0.5)
+	bar := strings.Repeat("●", filled) + strings.Repeat("○", usageGaugeWidth-filled)
+	gaugeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(hexColor))
+	return dimStyle.Render(label+" ") + gaugeStyle.Render(fmt.Sprintf("%s %.0f%%", bar, used))
 }
 
 func formatTimeCompact(snap session.Snapshot) string {

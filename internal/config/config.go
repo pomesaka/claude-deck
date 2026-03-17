@@ -18,8 +18,17 @@ type Config struct {
 	Commands   CommandsConfig            `toml:"commands"`
 	Session    SessionConfig             `toml:"session"`
 	Pricing    PricingConfig             `toml:"pricing"`
+	CCUsage    CCUsageConfig             `toml:"ccusage"`
 	Projects   map[string]ProjectConfig  `toml:"projects"`
 	DataDir    string                    `toml:"data_dir"`
+}
+
+// CCUsageConfig holds settings for ccusage-based limit display in the status line.
+type CCUsageConfig struct {
+	// Enabled controls whether ccusage is polled for status line display (default: true).
+	Enabled bool `toml:"enabled"`
+	// RefreshInterval is how often to poll ccusage (e.g. "30s", "1m"). Default: "30s".
+	RefreshInterval string `toml:"refresh_interval"`
 }
 
 // DiscoveryConfig holds settings for repository and project discovery.
@@ -182,6 +191,10 @@ func Default() *Config {
 			OutputPerMTok:     75.0,
 			CacheWritePerMTok: 18.75,
 			CacheReadPerMTok:  1.50,
+		},
+		CCUsage: CCUsageConfig{
+			Enabled:         true,
+			RefreshInterval: "30s",
 		},
 		DataDir: DefaultDataDir(),
 	}
