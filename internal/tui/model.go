@@ -10,10 +10,10 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/pomesaka/claude-deck/internal/ccusage"
 	"github.com/pomesaka/claude-deck/internal/config"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/ghostty"
+	"github.com/pomesaka/claude-deck/internal/ratelimits"
 	"github.com/pomesaka/claude-deck/internal/session"
 )
 
@@ -76,9 +76,8 @@ type Model struct {
 
 	quitting bool
 
-	// ccusage status line data
-	ccusageStatus          ccusage.Status
-	ccusageRefreshInterval time.Duration
+	// rate limits data from Claude Code statusline (Pro/Max subscribers only)
+	rateLimitsStatus ratelimits.Status
 }
 
 // SessionRefreshMsg triggers a session list refresh.
@@ -142,11 +141,6 @@ func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context) Mod
 		refreshInterval = 5 * time.Second
 	}
 
-	ccusageInterval, _ := time.ParseDuration(cfg.CCUsage.RefreshInterval)
-	if ccusageInterval <= 0 {
-		ccusageInterval = 30 * time.Second
-	}
-
 	m := Model{
 		manager:                mgr,
 		config:                 cfg,
@@ -159,7 +153,6 @@ func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context) Mod
 		logFollow:              true,
 		ptyFollow:              true,
 		refreshInterval:        refreshInterval,
-		ccusageRefreshInterval: ccusageInterval,
 	}
 
 	m.refreshSessions()
@@ -184,36 +177,15 @@ func metadataTickCmd(interval time.Duration) tea.Cmd {
 	})
 }
 
-// ccusageTickMsg triggers a ccusage status refresh.
-type ccusageTickMsg struct{}
-
-// ccusageResultMsg carries a freshly fetched ccusage status.
-type ccusageResultMsg struct {
-	status ccusage.Status
-}
-
-func ccusageTickCmd(interval time.Duration) tea.Cmd {
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return ccusageTickMsg{}
-	})
+// RateLimitsUpdatedMsg is sent when the rate-limits.json file is updated by the
+// claude-deck statusline script. main.go injects this via p.Send().
+type RateLimitsUpdatedMsg struct {
+	Status ratelimits.Status
 }
 
 // Init returns the initial command.
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{metadataTickCmd(m.refreshInterval)}
-	if m.config.CCUsage.Enabled {
-		ctx := m.ctx
-		cmds = append(cmds,
-			// 即時取得
-			func() tea.Msg { return ccusageResultMsg{status: ccusage.Fetch(ctx)} },
-			// 以降は定期取得
-			ccusageTickCmd(m.ccusageRefreshInterval),
-		)
-	}
-	return tea.Batch(cmds...)
+	return metadataTickCmd(m.refreshInterval)
 }
 
 // Update handles messages.
@@ -271,15 +243,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		go m.manager.RefreshFromJSONL()
 		cmds = append(cmds, metadataTickCmd(m.refreshInterval))
 
-	case ccusageTickMsg:
-		ctx := m.ctx
-		cmds = append(cmds, func() tea.Msg {
-			return ccusageResultMsg{status: ccusage.Fetch(ctx)}
-		})
-		cmds = append(cmds, ccusageTickCmd(m.ccusageRefreshInterval))
-
-	case ccusageResultMsg:
-		m.ccusageStatus = msg.status
+	case RateLimitsUpdatedMsg:
+		m.rateLimitsStatus = msg.Status
 
 	case sessionCreatedMsg:
 		if msg.err != nil {
@@ -365,7 +330,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyPressMsg,
 			metadataTickMsg, SessionRefreshMsg, statusClearMsg,
 			sessionCreatedMsg, sessionResumedMsg, sessionForkedMsg, ptyInputSentMsg, repoListMsg,
-			ccusageTickMsg, ccusageResultMsg:
+			RateLimitsUpdatedMsg:
 			// skip: 処理済み or repoList に無関係
 		default:
 			var cmd tea.Cmd

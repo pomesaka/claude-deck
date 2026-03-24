@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -78,13 +79,7 @@ func (m Model) renderHeader() string {
 		}
 	}
 
-	var infoStr string
-	cs := m.ccusageStatus
-	if m.config.CCUsage.Enabled && cs.BlockAvailable {
-		infoStr = fmt.Sprintf("Sessions: %d  %s $%.2f", len(m.sessions), formatCompact(cs.BlockTotalTokens), cs.BlockCostUSD)
-	} else {
-		infoStr = fmt.Sprintf("Sessions: %d", len(m.sessions))
-	}
+	infoStr := fmt.Sprintf("Sessions: %d", len(m.sessions))
 	info := tokenStyle.Render(infoStr)
 
 	var badge string
@@ -92,14 +87,9 @@ func (m Model) renderHeader() string {
 		badge = statusApproveStyle.Render(fmt.Sprintf(" [%d asking...]", attentionCount))
 	}
 
-	var ccusage string
-	if m.config.CCUsage.Enabled {
-		ccusage = m.renderCCUsage()
-	}
-
 	right := lipgloss.JoinHorizontal(lipgloss.Top, info, badge)
-	if ccusage != "" {
-		right = lipgloss.JoinHorizontal(lipgloss.Top, right, "  ", ccusage)
+	if usage := m.renderRateLimits(); usage != "" {
+		right = lipgloss.JoinHorizontal(lipgloss.Top, right, "  ", usage)
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, title, "  ", right)
 }
@@ -490,28 +480,28 @@ func (m Model) renderFooter() string {
 
 const usageGaugeWidth = 10
 
-// renderCCUsage renders colored gauge bars for billing block and weekly usage.
-func (m Model) renderCCUsage() string {
-	s := m.ccusageStatus
+// renderRateLimits renders gauge bars for Claude.ai rate limit windows.
+// Data is provided by the claude-deck statusline script via rate-limits.json.
+// Returns empty string when no data is available (API users, before first response).
+func (m Model) renderRateLimits() string {
+	s := m.rateLimitsStatus
 	var parts []string
 
-	// Current billing block (cyan)
-	if s.BlockAvailable {
-		parts = append(parts, renderUsageGauge("Blk", s.BlockPercent, "#06B6D4"))
+	if s.FiveHourAvailable {
+		parts = append(parts, renderUsageGauge("5h", s.FiveHour.UsedPct, s.FiveHour.ResetsAt, "#06B6D4"))
 	}
-
-	// Weekly usage (yellow) — always shown as cost amount
-	if s.WeekAvailable {
-		weekStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B"))
-		parts = append(parts, dimStyle.Render("Week ")+ weekStyle.Render(fmt.Sprintf("$%.2f", s.WeekCostUSD)))
+	if s.SevenDayAvailable {
+		parts = append(parts, renderUsageGauge("7d", s.SevenDay.UsedPct, s.SevenDay.ResetsAt, "#F59E0B"))
 	}
 
 	return strings.Join(parts, "  ")
 }
 
-// renderUsageGauge renders a labeled gauge bar: `label ○○●●●●●●●● 80%`
+// renderUsageGauge renders a labeled gauge bar with reset countdown:
+// `label ○○●●●●●●●● 80% 4h30m`
 // used is 0–100 (usage percentage). filled dots represent consumed portion.
-func renderUsageGauge(label string, used float64, hexColor string) string {
+// resetsAt zero value omits the countdown.
+func renderUsageGauge(label string, used float64, resetsAt time.Time, hexColor string) string {
 	if used < 0 {
 		used = 0
 	}
@@ -521,7 +511,33 @@ func renderUsageGauge(label string, used float64, hexColor string) string {
 	filled := int(used/100*usageGaugeWidth + 0.5)
 	bar := strings.Repeat("●", filled) + strings.Repeat("○", usageGaugeWidth-filled)
 	gaugeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(hexColor))
-	return dimStyle.Render(label+" ") + gaugeStyle.Render(fmt.Sprintf("%s %.0f%%", bar, used))
+	gauge := gaugeStyle.Render(fmt.Sprintf("%s %.0f%%", bar, used))
+
+	countdown := ""
+	if !resetsAt.IsZero() {
+		remaining := time.Until(resetsAt)
+		if remaining > 0 {
+			countdown = " " + dimStyle.Render(formatDuration(remaining))
+		}
+	}
+
+	return dimStyle.Render(label+" ") + gauge + countdown
+}
+
+// formatDuration formats a duration as a compact human-readable countdown.
+// Examples: "42m", "4h30m", "1d20h"
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Minute)
+	h := int(d.Hours()) // intentional truncation: fractional hours accounted for in m
+	m := int(d.Minutes()) % 60
+	switch {
+	case h == 0:
+		return fmt.Sprintf("%dm", m)
+	case h < 24:
+		return fmt.Sprintf("%dh%dm", h, m)
+	default:
+		return fmt.Sprintf("%dd%dh", h/24, h%24)
+	}
 }
 
 func formatTimeCompact(snap session.Snapshot) string {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/pomesaka/claude-deck/internal/claudecode"
 	"github.com/pomesaka/claude-deck/internal/config"
+	"github.com/pomesaka/claude-deck/internal/ratelimits"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/hooks"
 	"github.com/pomesaka/claude-deck/internal/jj"
@@ -72,6 +73,12 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "warning: trust setup: %v\n", err)
 	}
 
+	// Claude Code の statusline スクリプトを配置し ~/.claude/settings.json に登録する。
+	// スクリプトは各アシスタントメッセージ後に rate_limits データを DataDir に書き出す。
+	if err := claudecode.EnsureStatuslineScript(cfg.DataDir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: statusline setup: %v\n", err)
+	}
+
 	// Initialize store
 	st, err := store.New(cfg.DataDir)
 	if err != nil {
@@ -125,6 +132,14 @@ func run() error {
 	// Create and run TUI
 	model := tui.NewModel(mgr, cfg, ctx)
 	p := tea.NewProgram(model)
+
+	// rate_limits ファイルを監視し、更新があれば TUI に通知する。
+	// Pro/Max サブスクリプションユーザーのみ有効（APIキーユーザーはデータなし）。
+	if err := ratelimits.Watch(ctx, cfg.DataDir, func(s ratelimits.Status) {
+		p.Send(tui.RateLimitsUpdatedMsg{Status: s})
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: rate limits watcher: %v\n", err)
+	}
 
 	// ストリーマーやバックグラウンド処理からの変更通知を Bubble Tea に伝える
 	mgr.SetOnChange(func() {
