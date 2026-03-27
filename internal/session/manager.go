@@ -20,6 +20,7 @@ import (
 )
 
 // notifyInterval はデバウンス間隔。16ms ≈ 60fps で UI を駆動する。
+// PTY 出力などのバースト時に複数の notifyChange 呼び出しを1回の onChange にまとめる。
 const notifyInterval = 16 * time.Millisecond
 
 // spinnerIdleTimeout はスピナー消失から Idle 遷移までの猶予時間。
@@ -60,8 +61,8 @@ type Manager struct {
 	// RefreshFromJSONL の並行実行ガード
 	refreshing atomic.Bool
 
-	// notifyChange デバウンス用 dirty flag
-	dirty atomic.Bool
+	// notifyChange デバウンス用チャネル（バッファ 1 でバーストを吸収）
+	notifyCh chan struct{}
 
 	// JSONL ファイルの fsnotify 監視
 	fileWatcher *usage.MultiWatcher
@@ -81,10 +82,11 @@ func NewManager(ctx context.Context, st *store.Store, cfg ManagerConfig) *Manage
 	return &Manager{
 		sessions:  make(map[string]*Session),
 		processes: make(map[string]*pty.Process),
-		store: st,
-		usage:     usage.NewReader(""),
-		ctx:       ctx,
-		config:    cfg,
+		store:    st,
+		usage:    usage.NewReader(""),
+		ctx:      ctx,
+		config:   cfg,
+		notifyCh: make(chan struct{}, 1),
 	}
 }
 
@@ -96,27 +98,41 @@ func (m *Manager) SetOnChange(fn func()) {
 }
 
 func (m *Manager) notifyChange() {
-	m.dirty.Store(true)
+	select {
+	case m.notifyCh <- struct{}{}:
+	default: // already pending; coalesce into the buffered signal
+	}
 }
 
-// StartNotifyLoop polls the dirty flag at notifyInterval and fires onChange.
-// 高頻度の PTY 出力を吸収し、最大 ~60fps で UI 更新を通知する。
+// StartNotifyLoop fires onChange whenever notifyChange is called, debounced to
+// at most ~60fps. バースト時は notifyCh（バッファ 1）が信号を吸収し、
+// debounce window 内の追加信号をドレインしてから onChange を一度だけ呼ぶ。
+// ticker ポーリングと異なりアイドル時は goroutine がスリープし CPU を消費しない。
 func (m *Manager) StartNotifyLoop(ctx context.Context) {
 	go func() {
-		ticker := time.NewTicker(notifyInterval)
-		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				if m.dirty.CompareAndSwap(true, false) {
-					m.mu.RLock()
-					fn := m.onChange
-					m.mu.RUnlock()
-					if fn != nil {
-						fn()
+			case <-m.notifyCh:
+				// debounce: drain additional signals within one frame window
+				timer := time.NewTimer(notifyInterval)
+			drain:
+				for {
+					select {
+					case <-m.notifyCh:
+					case <-timer.C:
+						break drain
+					case <-ctx.Done():
+						timer.Stop()
+						return
 					}
+				}
+				m.mu.RLock()
+				fn := m.onChange
+				m.mu.RUnlock()
+				if fn != nil {
+					fn()
 				}
 			}
 		}
