@@ -95,14 +95,10 @@ func (m *Manager) StreamSession(sessionID string) {
 		return
 	}
 
-	// /clear 前の旧セッションのログエントリを先頭に連結するための prefix を取得
-	var prefixEntries []usage.LogEntry
+	// /clear 前の旧セッションの JSONL パスを事前解決（パス解決のみでディスク I/O なし）
+	prevPath := ""
 	if prevCSID != "" {
-		if prevPath := m.usage.ResolveSessionPath(prevCSID); prevPath != "" {
-			prev := usage.NewLogStreamer(prevPath)
-			prev.ReadAll()
-			prefixEntries = prev.Entries()
-		}
+		prevPath = m.usage.ResolveSessionPath(prevCSID)
 	}
 
 	ctx, cancel := context.WithCancel(m.ctx)
@@ -110,23 +106,6 @@ func (m *Manager) StreamSession(sessionID string) {
 	m.activeStreamID = sessionID
 	m.activeStreamCancel = cancel
 	m.mu.Unlock()
-
-	onChange := func(entries []usage.LogEntry) {
-		merged := entries
-		if len(prefixEntries) > 0 {
-			merged = make([]usage.LogEntry, 0, len(prefixEntries)+len(entries))
-			merged = append(merged, prefixEntries...)
-			merged = append(merged, entries...)
-			// MaxEntries は末尾優先で cap
-			if len(merged) > usage.MaxEntries {
-				merged = merged[len(merged)-usage.MaxEntries:]
-			}
-		}
-		sess.mu.Lock()
-		sess.JSONLLogEntries = merged
-		sess.mu.Unlock()
-		m.notifyChange()
-	}
 
 	go func() {
 		defer func() {
@@ -137,6 +116,33 @@ func (m *Manager) StreamSession(sessionID string) {
 			}
 			m.mu.Unlock()
 		}()
+
+		// /clear 前の旧セッションのログエントリを goroutine 内で読み込む。
+		// ReadAll() はディスク I/O を伴うため、TUI メインループのブロックを防ぐために
+		// goroutine 内で実行する。
+		var prefixEntries []usage.LogEntry
+		if prevPath != "" {
+			prev := usage.NewLogStreamer(prevPath)
+			prev.ReadAll()
+			prefixEntries = prev.Entries()
+		}
+
+		onChange := func(entries []usage.LogEntry) {
+			merged := entries
+			if len(prefixEntries) > 0 {
+				merged = make([]usage.LogEntry, 0, len(prefixEntries)+len(entries))
+				merged = append(merged, prefixEntries...)
+				merged = append(merged, entries...)
+				// MaxEntries は末尾優先で cap
+				if len(merged) > usage.MaxEntries {
+					merged = merged[len(merged)-usage.MaxEntries:]
+				}
+			}
+			sess.mu.Lock()
+			sess.JSONLLogEntries = merged
+			sess.mu.Unlock()
+			m.notifyChange()
+		}
 
 		// Phase 1: 末尾読み込みで即座に表示
 		s := usage.NewLogStreamer(path)

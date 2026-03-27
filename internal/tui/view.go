@@ -703,9 +703,18 @@ func (m *Model) syncLogViewport() {
 	m.ptyViewport.SetHeight(ptyHeight)
 
 	// PTY プロセスとエミュレータのサイズをビューポートに同期（寸法変更時のみ）
+	// ResizeSession は emuMu.Lock() を取るため、readLoop の AppendRaw() と競合すると
+	// TUI メインゴルーチンがブロックする。goroutine に出して競合を回避する。
+	// lastResize* の更新は goroutine 完了を待たずに行う。これは意図的な設計で、
+	// 「同一サイズへの重複 resize を防ぐガード」として機能する。
+	// ResizeSession は emuMu の取得と数命令のみで完結する軽量処理のため、
+	// goroutine のキャンセル機構は不要。
 	if ptyHeight > 0 && m.selectedID != "" &&
 		(m.selectedID != m.lastResizeID || innerWidth != m.lastResizeCols || ptyHeight != m.lastResizeRows) {
-		m.manager.ResizeSession(m.selectedID, innerWidth, ptyHeight)
+		mgr := m.manager
+		sid := m.selectedID
+		cols, rows := innerWidth, ptyHeight
+		go mgr.ResizeSession(sid, cols, rows)
 		m.lastResizeID = m.selectedID
 		m.lastResizeCols = innerWidth
 		m.lastResizeRows = ptyHeight
