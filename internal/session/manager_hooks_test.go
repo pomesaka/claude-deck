@@ -18,6 +18,7 @@ func newTestManager() *Manager {
 		sessions:  make(map[string]*Session),
 		processes: make(map[string]*pty.Process),
 		ctx:       context.Background(),
+		hookProc:  newHookProcessor(),
 	}
 }
 
@@ -194,13 +195,9 @@ func TestHandleHookEvent_SessionEnd_NoClaudeDeckID(t *testing.T) {
 		// ClaudeDeckSessionID intentionally empty
 	})
 
-	m.mu.RLock()
-	pending := m.pendingEndEvents
-	m.mu.RUnlock()
-
-	// Nothing should be stored in pendingEndEvents
-	if len(pending) != 0 {
-		t.Errorf("pendingEndEvents should be empty, got %v", pending)
+	// Nothing should be stored in hookProc (event was missing ClaudeDeckSessionID)
+	if m.hookProc.pendingCount() != 0 {
+		t.Errorf("hookProc pending count should be 0, got %d", m.hookProc.pendingCount())
 	}
 }
 

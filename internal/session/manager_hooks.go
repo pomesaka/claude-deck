@@ -71,13 +71,8 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 			debuglog.Printf("[event-watcher] SessionEnd: no ClaudeDeckSessionID, skipping pairing (session_id=%s)", ev.SessionID)
 			return
 		}
-		m.mu.Lock()
-		if m.pendingEndEvents == nil {
-			m.pendingEndEvents = make(map[string]*hooks.Event)
-		}
-		m.pendingEndEvents[ev.ClaudeDeckSessionID] = &ev
-		m.mu.Unlock()
-		debuglog.Printf("[event-watcher] SessionEnd: session_id=%s reason=%s deck_session=%s", ev.SessionID, ev.Reason, ev.ClaudeDeckSessionID)
+		// hookProc は event watcher goroutine のみがアクセスするため mu 不要
+		m.hookProc.storePending(ev.ClaudeDeckSessionID, &ev)
 
 	case hooks.EventSessionStart:
 		debuglog.Printf("[event-watcher] SessionStart: session_id=%s source=%s claude_deck_session_id=%s",
@@ -119,14 +114,11 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 			return
 		}
 
-		// ペアリング: ClaudeDeckSessionID で対応する SessionEnd を取り出す
-		m.mu.Lock()
+		// ペアリング: hookProc から対応する SessionEnd を取り出す（mu 不要）
 		var pendEnd *hooks.Event
-		if ev.ClaudeDeckSessionID != "" && m.pendingEndEvents != nil {
-			pendEnd = m.pendingEndEvents[ev.ClaudeDeckSessionID]
-			delete(m.pendingEndEvents, ev.ClaudeDeckSessionID)
+		if ev.ClaudeDeckSessionID != "" {
+			pendEnd = m.hookProc.consumePending(ev.ClaudeDeckSessionID)
 		}
-		m.mu.Unlock()
 
 		if pendEnd == nil {
 			debuglog.Printf("[event-watcher] no pending SessionEnd for source=%s deck_session=%s, skipping", ev.Source, ev.ClaudeDeckSessionID)

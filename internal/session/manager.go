@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/pomesaka/claude-deck/internal/debuglog"
-	"github.com/pomesaka/claude-deck/internal/hooks"
 	"github.com/pomesaka/claude-deck/internal/jj"
 	"github.com/pomesaka/claude-deck/internal/pty"
 	"github.com/pomesaka/claude-deck/internal/store"
@@ -67,10 +66,9 @@ type Manager struct {
 	// JSONL ファイルの fsnotify 監視
 	fileWatcher *usage.MultiWatcher
 
-	// SessionEnd→SessionStart ペアリング: ClaudeDeckSessionID をキーにして
-	// 直前の SessionEnd イベントを保持。セッションごとに独立してペアリングするため
-	// 複数セッションの並行 /clear でも混同しない。
-	pendingEndEvents map[string]*hooks.Event
+	// hookProc はシングルゴルーチンで動作する SessionEnd→SessionStart ペアリングステートマシン。
+	// event watcher goroutine のみが読み書きするため mu 不要。
+	hookProc *hookProcessor
 
 	// 次回 DiscoverExternalSessions の読み込み開始位置（ページネーション用）
 	discoveryOffset int
@@ -87,6 +85,7 @@ func NewManager(ctx context.Context, st *store.Store, cfg ManagerConfig) *Manage
 		ctx:      ctx,
 		config:   cfg,
 		notifyCh: make(chan struct{}, 1),
+		hookProc: newHookProcessor(),
 	}
 }
 
