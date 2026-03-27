@@ -342,6 +342,10 @@ type Snapshot struct {
 	WorkspacePath     string
 	SubProjectDir     string
 	ClaudeSessionID   string
+	// ClearCount is the number of /clear (or compact) operations performed in
+	// this session. 0 means the original session; 1 means cleared once, etc.
+	// Derived from len(SessionChain) - 1.
+	ClearCount        int
 	Status            Status
 	Managed           bool
 	Prompt            string
@@ -395,6 +399,7 @@ func (s *Session) Snapshot() Snapshot {
 		WorkspacePath:     s.WorkspacePath,
 		SubProjectDir:     s.SubProjectDir,
 		ClaudeSessionID:   s.CurrentClaudeID(),
+		ClearCount:        max(0, len(s.SessionChain)-1),
 		Status:            s.Status,
 		Managed:           s.managed,
 		Prompt:            s.Prompt,

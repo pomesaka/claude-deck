@@ -432,7 +432,11 @@ func (m Model) renderDetailPane(width, height int) string {
 		// 完了済み → ヘッダー + JSONL ログ表示
 		sections = append(sections, titleStyle.Render(truncate(fmt.Sprintf("📋 %s (%s)", snap.Name, snap.RepoName), innerWidth)))
 		sections = append(sections, dimStyle.Render(truncate(fmt.Sprintf("   パス: %s", snap.WorkspacePath), innerWidth)))
-		sections = append(sections, dimStyle.Render(truncate(fmt.Sprintf("   ID: %s  Claude: %s", snap.ID, snap.ClaudeSessionID), innerWidth)))
+		idLine := fmt.Sprintf("   ID: %s  Claude: %s", snap.ID, snap.ClaudeSessionID)
+		if snap.ClearCount > 0 {
+			idLine += fmt.Sprintf("  (/clear×%d)", snap.ClearCount)
+		}
+		sections = append(sections, dimStyle.Render(truncate(idLine, innerWidth)))
 
 		if snap.CurrentTool != "" {
 			sections = append(sections, statusRunningStyle.Render(truncate(fmt.Sprintf("   🔧 %s", snap.CurrentTool), innerWidth)))
