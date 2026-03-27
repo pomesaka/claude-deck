@@ -64,20 +64,43 @@ func (t TokenUsage) TotalTokens() int {
 	return t.InputTokens + t.OutputTokens
 }
 
+// runtimeFields holds PTY-related state that changes at high frequency.
+//
+// mu は sess.mu と独立しているため、PTY 出力ゴルーチン（LogLines 書き込み）と
+// TUI スナップショット（sess.mu で ID/Status などを読む）が競合しない。
+//
+// Lock ordering:
+//   - emuMu → rt.mu（AppendRaw: emulator.Write 後に LogLines 更新）
+//   - emuMu → sess.mu（ScrollOut コールバック内で scrollback/TerminalTitle 更新）
+//   - rt.mu と sess.mu は同時に保持しない
+type runtimeFields struct {
+	mu sync.RWMutex
+
+	LogLines        []string         // PTY ログ行（AppendRaw で追記）
+	JSONLLogEntries []usage.LogEntry // JSONL 由来の構造化ログ（StreamSession で更新）
+	lastSpinnerTime time.Time        // Braille スピナー最終検出時刻
+	maxLogLines     int              // config から設定。0 の場合はデフォルト 1000
+}
+
 // Session represents a single Claude Code session.
 //
 // Data sources:
 //   - Store (persisted as JSON): ID, Name, RepoPath, RepoName, WorkspacePath,
 //     WorkspaceName, SessionChain, Status, FinishedAt, PID
 //   - JSONL (Claude Code primary): Prompt, PermissionMode, StartedAt, TokenUsage
-//   - Runtime only: LogLines, CurrentTool
+//   - Runtime only: rt.LogLines, CurrentTool
 //
-// Lock ordering (ABBA デッドロック防止): emuMu → mu の順で取得すること。
+// Lock ordering (ABBA デッドロック防止):
 //   - emuMu: emulator 読み書き専用（Write / String / Render / CursorPosition）
-//   - mu:    それ以外の全フィールド読み書き
+//   - rt.mu:  PTY ログ・JSONL ログ専用（emuMu の後に取得）
+//   - mu:     その他全フィールド（emuMu の後、rt.mu とは独立）
 type Session struct {
 	mu    sync.RWMutex
-	emuMu sync.Mutex // emulator 専用。mu より先に取得すること
+	emuMu sync.Mutex // emulator 専用。mu/rt.mu より先に取得すること
+
+	// rt は PTY ログなど高頻度更新フィールドをまとめた struct。
+	// 詳細は runtimeFields のコメントを参照。
+	rt runtimeFields
 
 	// --- Persisted in store (claude-deck metadata) ---
 	ID               string     `json:"id"`
@@ -105,13 +128,11 @@ type Session struct {
 	LastActivity   time.Time  `json:"last_activity,omitzero"`
 	TokenUsage     TokenUsage `json:"token_usage,omitzero"`
 
-	// --- Runtime fields (not persisted) ---
-	LogLines        []string         `json:"-"`
-	JSONLLogEntries []usage.LogEntry `json:"-"` // JSONL由来の構造化ログ
-	CurrentTool     string           `json:"-"`
-	ErrorMessage    string           `json:"-"` // パーサーが検知したエラー行
-	managed  bool         // Manager が PTY プロセスを管理中かどうか
-	emulator *vt.Emulator // PTY 出力を解釈する仮想端末 (charmbracelet/x/vt)
+	// --- Runtime fields (not persisted, protected by sess.mu) ---
+	CurrentTool  string `json:"-"` // パーサー検出中のツール名
+	ErrorMessage string `json:"-"` // パーサーが検知したエラー行
+	managed      bool               // Manager が PTY プロセスを管理中かどうか
+	emulator     *vt.Emulator       // PTY 出力を解釈する仮想端末 (charmbracelet/x/vt)
 
 	// displayCache は emulator.Write() 完了後に毎回更新される表示キャッシュ。
 	displayCache atomic.Pointer[[]string]
@@ -136,17 +157,13 @@ type Session struct {
 	stableCursorScreenY atomic.Int32
 	stableCursorReady   atomic.Bool
 
-	// lastSpinnerTime は最後に Braille スピナーを検出した時刻。
-	// Manager の定期チェックで Running → Idle 自動遷移のタイムアウト判定に使う。
-	lastSpinnerTime time.Time
-
 	// scrollback はエミュレータの ScrollUp で画面上端から消えた行の styled テキスト。
 	// エミュレータは viewport サイズで動作するため画面内の行しか保持しないが、
 	// ここにスクロールアウトした行を蓄積することでスクロールバックを実現する。
+	// emuMu 保持中（ScrollOut コールバック）に書き込まれるため sess.mu で保護する。
 	scrollbackPlain  []string
 	scrollbackStyled []string
 
-	maxLogLines   int // config から設定。0 の場合はデフォルト 1000
 	maxScrollback int // config から設定。0 の場合はデフォルト 2000
 }
 
@@ -215,21 +232,28 @@ func (s *Session) SetManaged(v bool) {
 
 // touchSpinner records the current time as the last Braille spinner detection.
 func (s *Session) touchSpinner() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.lastSpinnerTime = time.Now()
+	s.rt.mu.Lock()
+	s.rt.lastSpinnerTime = time.Now()
+	s.rt.mu.Unlock()
 }
 
 // spinnerIdleSince returns true if the session is Running, has previously
 // detected a spinner, and the spinner has not been seen for longer than timeout.
 // This is used as a fallback to transition Running → Idle when hook events
 // don't arrive.
+//
+// rt.mu と sess.mu を同時に保持しない（ロック順序規則）ため、2回に分けて読む。
 func (s *Session) spinnerIdleSince(timeout time.Duration) bool {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.Status == StatusRunning &&
-		!s.lastSpinnerTime.IsZero() &&
-		time.Since(s.lastSpinnerTime) > timeout
+	status := s.Status
+	s.mu.RUnlock()
+	if status != StatusRunning {
+		return false
+	}
+	s.rt.mu.RLock()
+	t := s.rt.lastSpinnerTime
+	s.rt.mu.RUnlock()
+	return !t.IsZero() && time.Since(t) > timeout
 }
 
 // AddTokens updates token usage safely (incremental, from pty parser).
@@ -262,24 +286,24 @@ func (s *Session) AppendRaw(data []byte) {
 	}
 	s.emuMu.Unlock()
 
-	// Step 2: LogLines を更新（mu 保持）
-	s.mu.Lock()
-	limit := s.maxLogLines
+	// Step 2: LogLines を更新（rt.mu 保持）
+	s.rt.mu.Lock()
+	limit := s.rt.maxLogLines
 	if limit <= 0 {
 		limit = 1000
 	}
 	for _, part := range bytes.Split(data, []byte{'\n'}) {
 		line := string(bytes.TrimRight(part, "\r"))
 		if line != "" {
-			s.LogLines = append(s.LogLines, line)
+			s.rt.LogLines = append(s.rt.LogLines, line)
 		}
 	}
-	if len(s.LogLines) > limit {
+	if len(s.rt.LogLines) > limit {
 		newLines := make([]string, limit)
-		copy(newLines, s.LogLines[len(s.LogLines)-limit:])
-		s.LogLines = newLines
+		copy(newLines, s.rt.LogLines[len(s.rt.LogLines)-limit:])
+		s.rt.LogLines = newLines
 	}
-	s.mu.Unlock()
+	s.rt.mu.Unlock()
 }
 
 // AppendLog adds a single line to the session log and feeds it to the emulator.
@@ -294,42 +318,42 @@ func (s *Session) AppendLog(line string) {
 	}
 	s.emuMu.Unlock()
 
-	// Step 2: LogLines を更新（mu 保持）
-	s.mu.Lock()
-	s.LogLines = append(s.LogLines, line)
-	limit := s.maxLogLines
+	// Step 2: LogLines を更新（rt.mu 保持）
+	s.rt.mu.Lock()
+	s.rt.LogLines = append(s.rt.LogLines, line)
+	limit := s.rt.maxLogLines
 	if limit <= 0 {
 		limit = 1000
 	}
-	if len(s.LogLines) > limit {
+	if len(s.rt.LogLines) > limit {
 		newLines := make([]string, limit)
-		copy(newLines, s.LogLines[len(s.LogLines)-limit:])
-		s.LogLines = newLines
+		copy(newLines, s.rt.LogLines[len(s.rt.LogLines)-limit:])
+		s.rt.LogLines = newLines
 	}
-	s.mu.Unlock()
+	s.rt.mu.Unlock()
 }
 
 // GetLogs returns a copy of the PTY log lines (used for running sessions).
 func (s *Session) GetLogs() []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if len(s.LogLines) == 0 {
+	s.rt.mu.RLock()
+	defer s.rt.mu.RUnlock()
+	if len(s.rt.LogLines) == 0 {
 		return nil
 	}
-	logs := make([]string, len(s.LogLines))
-	copy(logs, s.LogLines)
+	logs := make([]string, len(s.rt.LogLines))
+	copy(logs, s.rt.LogLines)
 	return logs
 }
 
 // GetStructuredLogs returns a copy of the JSONL-derived structured log entries.
 func (s *Session) GetStructuredLogs() []usage.LogEntry {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if len(s.JSONLLogEntries) == 0 {
+	s.rt.mu.RLock()
+	defer s.rt.mu.RUnlock()
+	if len(s.rt.JSONLLogEntries) == 0 {
 		return nil
 	}
-	entries := make([]usage.LogEntry, len(s.JSONLLogEntries))
-	copy(entries, s.JSONLLogEntries)
+	entries := make([]usage.LogEntry, len(s.rt.JSONLLogEntries))
+	copy(entries, s.rt.JSONLLogEntries)
 	return entries
 }
 
@@ -507,8 +531,8 @@ func NewSession(repoPath, repoName string) *Session {
 		TerminalTitle: "New Session",
 		Status:        StatusIdle,
 		StartedAt:     time.Now(),
-		LogLines:      make([]string, 0, 256),
 	}
+	s.rt.LogLines = make([]string, 0, 256)
 	s.emulator = newEmulatorWithCallbacks(s, 0, 0)
 	return s
 }

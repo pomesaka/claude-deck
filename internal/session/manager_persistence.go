@@ -65,7 +65,7 @@ func (m *Manager) LoadExisting() error {
 		if err := json.Unmarshal(data, &s); err != nil {
 			continue
 		}
-		s.LogLines = make([]string, 0)
+		s.rt.LogLines = make([]string, 0)
 
 		// 旧形式 (claude_session_id / previous_claude_session_id) からの移行
 		if len(s.SessionChain) == 0 {

@@ -169,7 +169,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	debuglog.Printf("[CreateSession] repoPath=%q workingDir=%q withWorkspace=%v cols=%d rows=%d", repoPath, workingDir, withWorkspace, cols, rows)
 	repoName := filepath.Base(repoPath)
 	sess := NewSession(repoPath, repoName)
-	sess.maxLogLines = m.config.MaxLogLines
+	sess.rt.maxLogLines = m.config.MaxLogLines
 	sess.maxScrollback = m.config.MaxScrollback
 
 	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
@@ -391,14 +391,18 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	}
 	debuglog.Printf("[ResumeSession] pty started pid=%d", proc.PID())
 
+	// rt.LogLines をリセット（rt.mu で保護、sess.mu と同時保持しない）
+	sess.rt.mu.Lock()
+	sess.rt.LogLines = make([]string, 0, 256)
+	sess.rt.mu.Unlock()
+
 	sess.mu.Lock()
 	sess.setStatusLocked(StatusIdle)
 	sess.FinishedAt = nil // resume なので終了時刻をクリア
 	sess.PID = proc.PID()
 	sess.managed = true
-	sess.maxLogLines = m.config.MaxLogLines
+	sess.rt.maxLogLines = m.config.MaxLogLines
 	sess.maxScrollback = m.config.MaxScrollback
-	sess.LogLines = make([]string, 0, 256)
 	sess.emulator = newEmulatorWithCallbacks(sess, cols, rows)
 	// JSONLLogEntries は上部ログビューポートで表示に使用し続ける。
 	// PTY 出力は下部の専用ビューポートに表示される。
@@ -453,7 +457,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols,
 
 	repoName := filepath.Base(repoPath)
 	sess := NewSession(repoPath, repoName)
-	sess.maxLogLines = m.config.MaxLogLines
+	sess.rt.maxLogLines = m.config.MaxLogLines
 	sess.maxScrollback = m.config.MaxScrollback
 
 	wsName := sess.Name

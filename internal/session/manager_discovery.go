@@ -83,8 +83,8 @@ func newExternalSession(info *usage.SessionInfo) *Session { //nolint:unparam
 			CacheReadInputTokens:     info.Tokens.CacheReadInputTokens,
 			EstimatedCostUSD:         info.Tokens.EstimatedCostUSD,
 		},
-		LogLines: make([]string, 0),
 	}
+	sess.rt.LogLines = make([]string, 0)
 	if !info.LastActivity.IsZero() {
 		t := info.LastActivity
 		sess.FinishedAt = &t

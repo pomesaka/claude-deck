@@ -237,9 +237,9 @@ func TestHandleHookEvent_Clear_JSONLEntriesReset(t *testing.T) {
 	m := newTestManager()
 	sess := addTestSession(m, "deck-1", "claude-old")
 
-	sess.mu.Lock()
-	sess.JSONLLogEntries = []usage.LogEntry{{Kind: usage.LogEntryUser, Text: "old message"}}
-	sess.mu.Unlock()
+	sess.rt.mu.Lock()
+	sess.rt.JSONLLogEntries = []usage.LogEntry{{Kind: usage.LogEntryUser, Text: "old message"}}
+	sess.rt.mu.Unlock()
 
 	m.handleHookEvent(hooks.Event{
 		HookEventName:       hooks.EventSessionEnd,
@@ -254,9 +254,9 @@ func TestHandleHookEvent_Clear_JSONLEntriesReset(t *testing.T) {
 		ClaudeDeckSessionID: "deck-1",
 	})
 
-	sess.mu.RLock()
-	entries := sess.JSONLLogEntries
-	sess.mu.RUnlock()
+	sess.rt.mu.RLock()
+	entries := sess.rt.JSONLLogEntries
+	sess.rt.mu.RUnlock()
 
 	if entries != nil {
 		t.Errorf("JSONLLogEntries should be nil after /clear, got len=%d", len(entries))

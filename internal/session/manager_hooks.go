@@ -148,9 +148,12 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 		sess.mu.Lock()
 		// SessionChain に新 ID を追記（旧 ID は chain 内に残り knownClaudeSessionIDs で参照される）
 		sess.appendToChainLocked(newCSID)
-		// /clear 時はログをリセット（新セッションのログのみ表示）
-		sess.JSONLLogEntries = nil
 		sess.mu.Unlock()
+		// /clear 時はログをリセット（新セッションのログのみ表示）
+		// rt.mu と sess.mu を同時保持しないためロックを分ける
+		sess.rt.mu.Lock()
+		sess.rt.JSONLLogEntries = nil
+		sess.rt.mu.Unlock()
 
 		m.persist(sess)
 

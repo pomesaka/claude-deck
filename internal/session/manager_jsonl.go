@@ -144,9 +144,9 @@ func (m *Manager) StreamSession(sessionID string) {
 					merged = merged[len(merged)-usage.MaxEntries:]
 				}
 			}
-			sess.mu.Lock()
-			sess.JSONLLogEntries = merged
-			sess.mu.Unlock()
+			sess.rt.mu.Lock()
+			sess.rt.JSONLLogEntries = merged
+			sess.rt.mu.Unlock()
 			m.notifyChange()
 		}
 
