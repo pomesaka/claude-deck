@@ -98,13 +98,14 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 				return
 			}
 			sess.mu.Lock()
-			if sess.ClaudeSessionID != "" {
+			if sess.CurrentClaudeID() != "" {
+				curID := sess.CurrentClaudeID()
 				sess.mu.Unlock()
 				debuglog.Printf("[event-watcher] SessionStart source=%s skipped: session %s already has ClaudeSessionID=%s",
-					ev.Source, ev.ClaudeDeckSessionID, sess.ClaudeSessionID)
+					ev.Source, ev.ClaudeDeckSessionID, curID)
 				return
 			}
-			sess.ClaudeSessionID = ev.SessionID
+			sess.appendToChainLocked(ev.SessionID)
 			sess.mu.Unlock()
 			debuglog.Printf("[event-watcher] session %s: ClaudeSessionID set to %s (source=%s)",
 				ev.ClaudeDeckSessionID, ev.SessionID, ev.Source)
@@ -153,19 +154,11 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 			sessionID, oldCSID, newCSID, ev.Source)
 
 		sess.mu.Lock()
-		sess.PreviousClaudeSessionID = oldCSID
-		sess.ClaudeSessionID = newCSID
+		// SessionChain に新 ID を追記（旧 ID は chain 内に残り knownClaudeSessionIDs で参照される）
+		sess.appendToChainLocked(newCSID)
 		// /clear 時はログをリセット（新セッションのログのみ表示）
 		sess.JSONLLogEntries = nil
 		sess.mu.Unlock()
-
-		// 旧 ID を記録して外部セッションとして再インポートされるのを防ぐ
-		m.mu.Lock()
-		if m.oldSessionIDs == nil {
-			m.oldSessionIDs = make(map[string]bool)
-		}
-		m.oldSessionIDs[oldCSID] = true
-		m.mu.Unlock()
 
 		m.persist(sess)
 
@@ -202,7 +195,7 @@ func (m *Manager) findSessionByClaudeID(claudeSessionID string) *Session {
 
 	for _, s := range candidates {
 		s.mu.RLock()
-		csID := s.ClaudeSessionID
+		csID := s.CurrentClaudeID()
 		s.mu.RUnlock()
 		if csID == claudeSessionID {
 			return s

@@ -71,10 +71,6 @@ type Manager struct {
 	// 複数セッションの並行 /clear でも混同しない。
 	pendingEndEvents map[string]*hooks.Event
 
-	// handleHookEvent で ClaudeSessionID が更新された際の旧 ID を記録。
-	// DiscoverExternalSessions / handleNewFile で重複インポートを防ぐ。
-	oldSessionIDs map[string]bool
-
 	// 次回 DiscoverExternalSessions の読み込み開始位置（ページネーション用）
 	discoveryOffset int
 }
@@ -286,26 +282,29 @@ func (m *Manager) watchProcess(sess *Session, proc *pty.Process) {
 	}
 
 	// /clear 後にメッセージを送らず終了した場合、新 ID の JSONL は空。
-	// resume 不可能なので旧 ID にフォールバックする。
+	// resume 不可能なので chain の末尾をポップして旧 ID にフォールバックする。
 	sess.mu.RLock()
-	csID := sess.ClaudeSessionID
-	prevCSID := sess.PreviousClaudeSessionID
+	chain := make([]string, len(sess.SessionChain))
+	copy(chain, sess.SessionChain)
 	sess.mu.RUnlock()
 
-	if prevCSID != "" && !m.usage.HasConversation(csID) {
-		// 旧 ID が別の deck セッションに既に紐付いている場合は revert しない。
-		// Discovery が旧 ID を外部セッションとしてインポート済みの場合に
-		// 2つの deck セッションが同じ ClaudeSessionID を持つのを防ぐ。
-		if m.isClaudeIDClaimed(prevCSID, sess.ID) {
-			debuglog.Printf("[watchProcess] session %s: empty JSONL for %s, but %s is claimed by another session, not reverting",
-				sess.ID, csID, prevCSID)
-		} else {
-			debuglog.Printf("[watchProcess] session %s: empty JSONL for %s, reverting to %s",
-				sess.ID, csID, prevCSID)
-			sess.mu.Lock()
-			sess.ClaudeSessionID = prevCSID
-			sess.PreviousClaudeSessionID = ""
-			sess.mu.Unlock()
+	if len(chain) > 1 {
+		csID := chain[len(chain)-1]
+		prevCSID := chain[len(chain)-2]
+		if !m.usage.HasConversation(csID) {
+			// 旧 ID が別の deck セッションに既に紐付いている場合は revert しない。
+			// Discovery が旧 ID を外部セッションとしてインポート済みの場合に
+			// 2つの deck セッションが同じ ClaudeSessionID を持つのを防ぐ。
+			if m.isClaudeIDClaimed(prevCSID, sess.ID) {
+				debuglog.Printf("[watchProcess] session %s: empty JSONL for %s, but %s is claimed by another session, not reverting",
+					sess.ID, csID, prevCSID)
+			} else {
+				debuglog.Printf("[watchProcess] session %s: empty JSONL for %s, reverting to %s",
+					sess.ID, csID, prevCSID)
+				sess.mu.Lock()
+				sess.popChainLocked()
+				sess.mu.Unlock()
+			}
 		}
 	}
 
@@ -330,7 +329,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	}
 
 	sess.mu.RLock()
-	csID := sess.ClaudeSessionID
+	csID := sess.CurrentClaudeID()
 	wsPath := sess.WorkspacePath
 	repoPath := sess.RepoPath
 	sess.mu.RUnlock()
@@ -416,7 +415,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols,
 	}
 
 	srcSess.mu.RLock()
-	srcClaudeID := srcSess.ClaudeSessionID
+	srcClaudeID := srcSess.CurrentClaudeID()
 	repoPath := srcSess.RepoPath
 	srcWorkDir := srcSess.WorkspacePath
 	srcSubProjectDir := srcSess.SubProjectDir
@@ -553,7 +552,7 @@ func (m *Manager) DeleteSession(sessionID string) (warning string, err error) {
 
 	// Claude Code の JSONL ファイルも削除
 	sess.mu.RLock()
-	csID := sess.ClaudeSessionID
+	csID := sess.CurrentClaudeID()
 	sess.mu.RUnlock()
 
 	if csID != "" {
@@ -802,7 +801,7 @@ func (m *Manager) isClaudeIDClaimed(claudeSessionID, excludeID string) bool {
 			continue
 		}
 		s.mu.RLock()
-		csID := s.ClaudeSessionID
+		csID := s.CurrentClaudeID()
 		s.mu.RUnlock()
 		if csID == claudeSessionID {
 			return true

@@ -68,7 +68,7 @@ func (t TokenUsage) TotalTokens() int {
 //
 // Data sources:
 //   - Store (persisted as JSON): ID, Name, RepoPath, RepoName, WorkspacePath,
-//     WorkspaceName, ClaudeSessionID, Status, FinishedAt, PID
+//     WorkspaceName, SessionChain, Status, FinishedAt, PID
 //   - JSONL (Claude Code primary): Prompt, PermissionMode, StartedAt, TokenUsage
 //   - Runtime only: LogLines, CurrentTool
 //
@@ -87,9 +87,12 @@ type Session struct {
 	WorkspacePath    string     `json:"workspace_path"`
 	WorkspaceName    string     `json:"workspace_name"`
 	SubProjectDir    string     `json:"sub_project_dir,omitempty"` // リポジトリ内サブプロジェクトの相対パス
-	ClaudeSessionID         string `json:"claude_session_id,omitempty"`
-	PreviousClaudeSessionID string `json:"previous_claude_session_id,omitempty"` // /clear で更新される前の ID（resume フォールバック用）
-	Status                  Status `json:"status"`
+	// SessionChain は Claude Code が割り当てるセッション ID の履歴（古い順）。
+	// /clear や compact のたびに末尾に新 ID が追加される。
+	// 現在の ID は SessionChain[len-1]、旧 ID はそれ以前の要素。
+	// アクセスには CurrentClaudeID() / PriorClaudeIDs() を使うこと。
+	SessionChain []string `json:"session_chain,omitempty"`
+	Status       Status   `json:"status"`
 	FinishedAt       *time.Time `json:"finished_at,omitempty"`
 	PID              int        `json:"pid,omitempty"`
 	TerminalTitle    string     `json:"terminal_title,omitempty"` // OSC 0/2 で設定されたターミナルタイトル（PTY表示フィルタ用）
@@ -391,7 +394,7 @@ func (s *Session) Snapshot() Snapshot {
 		RepoName:          s.RepoName,
 		WorkspacePath:     s.WorkspacePath,
 		SubProjectDir:     s.SubProjectDir,
-		ClaudeSessionID:   s.ClaudeSessionID,
+		ClaudeSessionID:   s.CurrentClaudeID(),
 		Status:            s.Status,
 		Managed:           s.managed,
 		Prompt:            s.Prompt,
@@ -407,6 +410,43 @@ func (s *Session) Snapshot() Snapshot {
 		Elapsed:           elapsed,
 	}
 	return snap
+}
+
+// CurrentClaudeID returns the active Claude Code session ID, or "" if none.
+// Must be called with mu held (at least for reading), or use Snapshot.ClaudeSessionID.
+func (s *Session) CurrentClaudeID() string {
+	if len(s.SessionChain) == 0 {
+		return ""
+	}
+	return s.SessionChain[len(s.SessionChain)-1]
+}
+
+// PriorClaudeIDs returns all historical Claude Code session IDs excluding the current one.
+// Returns nil if there is no history. Must be called with mu held for reading.
+func (s *Session) PriorClaudeIDs() []string {
+	if len(s.SessionChain) <= 1 {
+		return nil
+	}
+	prior := make([]string, len(s.SessionChain)-1)
+	copy(prior, s.SessionChain[:len(s.SessionChain)-1])
+	return prior
+}
+
+// appendToChainLocked appends newID to SessionChain under an already-held write lock.
+// No-op if newID is already the current (last) ID.
+func (s *Session) appendToChainLocked(newID string) {
+	if s.CurrentClaudeID() == newID {
+		return
+	}
+	s.SessionChain = append(s.SessionChain, newID)
+}
+
+// popChainLocked removes the last entry from SessionChain under an already-held write lock.
+// Used to revert a /clear when the new session has no conversation.
+func (s *Session) popChainLocked() {
+	if len(s.SessionChain) > 0 {
+		s.SessionChain = s.SessionChain[:len(s.SessionChain)-1]
+	}
 }
 
 // getName returns the session name under lock for sorting.

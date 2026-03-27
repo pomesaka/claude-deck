@@ -37,7 +37,7 @@ func (m *Manager) handleFileWrite(ev usage.FileEvent) {
 	debuglog.Printf("[filewrite] ev.SessionID=%s modTime=%s sessions=%d", ev.SessionID, ev.ModTime.Format("15:04:05"), len(sessions))
 	for _, s := range sessions {
 		s.mu.RLock()
-		csID := s.ClaudeSessionID
+		csID := s.CurrentClaudeID()
 		s.mu.RUnlock()
 
 		if csID == ev.SessionID {
@@ -82,8 +82,8 @@ func (m *Manager) StreamSession(sessionID string) {
 	}
 
 	sess.mu.RLock()
-	csID := sess.ClaudeSessionID
-	prevCSID := sess.PreviousClaudeSessionID
+	csID := sess.CurrentClaudeID()
+	priorIDs := sess.PriorClaudeIDs()
 	sess.mu.RUnlock()
 
 	if csID == "" {
@@ -95,10 +95,13 @@ func (m *Manager) StreamSession(sessionID string) {
 		return
 	}
 
-	// /clear 前の旧セッションの JSONL パスを事前解決（パス解決のみでディスク I/O なし）
-	prevPath := ""
-	if prevCSID != "" {
-		prevPath = m.usage.ResolveSessionPath(prevCSID)
+	// 旧セッションの JSONL パスを事前解決（パス解決のみでディスク I/O なし）
+	// SessionChain の全履歴を古い順に prefix として読み込む
+	var priorPaths []string
+	for _, id := range priorIDs {
+		if p := m.usage.ResolveSessionPath(id); p != "" {
+			priorPaths = append(priorPaths, p)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(m.ctx)
@@ -117,14 +120,17 @@ func (m *Manager) StreamSession(sessionID string) {
 			m.mu.Unlock()
 		}()
 
-		// /clear 前の旧セッションのログエントリを goroutine 内で読み込む。
+		// 旧セッションのログエントリを goroutine 内で読み込む。
 		// ReadAll() はディスク I/O を伴うため、TUI メインループのブロックを防ぐために
-		// goroutine 内で実行する。
+		// goroutine 内で実行する。SessionChain の全履歴を古い順に結合して prefix とする。
 		var prefixEntries []usage.LogEntry
-		if prevPath != "" {
-			prev := usage.NewLogStreamer(prevPath)
+		for _, p := range priorPaths {
+			prev := usage.NewLogStreamer(p)
 			prev.ReadAll()
-			prefixEntries = prev.Entries()
+			prefixEntries = append(prefixEntries, prev.Entries()...)
+		}
+		if len(prefixEntries) > usage.MaxEntries {
+			prefixEntries = prefixEntries[len(prefixEntries)-usage.MaxEntries:]
 		}
 
 		onChange := func(entries []usage.LogEntry) {
@@ -264,7 +270,7 @@ func (m *Manager) refreshBookmarks() {
 // ここではトークン数だけを軽量スキャンで更新する。
 func (m *Manager) hydrateSession(sess *Session) {
 	sess.mu.RLock()
-	csID := sess.ClaudeSessionID
+	csID := sess.CurrentClaudeID()
 	sess.mu.RUnlock()
 
 	if csID == "" {

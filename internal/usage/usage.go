@@ -105,24 +105,20 @@ func (r *Reader) DeleteSessionFiles(sessionID string) error {
 
 // ReadSessionByID reads a specific Claude Code session by its UUID.
 func (r *Reader) ReadSessionByID(sessionID string) *TokenStats {
-	pattern := filepath.Join(r.baseDir, "*", sessionID+".jsonl")
-	matches, _ := filepath.Glob(pattern)
-	if len(matches) == 0 {
+	path := r.ResolveSessionPath(sessionID)
+	if path == "" {
 		return nil
 	}
-	return r.aggregateFile(matches[0])
+	return r.aggregateFile(path)
 }
-
-
 
 // ReadSessionInfoByID reads full session metadata for a specific Claude Code session.
 func (r *Reader) ReadSessionInfoByID(sessionID string) *SessionInfo {
-	pattern := filepath.Join(r.baseDir, "*", sessionID+".jsonl")
-	matches, _ := filepath.Glob(pattern)
-	if len(matches) == 0 {
+	path := r.ResolveSessionPath(sessionID)
+	if path == "" {
 		return nil
 	}
-	return r.extractInfo(matches[0])
+	return r.extractInfo(path)
 }
 
 // HasConversation returns true if the session's JSONL contains at least one
@@ -384,16 +380,27 @@ func (r *Reader) accumulateEntry(info *SessionInfo, entry *jsonlEntry) {
 	}
 
 	// Accumulate token usage from assistant entries
-	if entry.Message != nil && entry.Message.Usage != nil {
-		u := entry.Message.Usage
-		info.Tokens.InputTokens += u.InputTokens
-		info.Tokens.OutputTokens += u.OutputTokens
-		info.Tokens.CacheCreationInputTokens += u.CacheCreationInputTokens
-		info.Tokens.CacheReadInputTokens += u.CacheReadInputTokens
+	if entry.Message != nil {
+		accumulateUsage(&info.Tokens, entry.Message)
 		if entry.Message.Model != "" {
 			info.Model = entry.Message.Model
-			info.Tokens.Model = entry.Message.Model
 		}
+	}
+}
+
+// accumulateUsage adds token counts and model from msg into stats.
+// No-op if msg or msg.Usage is nil.
+func accumulateUsage(stats *TokenStats, msg *jsonlMessage) {
+	if msg == nil || msg.Usage == nil {
+		return
+	}
+	u := msg.Usage
+	stats.InputTokens += u.InputTokens
+	stats.OutputTokens += u.OutputTokens
+	stats.CacheCreationInputTokens += u.CacheCreationInputTokens
+	stats.CacheReadInputTokens += u.CacheReadInputTokens
+	if msg.Model != "" {
+		stats.Model = msg.Model
 	}
 }
 
@@ -430,16 +437,7 @@ func (r *Reader) scanFile(path, workDir string) *TokenStats {
 			continue
 		}
 
-		if entry.Message != nil && entry.Message.Usage != nil {
-			u := entry.Message.Usage
-			stats.InputTokens += u.InputTokens
-			stats.OutputTokens += u.OutputTokens
-			stats.CacheCreationInputTokens += u.CacheCreationInputTokens
-			stats.CacheReadInputTokens += u.CacheReadInputTokens
-			if entry.Message.Model != "" {
-				stats.Model = entry.Message.Model
-			}
-		}
+		accumulateUsage(&stats, entry.Message)
 	}
 
 	if !matched {
@@ -472,16 +470,7 @@ func (r *Reader) aggregateFile(path string) *TokenStats {
 			continue
 		}
 
-		if entry.Message != nil && entry.Message.Usage != nil {
-			u := entry.Message.Usage
-			stats.InputTokens += u.InputTokens
-			stats.OutputTokens += u.OutputTokens
-			stats.CacheCreationInputTokens += u.CacheCreationInputTokens
-			stats.CacheReadInputTokens += u.CacheReadInputTokens
-			if entry.Message.Model != "" {
-				stats.Model = entry.Message.Model
-			}
-		}
+		accumulateUsage(&stats, entry.Message)
 	}
 
 	if stats.SessionID == "" {

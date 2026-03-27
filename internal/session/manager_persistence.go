@@ -46,6 +46,14 @@ func (m *Manager) LoadExisting() error {
 		return err
 	}
 
+	// legacySession は旧 JSON 形式のフィールドを読み込むための一時構造体。
+	// SessionChain 導入前は claude_session_id / previous_claude_session_id が別フィールドだった。
+	type legacySession struct {
+		ClaudeSessionID         string   `json:"claude_session_id,omitempty"`
+		PreviousClaudeSessionID string   `json:"previous_claude_session_id,omitempty"`
+		SessionChain            []string `json:"session_chain,omitempty"`
+	}
+
 	// 全件パースして sortTime で降順ソート
 	type parsed struct {
 		sess *Session
@@ -58,6 +66,18 @@ func (m *Manager) LoadExisting() error {
 			continue
 		}
 		s.LogLines = make([]string, 0)
+
+		// 旧形式 (claude_session_id / previous_claude_session_id) からの移行
+		if len(s.SessionChain) == 0 {
+			var legacy legacySession
+			if err := json.Unmarshal(data, &legacy); err == nil && legacy.ClaudeSessionID != "" {
+				if legacy.PreviousClaudeSessionID != "" {
+					s.SessionChain = []string{legacy.PreviousClaudeSessionID, legacy.ClaudeSessionID}
+				} else {
+					s.SessionChain = []string{legacy.ClaudeSessionID}
+				}
+			}
+		}
 
 		// 前回起動時に実行中だったセッションはプロセスハンドルが失われている。
 		// PID が生存していなければ完了扱いにする。
@@ -98,14 +118,7 @@ func (m *Manager) LoadExisting() error {
 	for i, p := range all {
 		if i < m.config.MaxSessions {
 			m.sessions[p.sess.ID] = p.sess
-			// /clear で更新された旧 ID を oldSessionIDs に復元し、
-			// DiscoverExternalSessions で再インポートされるのを防ぐ。
-			if p.sess.PreviousClaudeSessionID != "" {
-				if m.oldSessionIDs == nil {
-					m.oldSessionIDs = make(map[string]bool)
-				}
-				m.oldSessionIDs[p.sess.PreviousClaudeSessionID] = true
-			}
+			// SessionChain に旧 ID が含まれるため oldSessionIDs は不要
 		} else {
 			// 古いセッションはストアから削除
 			_ = m.store.Delete(p.id)
