@@ -532,13 +532,13 @@ func renderUsageGauge(label string, used float64, resetsAt time.Time, hexColor s
 // Examples: "42m", "4h30m", "1d20h"
 func formatDuration(d time.Duration) string {
 	d = d.Round(time.Minute)
-	h := int(d.Hours()) // intentional truncation: fractional hours accounted for in m
-	m := int(d.Minutes()) % 60
+	h := int(d.Hours()) // intentional truncation: fractional hours accounted for in mins
+	mins := int(d.Minutes()) % 60
 	switch {
 	case h == 0:
-		return fmt.Sprintf("%dm", m)
+		return fmt.Sprintf("%dm", mins)
 	case h < 24:
-		return fmt.Sprintf("%dh%dm", h, m)
+		return fmt.Sprintf("%dh%dm", h, mins)
 	default:
 		return fmt.Sprintf("%dd%dh", h/24, h%24)
 	}

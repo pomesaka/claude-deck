@@ -122,12 +122,16 @@ func (m *Manager) StreamSession(sessionID string) {
 
 		// 旧セッションのログエントリを goroutine 内で読み込む。
 		// ReadAll() はディスク I/O を伴うため、TUI メインループのブロックを防ぐために
-		// goroutine 内で実行する。SessionChain の全履歴を古い順に結合して prefix とする。
+		// goroutine 内で実行する。新しい順（逆順）に読み込み、MaxEntries に達した
+		// 時点で打ち切ることで /clear が多数回行われた場合の不要な I/O を防ぐ。
 		var prefixEntries []usage.LogEntry
-		for _, p := range priorPaths {
-			prev := usage.NewLogStreamer(p)
+		for i := len(priorPaths) - 1; i >= 0; i-- {
+			prev := usage.NewLogStreamer(priorPaths[i])
 			prev.ReadAll()
-			prefixEntries = append(prefixEntries, prev.Entries()...)
+			prefixEntries = append(prev.Entries(), prefixEntries...)
+			if len(prefixEntries) >= usage.MaxEntries {
+				break
+			}
 		}
 		if len(prefixEntries) > usage.MaxEntries {
 			prefixEntries = prefixEntries[len(prefixEntries)-usage.MaxEntries:]

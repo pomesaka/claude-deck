@@ -55,7 +55,7 @@ type statusLineConfig struct {
 	Command string `json:"command"`
 }
 
-// EnsureStatuslineScript writes the statusline wrapper script to dataDir and
+// SetupStatuslineHook writes the statusline wrapper script to dataDir and
 // registers it in ~/.claude/settings.json under the "statusLine" key
 // (camelCase, object form — the format recognised by Claude Code ≥ 2.1.80).
 //
@@ -65,7 +65,7 @@ type statusLineConfig struct {
 //
 // The legacy lowercase "statusline" string key (written by older claude-deck
 // versions) is removed if present.
-func EnsureStatuslineScript(dataDir string) error {
+func SetupStatuslineHook(dataDir string) error {
 	scriptPath := filepath.Clean(filepath.Join(dataDir, "statusline.sh"))
 
 	settPath, err := claudeSettingsPath()
@@ -135,8 +135,13 @@ func EnsureStatuslineScript(dataDir string) error {
 	if err := os.MkdirAll(filepath.Dir(settPath), 0o755); err != nil {
 		return fmt.Errorf("creating settings dir: %w", err)
 	}
-	if err := os.WriteFile(settPath, out, 0o644); err != nil {
-		return fmt.Errorf("writing settings: %w", err)
+	settTmp := settPath + ".tmp"
+	if err := os.WriteFile(settTmp, out, 0o644); err != nil {
+		return fmt.Errorf("writing settings tmp: %w", err)
+	}
+	if err := os.Rename(settTmp, settPath); err != nil {
+		_ = os.Remove(settTmp)
+		return fmt.Errorf("replacing settings: %w", err)
 	}
 
 	return nil
@@ -158,7 +163,7 @@ func expandHome(p string) string {
 func claudeSettingsPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("user home dir: %w", err)
 	}
 	return filepath.Join(home, ".claude", "settings.json"), nil
 }

@@ -462,8 +462,11 @@ func (s *Session) PriorClaudeIDs() []string {
 }
 
 // appendToChainLocked appends newID to SessionChain under an already-held write lock.
-// No-op if newID is already the current (last) ID.
+// No-op if newID is empty or already the current (last) ID.
 func (s *Session) appendToChainLocked(newID string) {
+	if newID == "" {
+		return
+	}
 	if s.CurrentClaudeID() == newID {
 		return
 	}

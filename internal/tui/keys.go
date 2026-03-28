@@ -130,8 +130,8 @@ func (m *Model) handleDetailPaneKey(msg tea.KeyPressMsg, hasActivePTY bool) (tea
 		m.focusDetail = false
 		return nil, true
 	case "ctrl+b":
-		// 半ページ上スクロール（vi: ctrl+b = backward）
-		m.viewportHalfPageUp(hasActivePTY)
+		// 半ページ下スクロール（ctrl+u と上下ペア）
+		m.viewportHalfPageDown(hasActivePTY)
 		return nil, true
 	case "ctrl+u":
 		// 半ページ上スクロール
@@ -297,6 +297,17 @@ func (m *Model) viewportHalfPageUp(hasActivePTY bool) {
 	} else {
 		m.logViewport.HalfPageUp()
 		m.logFollow = false
+	}
+}
+
+// viewportHalfPageDown scrolls the active viewport half a page down.
+func (m *Model) viewportHalfPageDown(hasActivePTY bool) {
+	if hasActivePTY {
+		m.ptyViewport.HalfPageDown()
+		m.ptyFollow = m.ptyViewport.AtBottom()
+	} else {
+		m.logViewport.HalfPageDown()
+		m.logFollow = m.logViewport.AtBottom()
 	}
 }
 

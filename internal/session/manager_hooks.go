@@ -93,8 +93,8 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 				return
 			}
 			sess.mu.Lock()
-			if sess.CurrentClaudeID() != "" {
-				curID := sess.CurrentClaudeID()
+			curID := sess.CurrentClaudeID()
+			if curID != "" {
 				sess.mu.Unlock()
 				debuglog.Printf("[event-watcher] SessionStart source=%s skipped: session %s already has ClaudeSessionID=%s",
 					ev.Source, ev.ClaudeDeckSessionID, curID)

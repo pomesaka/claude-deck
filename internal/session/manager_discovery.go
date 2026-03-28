@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -152,15 +153,12 @@ func (m *Manager) knownClaudeSessionIDs() map[string]bool {
 	return known
 }
 
-// hasClaudeSessionID reports whether claudeSessionID is already tracked
-// in any position of any session's chain.
-// Must be called with m.mu held (at least for reading).
+// hasClaudeSessionID returns true if any session in the chain contains claudeSessionID.
+// REQUIRES m.mu to be held (at least for reading); accessing m.sessions without it is a data race.
 func (m *Manager) hasClaudeSessionID(claudeSessionID string) bool {
 	for _, existing := range m.sessions {
-		for _, id := range existing.SessionChain {
-			if id == claudeSessionID {
-				return true
-			}
+		if slices.Contains(existing.SessionChain, claudeSessionID) {
+			return true
 		}
 	}
 	return false

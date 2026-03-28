@@ -75,7 +75,7 @@ func run() error {
 
 	// Claude Code の statusline スクリプトを配置し ~/.claude/settings.json に登録する。
 	// スクリプトは各アシスタントメッセージ後に rate_limits データを DataDir に書き出す。
-	if err := claudecode.EnsureStatuslineScript(cfg.DataDir); err != nil {
+	if err := claudecode.SetupStatuslineHook(cfg.DataDir); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: statusline setup: %v\n", err)
 	}
 

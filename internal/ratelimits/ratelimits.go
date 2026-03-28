@@ -130,7 +130,12 @@ func Watch(ctx context.Context, dataDir string, onUpdate func(Status)) error {
 				// Remove the dir watch to prevent duplicate events from both targets.
 				if watchingDir && isOurFile && (event.Has(fsnotify.Create) || event.Has(fsnotify.Write)) {
 					if err := watcher.Add(path); err == nil {
-						_ = watcher.Remove(dataDir)
+						// Add が成功した時点でファイル監視に切り替える。
+						// Remove 失敗時は dir/file 両方が一時的に監視されるが、
+						// watchingDir=false にすることで Add の無限再試行を防ぐ。
+						if rerr := watcher.Remove(dataDir); rerr != nil {
+							debuglog.Printf("[ratelimits] dir watch remove failed, continuing with file watch: %v", rerr)
+						}
 						watchingDir = false
 						debuglog.Printf("[ratelimits] switched to watching file %s", path)
 					}

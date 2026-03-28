@@ -27,6 +27,7 @@ func newHookProcessor() *hookProcessor {
 }
 
 // storePending records a SessionEnd event awaiting its paired SessionStart.
+// 同一 deckSessionID で複数回呼ばれた場合は最新のイベントで上書きする。
 func (h *hookProcessor) storePending(deckSessionID string, ev *hooks.Event) {
 	h.pendingEnd[deckSessionID] = ev
 	debuglog.Printf("[hook-proc] storePending: deck=%s claude=%s reason=%s", deckSessionID, ev.SessionID, ev.Reason)
