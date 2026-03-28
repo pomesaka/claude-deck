@@ -67,7 +67,8 @@ func (m *Manager) LoadExisting() error {
 		}
 		s.rt.LogLines = make([]string, 0)
 
-		// 旧形式 (claude_session_id / previous_claude_session_id) からの移行
+		// TODO: 旧形式 (claude_session_id / previous_claude_session_id) からの移行コード。
+		// 全ユーザーのストアが SessionChain 形式に移行したら削除可能。
 		if len(s.SessionChain) == 0 {
 			var legacy legacySession
 			if err := json.Unmarshal(data, &legacy); err == nil && legacy.ClaudeSessionID != "" {

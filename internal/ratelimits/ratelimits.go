@@ -147,10 +147,11 @@ func Watch(ctx context.Context, dataDir string, onUpdate func(Status)) error {
 					}
 				}
 
-			case _, ok := <-watcher.Errors:
+			case err, ok := <-watcher.Errors:
 				if !ok {
 					return
 				}
+				debuglog.Printf("[ratelimits] watcher error: %v", err)
 			}
 		}
 	}()
