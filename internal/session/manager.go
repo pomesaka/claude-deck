@@ -374,6 +374,27 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	// JSONL ストリーミングは継続する。PTY は入力・プロセス管理用で、
 	// 表示は JSONL 構造化ログを優先するため。
 
+	// PTY 起動前にエミュレータと rt フィールドをリセットする。
+	// 起動後にリセットすると、起動直後の出力が古いエミュレータに流れる
+	// リースウィンドウが生じるため、必ず起動前に行う。
+	sess.emuMu.Lock()
+	sess.emulator = newEmulatorWithCallbacks(sess, cols, rows)
+	sess.emuMu.Unlock()
+
+	// rt.maxLogLines と rt.LogLines は rt.mu で保護する。
+	// sess.mu との同時保持は禁止（ロック順序規則）。
+	sess.rt.mu.Lock()
+	sess.rt.maxLogLines = m.config.MaxLogLines
+	sess.rt.LogLines = make([]string, 0, 256)
+	sess.rt.mu.Unlock()
+
+	sess.mu.Lock()
+	sess.setStatusLocked(StatusIdle)
+	sess.FinishedAt = nil // resume なので終了時刻をクリア
+	sess.managed = true
+	sess.maxScrollback = m.config.MaxScrollback
+	sess.mu.Unlock()
+
 	debuglog.Printf("[ResumeSession] calling pty.Start")
 	proc, err := pty.Start(ctx, pty.StartOptions{
 		WorkDir:         workDir,
@@ -391,19 +412,8 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	}
 	debuglog.Printf("[ResumeSession] pty started pid=%d", proc.PID())
 
-	// rt.LogLines をリセット（rt.mu で保護、sess.mu と同時保持しない）
-	sess.rt.mu.Lock()
-	sess.rt.LogLines = make([]string, 0, 256)
-	sess.rt.mu.Unlock()
-
 	sess.mu.Lock()
-	sess.setStatusLocked(StatusIdle)
-	sess.FinishedAt = nil // resume なので終了時刻をクリア
 	sess.PID = proc.PID()
-	sess.managed = true
-	sess.rt.maxLogLines = m.config.MaxLogLines
-	sess.maxScrollback = m.config.MaxScrollback
-	sess.emulator = newEmulatorWithCallbacks(sess, cols, rows)
 	// JSONLLogEntries は上部ログビューポートで表示に使用し続ける。
 	// PTY 出力は下部の専用ビューポートに表示される。
 	sess.mu.Unlock()
