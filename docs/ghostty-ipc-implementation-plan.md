@@ -2,51 +2,225 @@
 
 前提: [Design Doc](./ghostty-ipc-pane-control.md) を参照。
 
-## Phase 1: MVP
+## Phase 0: SessionBackend interface の抽出（リファクタリング）
+
+Ghostty ネイティブ実装の前に、TUI→Manager 間の PTY 依存操作を interface 越しに行うようリファクタリングする。これにより PTY 実装と Ghostty 実装を差し替え可能にする。
+
+### 現状の TUI→Manager 依存関係
+
+TUI が呼ぶ Manager メソッドは大きく2種類に分かれる:
+
+**PTY 固有（backend interface に抽出する）:**
+
+| メソッド | 呼び出し元 | 用途 |
+|---------|-----------|------|
+| `CreateSession(ctx, repoPath, workDir, withWS, cols, rows)` | keys.go (n キー) | セッション作成 + PTY 起動 |
+| `ResumeSession(ctx, sessionID, cols, rows)` | keys.go (r キー) | セッション再開 + PTY 起動 |
+| `ForkSession(ctx, sourceID, cols, rows)` | keys.go (f キー) | セッションフォーク + PTY 起動 |
+| `Kill(sessionID)` | keys.go (x キー) | PTY プロセス終了 |
+| `WriteToSession(sessionID, data)` | keys.go (PTY入力モード) | PTY stdin に書き込み |
+| `ResizeSession(sessionID, cols, rows)` | view.go (viewport sync) | PTY + エミュレータ リサイズ |
+| `HasActiveProcess(sessionID)` | keys.go, view.go | PTY プロセス生存確認 |
+
+**汎用（Manager に残す、interface 不要）:**
+
+| メソッド | 用途 |
+|---------|------|
+| `ListSessions()` | セッション一覧 |
+| `GetSession(id)` | セッション取得 |
+| `DeleteSession(id)` / `RemoveSession(id)` | セッション削除 |
+| `StreamSession(id)` | JSONL ストリーミング開始 |
+| `RefreshFromJSONL()` | メタデータ更新 |
+| `SetOnChange(fn)` | UI 更新コールバック |
+
+**Session メソッド（PTY 固有）:**
+
+| メソッド | 用途 |
+|---------|------|
+| `GetPTYDisplayLines()` | PTY 出力の表示行 |
+| `GetPTYCursorPosition()` | PTY カーソル位置 |
+
+### Step 0-1: SessionBackend interface の定義
+
+**ファイル**: `internal/session/backend.go` (新規)
+
+```go
+// SessionBackend は Claude Code セッションの起動・制御を抽象化する。
+// PTY モード (ptyBackend) と Ghostty split モード (ghosttyBackend) の
+// 2つの実装を切り替え可能にする。
+type SessionBackend interface {
+    // セッションライフサイクル
+    StartSession(ctx context.Context, sess *Session, opts StartOpts) error
+    ResumeSession(ctx context.Context, sess *Session, opts ResumeOpts) error
+    ForkSession(ctx context.Context, sess *Session, source *Session, opts ForkOpts) error
+    StopSession(sessionID string) error
+
+    // セッション状態
+    IsActive(sessionID string) bool
+
+    // 表示（PTY モードのみ使用、Ghostty モードでは空/ゼロを返す）
+    DisplayLines(sessionID string) []string
+    CursorPosition(sessionID string) (x, y int)
+
+    // 入力（PTY モードのみ使用、Ghostty モードでは focus 移動）
+    WriteInput(sessionID string, data []byte) error
+
+    // リサイズ（PTY モードのみ使用、Ghostty モードでは no-op）
+    Resize(sessionID string, cols, rows int)
+
+    // クリーンアップ
+    Close() error
+}
+
+type StartOpts struct {
+    WorkDir        string
+    WithWorkspace  bool
+    Cols, Rows     int
+    AdditionalArgs []string
+    Env            []string
+}
+
+type ResumeOpts struct {
+    Cols, Rows int
+}
+
+type ForkOpts struct {
+    Cols, Rows int
+}
+```
+
+**設計意図:**
+- `CreateSession` 等の Manager メソッドは「セッションオブジェクト作成 + ワークスペース作成」と「プロセス起動」を現在混在させている。interface では「プロセス起動」部分のみを抽出
+- Manager は引き続きセッションオブジェクトの作成・永続化・ワークスペース管理を担当
+- Backend はプロセスの起動・停止・表示・入力のみを担当
+
+### Step 0-2: ptyBackend の実装（現行ロジックの移動）
+
+**ファイル**: `internal/session/backend_pty.go` (新規)
+
+現在 `manager.go` に散在する PTY 操作を `ptyBackend` 構造体に集約:
+
+```go
+type ptyBackend struct {
+    mu        sync.RWMutex
+    processes map[string]*pty.Process
+    manager   *Manager // handleOutput, watchProcess 等のコールバック用
+}
+
+func (b *ptyBackend) StartSession(ctx context.Context, sess *Session, opts StartOpts) error {
+    // 現在の CreateSession 内の pty.Start() 〜 watchProcess 部分を移動
+}
+
+func (b *ptyBackend) IsActive(sessionID string) bool {
+    // 現在の HasActiveProcess() を移動
+}
+
+func (b *ptyBackend) DisplayLines(sessionID string) []string {
+    // sess.GetPTYDisplayLines() を委譲
+}
+
+func (b *ptyBackend) WriteInput(sessionID string, data []byte) error {
+    // 現在の WriteToSession() を移動
+}
+
+// ... 他メソッドも同様
+```
+
+**移動元 → 移動先:**
+
+| 現在の場所 | 移動先 |
+|-----------|--------|
+| `Manager.processes` map | `ptyBackend.processes` |
+| `CreateSession` 内の `pty.Start()` 〜 `watchProcess` | `ptyBackend.StartSession()` |
+| `ResumeSession` 内の `pty.Start()` 〜 `watchProcess` | `ptyBackend.ResumeSession()` |
+| `ForkSession` 内の `pty.Start()` 〜 `watchProcess` | `ptyBackend.ForkSession()` |
+| `Kill()` | `ptyBackend.StopSession()` |
+| `WriteToSession()` | `ptyBackend.WriteInput()` |
+| `ResizeSession()` | `ptyBackend.Resize()` |
+| `HasActiveProcess()` | `ptyBackend.IsActive()` |
+| `handleOutput()` | `ptyBackend` 内 (Manager への callback で通知) |
+| `watchProcess()` | `ptyBackend` 内 (Manager への callback で通知) |
+
+### Step 0-3: Manager のリファクタリング
+
+**ファイル**: `internal/session/manager.go`
+
+```go
+type Manager struct {
+    mu       sync.RWMutex
+    sessions map[string]*Session
+    backend  SessionBackend  // ← 新規: PTY or Ghostty
+    store    *store.Store
+    // ... processes フィールドを削除（backend に移動）
+}
+
+func (m *Manager) CreateSession(ctx context.Context, repoPath, workDir string, 
+    withWorkspace bool, cols, rows int) (*Session, error) {
+    
+    // 1. セッションオブジェクト作成（変更なし）
+    // 2. ワークスペース作成（変更なし）
+    // 3. backend.StartSession() ← PTY 固有部分を委譲
+    // 4. persist + notifyChange（変更なし）
+}
+
+// HasActiveProcess は backend に委譲
+func (m *Manager) HasActiveProcess(sessionID string) bool {
+    return m.backend.IsActive(sessionID)
+}
+
+// WriteToSession は backend に委譲
+func (m *Manager) WriteToSession(sessionID string, data []byte) error {
+    return m.backend.WriteInput(sessionID, data)
+}
+
+// ResizeSession は backend に委譲
+func (m *Manager) ResizeSession(sessionID string, cols, rows int) {
+    m.backend.Resize(sessionID, cols, rows)
+}
+```
+
+### Step 0-4: TUI の変更（最小限）
+
+**ファイル**: `internal/tui/view.go`
+
+TUI 側の変更は最小限。Manager の公開 API は変わらないため:
+- `HasActiveProcess()` → そのまま（内部で backend に委譲）
+- `WriteToSession()` → そのまま
+- `ResizeSession()` → そのまま
+- `GetPTYDisplayLines()` / `GetPTYCursorPosition()` → Session メソッドは変更なし
+
+唯一の変更: `HasActiveProcess` が false のとき、Ghostty モードでは「アクティブだがPTY表示なし」のケースが生じる。これは Phase 1 で対応。
+
+### Step 0 の検証
+
+```bash
+# リファクタリング後、既存の全テストが通ること
+GOEXPERIMENT=jsonv2 go test ./...
+
+# 手動確認: PTY モードの動作が一切変わらないこと
+```
+
+**Step 0 完了時点では機能変更ゼロ。** 内部構造のみの変更で、全テストがパスすること。
+
+---
+
+## Phase 1: Ghostty Split モード MVP
 
 ### Step 1: AppleScript ラッパー
 
 **ファイル**: `internal/ghostty/applescript.go` (新規, `//go:build darwin`)
 
-osascript コマンドを Go から呼び出す薄いラッパーを実装する。
-
 ```go
 // GhosttyIPC は Ghostty の AppleScript IPC をラップする interface。
-// テスト時にモック差し替え可能。
 type GhosttyIPC interface {
-    // CreateWindow は新規 Ghostty ウィンドウを作成し、最初のターミナル UUID を返す。
     CreateWindow(cfg SurfaceConfig) (terminalUUID string, err error)
-
-    // SplitTerminal は指定ターミナルを分割し、新ターミナル UUID を返す。
     SplitTerminal(targetUUID string, direction SplitDirection, cfg SurfaceConfig) (newUUID string, err error)
-
-    // CloseTerminal は指定ターミナルを閉じる。
     CloseTerminal(uuid string) error
-
-    // FocusTerminal は指定ターミナルにフォーカスを移す。
     FocusTerminal(uuid string) error
-
-    // ResizeSplit は分割ペインをリサイズする (pixels 単位)。
     ResizeSplit(terminalUUID string, direction SplitDirection, pixels int) error
-
-    // ListTerminals は全ターミナルの情報を返す。
     ListTerminals() ([]TerminalInfo, error)
-
-    // TerminalExists は指定 UUID のターミナルが存在するか確認する。
     TerminalExists(uuid string) (bool, error)
-
-    // GetFrontWindowTerminals は最前面ウィンドウのターミナル UUID 一覧を返す。
-    GetFrontWindowTerminals() ([]string, error)
 }
-
-type SplitDirection string
-
-const (
-    SplitRight SplitDirection = "right"
-    SplitDown  SplitDirection = "down"
-    SplitLeft  SplitDirection = "left"
-    SplitUp    SplitDirection = "up"
-)
 
 type SurfaceConfig struct {
     Command       string   // "claude --agent ..." (シェルの代わりに実行)
@@ -59,7 +233,7 @@ type SurfaceConfig struct {
 type TerminalInfo struct {
     UUID    string
     Index   int
-    Name    string // terminal title
+    Name    string
     TTY     string
     WorkDir string
 }
@@ -67,13 +241,11 @@ type TerminalInfo struct {
 
 実装方針:
 - `os/exec` で `osascript -e '...'` を実行
-- AppleScript のテンプレートは Go 文字列定数で管理
 - 操作間に delay を挿入（split 後 250ms、タブ作成後 400ms）
-- エラーハンドリング: osascript の stderr を解析
 - ビルドタグ `//go:build darwin` で macOS 限定
-- Linux 用のスタブ (`applescript_other.go`, `//go:build !darwin`) はエラーを返す
+- Linux 用スタブ (`applescript_other.go`, `//go:build !darwin`) はエラーを返す
 
-**依存**: なし（新規ファイル）
+**依存**: なし
 
 ### Step 2: config に Ghostty モード追加
 
@@ -86,8 +258,6 @@ type GhosttyConfig struct {
 }
 ```
 
-`Mode` フィールドを追加。デフォルトは `"window"`（既存動作）。
-
 **依存**: なし
 
 ### Step 3: Session に Ghostty メタデータ追加
@@ -97,75 +267,98 @@ type GhosttyConfig struct {
 ```go
 type Session struct {
     // ... 既存フィールド ...
-    GhosttyTerminalUUID string // Ghostty ターミナルの UUID (split モード用)
+    GhosttyTerminalUUID string // Ghostty ターミナルの UUID
 }
 ```
-
-- store の JSON シリアライズに含める
-- `SetGhosttyUUID()` / `GetGhosttyUUID()` アクセサ追加（`mu` で保護）
 
 **依存**: なし
 
-### Step 4: Manager に Ghostty split モードのセッション作成を追加
+### Step 4: ghosttyBackend の実装
 
-**ファイル**: `internal/session/manager.go`, `internal/session/manager_ghostty.go` (新規)
+**ファイル**: `internal/session/backend_ghostty.go` (新規, `//go:build darwin`)
 
-`CreateSession` / `ResumeSession` / `ForkSession` を分岐:
+`SessionBackend` interface の Ghostty 実装:
 
 ```go
-func (m *Manager) CreateSession(ctx context.Context, ...) (*Session, error) {
-    // ... 既存のワークスペース作成等 ...
-
-    if m.ghosttyMode() {
-        return m.createGhosttySession(ctx, sess, actualWorkDir, ...)
-    }
-    return m.createPTYSession(ctx, sess, actualWorkDir, ...)
+type ghosttyBackend struct {
+    ipc          ghostty.GhosttyIPC
+    deckTermUUID string             // 左ペイン (deck TUI) の UUID
+    manager      *Manager           // コールバック用
 }
+
+func (b *ghosttyBackend) StartSession(ctx context.Context, sess *Session, opts StartOpts) error {
+    cfg := ghostty.SurfaceConfig{
+        Command:      buildClaudeCommand(sess, opts),
+        WorkDir:      opts.WorkDir,
+        Env:          opts.Env,
+        WaitAfterCmd: true,
+    }
+    uuid, err := b.ipc.SplitTerminal(b.deckTermUUID, ghostty.SplitRight, cfg)
+    if err != nil {
+        return err
+    }
+    sess.SetGhosttyUUID(uuid)
+    // resize: deck を狭く
+    b.ipc.ResizeSplit(b.deckTermUUID, ghostty.SplitLeft, deckWidthPixels)
+    // focus を deck に戻す
+    b.ipc.FocusTerminal(b.deckTermUUID)
+    return nil
+}
+
+func (b *ghosttyBackend) StopSession(sessionID string) error {
+    sess := b.manager.GetSession(sessionID)
+    uuid := sess.GetGhosttyUUID()
+    return b.ipc.CloseTerminal(uuid)
+}
+
+func (b *ghosttyBackend) IsActive(sessionID string) bool {
+    sess := b.manager.GetSession(sessionID)
+    uuid := sess.GetGhosttyUUID()
+    if uuid == "" { return false }
+    exists, _ := b.ipc.TerminalExists(uuid)
+    return exists
+}
+
+// PTY 表示系は Ghostty モードでは空を返す
+func (b *ghosttyBackend) DisplayLines(sessionID string) []string { return nil }
+func (b *ghosttyBackend) CursorPosition(sessionID string) (int, int) { return 0, 0 }
+
+// 入力は Ghostty ターミナルにフォーカスを移す
+func (b *ghosttyBackend) WriteInput(sessionID string, data []byte) error {
+    sess := b.manager.GetSession(sessionID)
+    uuid := sess.GetGhosttyUUID()
+    return b.ipc.FocusTerminal(uuid)
+}
+
+// リサイズは Ghostty が自動処理するため no-op
+func (b *ghosttyBackend) Resize(sessionID string, cols, rows int) {}
 ```
 
-`createGhosttySession` の処理 (`manager_ghostty.go`):
-1. `SurfaceConfig` を構築:
-   - `command`: `"claude --agent <name>"` (新規) / `"claude --resume <id>"` (再開) / `"claude --resume <id> --fork-session"` (フォーク)
-   - `env`: `["CLAUDE_DECK_SESSION_ID=<deckID>"]`
-   - `workDir`: ワークスペースパス
-   - `waitAfterCmd`: `true`（終了後もターミナル維持 → ポーリングで検知）
-2. `ipc.SplitTerminal(deckTermUUID, SplitRight, cfg)` で右 split 作成
-3. `ipc.ResizeSplit(deckTermUUID, SplitLeft, N)` で deck を狭く
-4. `ipc.FocusTerminal(deckTermUUID)` でフォーカスを deck に戻す
-5. 返された UUID を `sess.GhosttyTerminalUUID` に保存
-6. `sess.managed = true`, `sess.SetStatus(StatusIdle)`
-7. persist + notifyChange
-8. PTY 関連の処理（emulator 作成、handleOutput、watchProcess）はスキップ
-
-**依存**: Step 1, 2, 3
+**依存**: Step 0, 1, 3
 
 ### Step 5: セッション切替で右 split を入れ替え
 
-**ファイル**: `internal/session/manager_ghostty.go`
+**ファイル**: `internal/session/backend_ghostty.go`
 
 ```go
-// SwitchGhosttySession は右 split のセッションを切り替える。
-// 旧ターミナルを close し、新セッションの split を作成する。
-// 完了済みセッションの場合は右 split を作成しない（deck TUI が全幅になる）。
-func (m *Manager) SwitchGhosttySession(oldSessionID, newSessionID string) error {
+// SwitchSession は右 split のセッションを切り替える。
+func (b *ghosttyBackend) SwitchSession(oldSessionID, newSessionID string) error {
     // 1. 旧セッションの GhosttyTerminalUUID があれば close
-    // 2. 新セッションが managed かつアクティブなら:
-    //    a. 既に GhosttyTerminalUUID があるか確認 (まだ生きてたら何もしない)
-    //    b. なければ split 作成 + resize
-    // 3. 完了済みなら右 split なし (deck TUI で JSONL を表示)
+    // 2. 新セッションがアクティブなら split 作成 + resize
+    // 3. 完了済みなら右 split なし
 }
 ```
 
-**依存**: Step 1, 3, 4
+TUI の `j`/`k` キーハンドラから呼び出す。
+
+**依存**: Step 4
 
 ### Step 6: Ghostty ターミナルポーリング（終了検知）
 
-**ファイル**: `internal/session/manager_ghostty.go`
+**ファイル**: `internal/session/backend_ghostty.go`
 
 ```go
-// StartGhosttyWatcher は Ghostty ターミナルの生存をポーリングで確認する。
-// 消失したターミナルのセッションを Completed に遷移させる。
-func (m *Manager) StartGhosttyWatcher(ctx context.Context) {
+func (b *ghosttyBackend) StartWatcher(ctx context.Context) {
     go func() {
         ticker := time.NewTicker(5 * time.Second)
         defer ticker.Stop()
@@ -174,162 +367,81 @@ func (m *Manager) StartGhosttyWatcher(ctx context.Context) {
             case <-ctx.Done():
                 return
             case <-ticker.C:
-                m.checkGhosttyTerminals()
+                b.checkTerminals()
             }
         }
     }()
 }
-
-func (m *Manager) checkGhosttyTerminals() {
-    // 1. ListTerminals() で全ターミナル UUID を取得
-    // 2. managed セッションの GhosttyTerminalUUID と照合
-    // 3. 消失していたら:
-    //    a. sess.SetStatus(StatusCompleted)
-    //    b. sess.GhosttyTerminalUUID = "" (クリア)
-    //    c. persist + notifyChange
-}
 ```
 
-**依存**: Step 1, 3, 4
+**依存**: Step 4
 
 ### Step 7: JSONL 更新による Running 検知
 
 **ファイル**: `internal/session/manager_jsonl.go`
 
-既存の `handleFileWrite` を拡張:
+既存の `handleFileWrite` を拡張。Ghostty モード時、JSONL 更新で Idle → Running 遷移。
 
-```go
-func (m *Manager) handleFileWrite(claudeSessionID string) {
-    // ... 既存の LastActivity 更新 ...
-
-    // Ghostty モード: JSONL 更新 = Running の近似
-    if m.ghosttyMode() {
-        sess := m.findSessionByClaudeID(claudeSessionID)
-        if sess != nil {
-            status := sess.GetStatus()
-            if status == StatusIdle {
-                sess.SetStatus(StatusRunning)
-                m.notifyChange()
-            }
-        }
-    }
-}
-```
-
-**依存**: Step 2 (ghosttyMode 判定)
+**依存**: Step 0 (ghosttyMode 判定)
 
 ### Step 8: TUI の変更
 
 **ファイル**: `internal/tui/model.go`, `internal/tui/view.go`, `internal/tui/keys.go`
 
-#### レイアウト変更
-
-Ghostty split モード時の deck TUI:
-- 右ペイン（PTY ビューポート）を廃止
-- 左ペイン（セッションリスト）をメインに
-- 下部にメタ情報エリア（トークン、ツール、ステータス等）を表示
-- 完了済みセッション選択時のみ JSONL 構造化ログを表示
-
-```go
-func (m Model) renderGhosttyLayout(sess *session.Session) string {
-    // 上部: セッションリスト (既存)
-    // 下部: メタ情報 or JSONL ログ
-    //   - アクティブセッション: トークン、ツール、ステータスのサマリー
-    //   - 完了セッション: JSONL 構造化ログ (既存の renderLogs)
-}
-```
-
-#### キーバインド変更
-
-```go
-// Ghostty split モード
-case "enter", "i", "t":
-    // 右 split の Claude Code にフォーカスを移動
-    m.manager.FocusGhosttyTerminal(selectedSessionID)
-
-case "j", "k":
-    // セッション選択変更 + 右 split 切替
-    m.manager.SwitchGhosttySession(oldID, newID)
-
-case "n":
-    // セッション作成 → Ghostty split 作成
-    // (Manager.CreateSession が内部で分岐)
-
-case "x":
-    // 右 split を close → ポーリングで Completed 検知
-    m.manager.CloseGhosttyTerminal(selectedSessionID)
-```
+- Ghostty モード時の左ペイン化（セッションリスト + メタ情報）
+- `Enter`/`i`/`t` でフォーカス移動
+- `j`/`k` でセッション切替 + 右 split 入れ替え
+- 完了セッションは deck TUI 内で JSONL 表示
 
 **依存**: Step 4, 5
+
+---
 
 ## Phase 2: 自動セットアップ・UX 改善
 
 ### Step 9: 起動時の自動 split 構築
 
-- `claude-deck` 起動時に自分が Ghostty 内で動作しているか検出
-  - 環境変数 `GHOSTTY_RESOURCES_DIR` の有無で判定
-- Ghostty 内なら AppleScript で自身のターミナルを特定し、`deckTermUUID` として保持
-- 既にアクティブなセッションがあれば自動で右 split を作成
+- Ghostty 内かを `GHOSTTY_RESOURCES_DIR` で判定
+- 自身のターミナル UUID を特定し `deckTermUUID` として保持
+- アクティブセッションがあれば自動で右 split 作成
 
-### Step 10: `x` キーでの右 split 閉鎖
+### Step 10: セッション名をターミナルタイトルに反映
 
-- `ipc.CloseTerminal(uuid)` を呼ぶ
-- ポーリングで Completed を検知 → TUI 更新
+- `SurfaceConfig.Command` にシェル経由で OSC 0 設定を組み込み
 
-### Step 11: セッション名をターミナルタイトルに反映
-
-- `SurfaceConfig.InitialInput` で OSC 0 設定を送信:
-  ```
-  printf '\033]0;session-name\007'
-  ```
-- または `command` にシェル経由で組み込み:
-  ```
-  /bin/sh -c 'printf "\033]0;session-name\007" && claude --agent session-name'
-  ```
-
-### Step 12: split 比率の設定対応
+### Step 11: split 比率の設定対応
 
 ```toml
 [ghostty]
-mode = "split"
-# deck ペインの幅比率 (0.0-1.0, デフォルト 0.3)
 deck_ratio = 0.3
 ```
 
-- System Events で window size を取得 → pixel 計算 → resize_split
+### Step 12: `x` キーでの右 split 閉鎖
+
+---
 
 ## Phase 3: 拡張
 
 ### Step 13: 別ウィンドウ + タブ方式のサポート
 
-Split 方式の代替として、別ウィンドウにタブを並べる方式もサポート:
-
-```toml
-[ghostty]
-mode = "tabs"  # "split" | "tabs" | "window"
-```
-
-- `mode = "tabs"`: 別 Ghostty ウィンドウにセッション毎のタブを作成
-- deck TUI は独立したターミナルで動作
-- `goto_tab:N` でタブ切替
-
 ### Step 14: Linux D-Bus 対応
 
-- Ghostty 側の D-Bus API 拡張待ち
-- `GhosttyIPC` interface の D-Bus 実装 (`internal/ghostty/dbus.go`)
+---
 
 ## ファイル一覧
 
 | ファイル | 変更種別 | Step |
 |---------|---------|------|
+| `internal/session/backend.go` | **新規** | 0-1 |
+| `internal/session/backend_pty.go` | **新規** | 0-2 |
+| `internal/session/manager.go` | 改修 | 0-3 |
+| `internal/session/manager_ghostty.go` | 削除予定 | 0-3 (backend_ghostty.go に統合) |
 | `internal/ghostty/applescript.go` | **新規** | 1 |
 | `internal/ghostty/applescript_other.go` | **新規** | 1 (Linux スタブ) |
-| `internal/ghostty/ghostty.go` | 改修 | 1 (interface 抽出) |
 | `internal/config/config.go` | 改修 | 2 |
 | `internal/session/session.go` | 改修 | 3 |
 | `internal/store/store.go` | 改修 | 3 |
-| `internal/session/manager.go` | 改修 | 4 |
-| `internal/session/manager_ghostty.go` | **新規** | 4, 5, 6 |
+| `internal/session/backend_ghostty.go` | **新規** | 4 |
 | `internal/session/manager_jsonl.go` | 改修 | 7 |
 | `internal/tui/model.go` | 改修 | 8 |
 | `internal/tui/view.go` | 改修 | 8 |
@@ -337,38 +449,35 @@ mode = "tabs"  # "split" | "tabs" | "window"
 
 ## テスト戦略
 
-### ユニットテスト
+### Phase 0 (リファクタリング)
+
+```bash
+# 既存テストが全てパスすること（機能変更ゼロ）
+GOEXPERIMENT=jsonv2 go test ./...
+```
+
+- `ptyBackend` はテスト用モックが不要（既存テストがそのまま動く）
+- `SessionBackend` interface のモック実装を用意し、Manager のユニットテストを追加
+
+### Phase 1 (Ghostty MVP)
 
 - `GhosttyIPC` interface のモック実装でロジックテスト
-- `SwitchGhosttySession`: close → split の順序確認
-- `checkGhosttyTerminals`: UUID 消失時の Completed 遷移
-- `handleFileWrite` の Running 遷移: 既存テストの拡張
+- `ghosttyBackend.StartSession`: split 呼び出し順序の確認
+- `ghosttyBackend.SwitchSession`: close → split の順序確認
+- `checkTerminals`: UUID 消失時の Completed 遷移
 
 ### 統合テスト (手動)
 
-- macOS + Ghostty 1.3+ 環境で E2E 確認
-- TCC (Automation) 権限の初回承認フロー確認
-- セッション作成 → 右 split 確認 → 操作 → 終了 → TUI 反映のフルサイクル
+- macOS + Ghostty 1.3+ で E2E 確認
+- セッション作成 → 右 split → 操作 → 終了 → TUI 反映のフルサイクル
 - セッション切替時のちらつき許容度の確認
-- delay 値の調整（環境依存）
-
-### ビルド
-
-```bash
-# macOS (Ghostty split モード含む)
-GOEXPERIMENT=jsonv2 go build -o claude-deck ./cmd/claude-deck
-
-# Linux (AppleScript は除外、GhosttyIPC はスタブ)
-GOEXPERIMENT=jsonv2 go build -o claude-deck ./cmd/claude-deck
-```
 
 ## 実装順序の根拠
 
-1. **Step 1 (AppleScript ラッパー)** を最初に。他の全ステップがこれに依存
-2. **Step 2-3 (config, session)** は独立して進められるデータ構造変更
-3. **Step 4 (Manager 分岐)** がコア。PTY と Ghostty の分岐点
-4. **Step 5 (セッション切替)** は split モードの核心。UX に直結
-5. **Step 6-7 (終了検知, Running 検知)** はセッション管理の必須要素
-6. **Step 8 (TUI)** は最後。Manager が動作確認できてから UI を接続
+1. **Phase 0** を最初に。interface 境界を確立してからでないと、Ghostty 実装が Manager のあちこちに侵食する
+2. Phase 0 は機能変更ゼロなので安全にマージ可能
+3. Phase 1 の Step 1-3 は並行作業可能（独立したファイル追加）
+4. Step 4 (ghosttyBackend) が Phase 1 のコア
+5. Step 5-8 は Step 4 の上に積み上げ
 
-Phase 1 完了で MVP として使用可能。Phase 2 以降は使用感を見てから優先度を判断する。
+Phase 0 + Phase 1 完了で MVP として使用可能。
