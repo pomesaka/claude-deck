@@ -10,6 +10,10 @@ const (
 	LaunchResume
 	// LaunchFork creates a new session that forks an existing conversation.
 	LaunchFork
+	// LaunchExternal creates a session whose PTY is hosted by an external
+	// terminal (e.g. Ghostty / tmux). claude-deck manages metadata only —
+	// no emulator, no PTY output capture.
+	LaunchExternal
 )
 
 func (k LaunchKind) String() string {
@@ -20,6 +24,8 @@ func (k LaunchKind) String() string {
 		return "Resume"
 	case LaunchFork:
 		return "Fork"
+	case LaunchExternal:
+		return "External"
 	default:
 		return "Unknown"
 	}

@@ -600,3 +600,87 @@ func TestLoadExisting_DeletedDirectory(t *testing.T) {
 		t.Errorf("existing dir session status = %v, want StatusCompleted", got2.Status)
 	}
 }
+
+func TestHostingMode_String(t *testing.T) {
+	tests := []struct {
+		mode HostingMode
+		want string
+	}{
+		{HostEmbedded, "Embedded"},
+		{HostExternal, "External"},
+		{HostingMode(99), "Unknown"},
+	}
+	for _, tt := range tests {
+		if got := tt.mode.String(); got != tt.want {
+			t.Errorf("HostingMode(%d).String() = %q, want %q", tt.mode, got, tt.want)
+		}
+	}
+}
+
+func TestDisplayChannel_String(t *testing.T) {
+	tests := []struct {
+		ch   DisplayChannel
+		want string
+	}{
+		{DisplayPTY, "PTY"},
+		{DisplayJSONL, "JSONL"},
+		{DisplayNone, "None"},
+		{DisplayChannel(99), "Unknown"},
+	}
+	for _, tt := range tests {
+		if got := tt.ch.String(); got != tt.want {
+			t.Errorf("DisplayChannel(%d).String() = %q, want %q", tt.ch, got, tt.want)
+		}
+	}
+}
+
+func TestDisplayChannel_Derivation(t *testing.T) {
+	tests := []struct {
+		name    string
+		hosting HostingMode
+		managed bool
+		want    DisplayChannel
+	}{
+		{"embedded+managed", HostEmbedded, true, DisplayPTY},
+		{"embedded+unmanaged", HostEmbedded, false, DisplayJSONL},
+		{"external+managed", HostExternal, true, DisplayNone},
+		{"external+unmanaged", HostExternal, false, DisplayJSONL},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewSession("/tmp/repo", "repo")
+			s.Hosting = tt.hosting
+			s.managed = tt.managed
+			snap := s.Snapshot()
+			if snap.Display != tt.want {
+				t.Errorf("Display = %v, want %v", snap.Display, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewExternalSession(t *testing.T) {
+	s := NewExternalSession("/tmp/repo", "repo")
+	if s.Hosting != HostExternal {
+		t.Errorf("Hosting = %v, want HostExternal", s.Hosting)
+	}
+	if s.emulator != nil {
+		t.Error("external session should not have an emulator")
+	}
+	// AppendRaw should not panic with nil emulator
+	s.AppendRaw([]byte("hello\n"))
+	logs := s.GetLogs()
+	if len(logs) == 0 {
+		t.Error("LogLines should still be populated for external sessions")
+	}
+}
+
+func TestNewSession_DefaultHosting(t *testing.T) {
+	s := NewSession("/tmp/repo", "repo")
+	if s.Hosting != HostEmbedded {
+		t.Errorf("Hosting = %v, want HostEmbedded", s.Hosting)
+	}
+	if s.emulator == nil {
+		t.Error("embedded session should have an emulator")
+	}
+}

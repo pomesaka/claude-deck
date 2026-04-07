@@ -120,6 +120,66 @@ func (p SessionPhase) String() string {
 	}
 }
 
+// HostingMode describes who manages the PTY process for a session.
+// This is a fundamental attribute set at launch time and immutable for the
+// session's lifetime. It determines whether claude-deck runs an emulator,
+// captures PTY output, and detects spinners — or delegates all of that
+// to an external terminal.
+type HostingMode int
+
+const (
+	// HostEmbedded means claude-deck owns the PTY process.
+	// The emulator captures output, displayCache is maintained, and spinner
+	// detection drives status transitions.
+	HostEmbedded HostingMode = iota
+	// HostExternal means an external terminal (Ghostty, tmux, etc.) owns the PTY.
+	// claude-deck tracks metadata only via JSONL and hooks.
+	// No emulator, no PTY output capture, no spinner detection.
+	HostExternal
+)
+
+func (h HostingMode) String() string {
+	switch h {
+	case HostEmbedded:
+		return "Embedded"
+	case HostExternal:
+		return "External"
+	default:
+		return "Unknown"
+	}
+}
+
+// DisplayChannel describes what data source should be used to render a
+// session's detail pane. Derived from the session's current state rather
+// than stored — it's a projection, not persisted data.
+type DisplayChannel int
+
+const (
+	// DisplayPTY renders live PTY output via the emulator's displayCache.
+	// Used when the session has an active embedded process.
+	DisplayPTY DisplayChannel = iota
+	// DisplayJSONL renders structured JSONL log entries.
+	// Used for completed/archived sessions or external sessions.
+	DisplayJSONL
+	// DisplayNone means no detail content is available from claude-deck.
+	// Used for externally-hosted sessions with an active process —
+	// the user interacts via their external terminal instead.
+	DisplayNone
+)
+
+func (d DisplayChannel) String() string {
+	switch d {
+	case DisplayPTY:
+		return "PTY"
+	case DisplayJSONL:
+		return "JSONL"
+	case DisplayNone:
+		return "None"
+	default:
+		return "Unknown"
+	}
+}
+
 // PricingPolicy defines token pricing rates per million tokens (USD).
 // This is a Value Object: immutable, compared by value, no identity.
 // It captures the domain concept of "how much does usage cost" and allows
@@ -223,8 +283,9 @@ type Session struct {
 	// --- Runtime fields (not persisted, protected by sess.mu) ---
 	CurrentTool  string `json:"-"` // パーサー検出中のツール名
 	ErrorMessage string `json:"-"` // パーサーが検知したエラー行
+	Hosting      HostingMode        // PTY ホスティング戦略（起動時に決定、不変）
 	managed      bool               // Manager が PTY プロセスを管理中かどうか
-	emulator     *vt.Emulator       // PTY 出力を解釈する仮想端末 (charmbracelet/x/vt)
+	emulator     *vt.Emulator       // PTY 出力を解釈する仮想端末 (HostEmbedded のみ)
 
 	// displayCache は emulator.Write() 完了後に毎回更新される表示キャッシュ。
 	displayCache atomic.Pointer[[]string]
@@ -257,6 +318,22 @@ type Session struct {
 	scrollbackStyled []string
 
 	maxScrollback int // config から設定。0 の場合はデフォルト 2000
+}
+
+// displayChannelLocked returns the appropriate display data source for this session.
+// Must be called with mu held (at least for reading), or use Snapshot.DisplayChannel.
+func (s *Session) displayChannelLocked() DisplayChannel {
+	if s.Hosting == HostExternal {
+		if s.managed {
+			return DisplayNone // external terminal is showing live output
+		}
+		return DisplayJSONL // external session finished, show logs
+	}
+	// Embedded hosting
+	if s.managed {
+		return DisplayPTY
+	}
+	return DisplayJSONL
 }
 
 // Phase returns the high-level lifecycle phase derived from Status and managed flag.
@@ -479,6 +556,8 @@ type Snapshot struct {
 	// Derived from len(SessionChain) - 1.
 	ClearCount        int
 	Phase             SessionPhase
+	Hosting           HostingMode
+	Display           DisplayChannel
 	Status            Status
 	Managed           bool
 	Prompt            string
@@ -534,6 +613,8 @@ func (s *Session) Snapshot() Snapshot {
 		ClaudeSessionID:   s.CurrentClaudeID(),
 		ClearCount:        max(0, len(s.SessionChain)-1),
 		Phase:             s.phaseLocked(),
+		Hosting:           s.Hosting,
+		Display:           s.displayChannelLocked(),
 		Status:            s.Status,
 		Managed:           s.managed,
 		Prompt:            s.Prompt,
@@ -635,6 +716,7 @@ func (s *Session) sortGroup() int {
 }
 
 // NewSession creates a new session with the given parameters.
+// Hosting defaults to HostEmbedded; callers may set HostExternal before launch.
 func NewSession(repoPath, repoName string) *Session {
 	s := &Session{
 		ID:            GenerateSessionID(),
@@ -644,8 +726,27 @@ func NewSession(repoPath, repoName string) *Session {
 		TerminalTitle: "New Session",
 		Status:        StatusIdle,
 		StartedAt:     time.Now(),
+		Hosting:       HostEmbedded,
 	}
 	s.rt.LogLines = make([]string, 0, 256)
 	s.emulator = newEmulatorWithCallbacks(s, 0, 0)
+	return s
+}
+
+// NewExternalSession creates a session for external PTY hosting.
+// No emulator is allocated — the external terminal handles PTY rendering.
+func NewExternalSession(repoPath, repoName string) *Session {
+	s := &Session{
+		ID:            GenerateSessionID(),
+		Name:          GenerateWorkspaceName(),
+		RepoPath:      repoPath,
+		RepoName:      repoName,
+		TerminalTitle: "New Session",
+		Status:        StatusIdle,
+		StartedAt:     time.Now(),
+		Hosting:       HostExternal,
+	}
+	s.rt.LogLines = make([]string, 0, 256)
+	// No emulator — external terminal handles PTY rendering.
 	return s
 }
