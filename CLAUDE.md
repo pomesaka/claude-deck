@@ -38,6 +38,12 @@ internal/
 
 詳細なアーキテクチャは [docs/architecture.md](docs/architecture.md) を参照。
 
+## 設計原則
+
+[docs/design-principles.md](docs/design-principles.md) を参照。実装・レビュー時に常に意識すること。
+
+`/review-domain` コマンドでドメイン分析・アーキテクチャレビューを実行可能。
+
 ## 開発時の重要事項
 
 ### ロック順序（デッドロック防止）
