@@ -147,8 +147,8 @@ func run() error {
 	}
 
 	// ストリーマーやバックグラウンド処理からの変更通知を Bubble Tea に伝える
-	mgr.SetOnChange(func() {
-		p.Send(tui.SessionRefreshMsg{})
+	mgr.SetOnChange(func(changed map[session.DeckSessionID]bool) {
+		p.Send(tui.SessionRefreshMsg{ChangedIDs: changed})
 	})
 	mgr.StartNotifyLoop(ctx)
 	mgr.StartSpinnerIdleLoop(ctx)

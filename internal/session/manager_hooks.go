@@ -54,7 +54,7 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 		}
 		debuglog.Printf("[event-watcher] Notification: session=%s type=%s → %s",
 			ev.SessionID, ev.NotificationType, sess.GetStatus())
-		m.notifyChange()
+		m.notifyChange(sess.ID)
 
 	case hooks.EventStop:
 		sess := m.findSessionByClaudeID(ClaudeSessionID(ev.SessionID))
@@ -64,7 +64,7 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 		}
 		sess.SetStatus(StatusIdle)
 		debuglog.Printf("[event-watcher] Stop: session=%s → StatusIdle", ev.SessionID)
-		m.notifyChange()
+		m.notifyChange(sess.ID)
 
 	case hooks.EventSessionEnd:
 		if ev.ClaudeDeckSessionID == "" {
@@ -109,7 +109,7 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 			debuglog.Printf("[event-watcher] session %s: ClaudeSessionID set to %s (source=%s)",
 				deckID, claudeID, ev.Source)
 			m.persist(sess)
-			m.notifyChange()
+			m.notifyChange(deckID)
 			return
 		}
 
@@ -168,7 +168,7 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 			m.StreamSession(deckID)
 		}
 
-		m.notifyChange()
+		m.notifyChange(deckID)
 	}
 }
 

@@ -55,7 +55,7 @@ type Manager struct {
 	usage      *usage.Reader
 	ctx        context.Context
 	config     ManagerConfig
-	onChange   func()
+	onChange   func(changed map[DeckSessionID]bool)
 
 	// 詳細ペインで選択中のセッションのみストリーミング（最大1つ）
 	activeStreamID     DeckSessionID
@@ -66,6 +66,11 @@ type Manager struct {
 
 	// notifyChange デバウンス用チャネル（バッファ 1 でバーストを吸収）
 	notifyCh chan struct{}
+
+	// pendingChanges はデバウンス間隔中に変更があったセッション ID を蓄積する。
+	// onChange コールバック発火時にドレインされる。空の場合はブロードキャスト（全セッション更新）。
+	pendingMu      sync.Mutex
+	pendingChanges map[DeckSessionID]bool
 
 	// JSONL ファイルの fsnotify 監視
 	fileWatcher *usage.MultiWatcher
@@ -82,14 +87,15 @@ type Manager struct {
 // ctx is used as the parent context for log streaming goroutines.
 func NewManager(ctx context.Context, st *store.Store, cfg ManagerConfig) *Manager {
 	return &Manager{
-		sessions:   make(map[DeckSessionID]*Session),
-		Supervisor: NewProcessSupervisor(),
-		store:      st,
-		usage:      usage.NewReader(""),
-		ctx:        ctx,
-		config:     cfg,
-		notifyCh:   make(chan struct{}, 1),
-		hookProc:   newHookProcessor(),
+		sessions:       make(map[DeckSessionID]*Session),
+		Supervisor:     NewProcessSupervisor(),
+		store:          st,
+		usage:          usage.NewReader(""),
+		ctx:            ctx,
+		config:         cfg,
+		notifyCh:       make(chan struct{}, 1),
+		pendingChanges: make(map[DeckSessionID]bool),
+		hookProc:       newHookProcessor(),
 	}
 }
 
@@ -103,17 +109,39 @@ func (m *Manager) jj() *jj.Runner {
 }
 
 // SetOnChange registers a callback for session state changes.
-func (m *Manager) SetOnChange(fn func()) {
+// The callback receives a map of session IDs that changed since the last call.
+// An empty map means a broad change (e.g. discovery) that may affect all sessions.
+func (m *Manager) SetOnChange(fn func(changed map[DeckSessionID]bool)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onChange = fn
 }
 
-func (m *Manager) notifyChange() {
+// notifyChange signals that session state has changed.
+// sessionIDs identifies which sessions changed. If empty, the change is broad
+// (e.g. discovery) and consumers should refresh everything.
+func (m *Manager) notifyChange(sessionIDs ...DeckSessionID) {
+	if len(sessionIDs) > 0 {
+		m.pendingMu.Lock()
+		for _, id := range sessionIDs {
+			m.pendingChanges[id] = true
+		}
+		m.pendingMu.Unlock()
+	}
 	select {
 	case m.notifyCh <- struct{}{}:
 	default: // already pending; coalesce into the buffered signal
 	}
+}
+
+// drainPendingChanges returns and clears the accumulated set of changed session IDs.
+// An empty map means at least one broad (non-session-specific) change occurred.
+func (m *Manager) drainPendingChanges() map[DeckSessionID]bool {
+	m.pendingMu.Lock()
+	changes := m.pendingChanges
+	m.pendingChanges = make(map[DeckSessionID]bool)
+	m.pendingMu.Unlock()
+	return changes
 }
 
 // StartNotifyLoop fires onChange whenever notifyChange is called, debounced to
@@ -140,11 +168,12 @@ func (m *Manager) StartNotifyLoop(ctx context.Context) {
 						return
 					}
 				}
+				changes := m.drainPendingChanges()
 				m.mu.RLock()
 				fn := m.onChange
 				m.mu.RUnlock()
 				if fn != nil {
-					fn()
+					fn(changes)
 				}
 			}
 		}
@@ -167,7 +196,7 @@ func (m *Manager) StartSpinnerIdleLoop(ctx context.Context) {
 					if sess.spinnerIdleSince(spinnerIdleTimeout) {
 						debuglog.Printf("[spinnerIdle] session %s: spinner timeout, transitioning to Idle", sess.ID)
 						sess.SetStatus(StatusIdle)
-						m.notifyChange()
+						m.notifyChange(sess.ID)
 					}
 				}
 			}
@@ -291,7 +320,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	m.Supervisor.Register(sess.ID, proc)
 	m.persist(sess)
 	m.pruneOldSessions()
-	m.notifyChange()
+	m.notifyChange(sess.ID)
 
 	go m.watchProcess(sess, proc)
 
@@ -311,7 +340,7 @@ func (m *Manager) handleOutput(sess *Session, data []byte) {
 		}
 	}
 
-	m.notifyChange()
+	m.notifyChange(sess.ID)
 }
 
 // watchProcess monitors a session process for exit.
@@ -357,7 +386,7 @@ func (m *Manager) watchProcess(sess *Session, proc *pty.Process) {
 	}
 
 	m.persist(sess)
-	m.notifyChange()
+	m.notifyChange(sess.ID)
 }
 
 // ResumeSession resumes a completed Claude Code session using --resume.
@@ -456,7 +485,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID, co
 	m.Supervisor.Register(sessionID, proc)
 
 	m.persist(sess)
-	m.notifyChange()
+	m.notifyChange(sessionID)
 	debuglog.Printf("[ResumeSession] done, watching process")
 
 	go m.watchProcess(sess, proc)
@@ -553,7 +582,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	m.Supervisor.Register(sess.ID, proc)
 	m.persist(sess)
 	m.pruneOldSessions()
-	m.notifyChange()
+	m.notifyChange(sess.ID)
 
 	go m.watchProcess(sess, proc)
 
@@ -588,7 +617,7 @@ func (m *Manager) RemoveSession(sessionID DeckSessionID) error {
 		_ = m.store.Delete(string(sessionID))
 	}
 
-	m.notifyChange()
+	m.notifyChange(sessionID)
 	return nil
 }
 
@@ -653,7 +682,7 @@ func (m *Manager) DeleteSession(sessionID DeckSessionID) (warning string, err er
 		}
 	}
 
-	m.notifyChange()
+	m.notifyChange(sessionID)
 	return warning, nil
 }
 

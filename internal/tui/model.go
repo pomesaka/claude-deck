@@ -82,7 +82,11 @@ type Model struct {
 
 // SessionRefreshMsg triggers a session list refresh.
 // Manager の onChange コールバックからも送信されるためエクスポート。
-type SessionRefreshMsg struct{}
+// ChangedIDs が空の場合はブロードキャスト（全セッション更新）。
+// 非空の場合は指定されたセッションのみ変更された。
+type SessionRefreshMsg struct {
+	ChangedIDs map[session.DeckSessionID]bool
+}
 
 // statusClearMsg clears the status message.
 type statusClearMsg struct{}
@@ -234,9 +238,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncLogViewport()
 
 	case SessionRefreshMsg:
-		debuglog.Printf("[tui] SessionRefreshMsg received")
+		debuglog.Printf("[tui] SessionRefreshMsg received changedIDs=%d", len(msg.ChangedIDs))
 		m.refreshSessions()
-		m.syncLogViewport()
+		// 選択中のセッションが変更対象に含まれるか、ブロードキャストの場合のみ viewport 更新
+		if len(msg.ChangedIDs) == 0 || msg.ChangedIDs[m.selectedID] {
+			m.syncLogViewport()
+		}
 
 	case metadataTickMsg:
 		debuglog.Printf("[tui] metadataTickMsg (event loop alive)")

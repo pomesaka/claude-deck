@@ -14,10 +14,11 @@ import (
 // must be updated to avoid silent nil panics.
 func newTestManager() *Manager {
 	return &Manager{
-		sessions:   make(map[DeckSessionID]*Session),
-		Supervisor: NewProcessSupervisor(),
-		ctx:        context.Background(),
-		hookProc:   newHookProcessor(),
+		sessions:       make(map[DeckSessionID]*Session),
+		Supervisor:     NewProcessSupervisor(),
+		ctx:            context.Background(),
+		hookProc:       newHookProcessor(),
+		pendingChanges: make(map[DeckSessionID]bool),
 	}
 }
 

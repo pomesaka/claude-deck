@@ -42,7 +42,7 @@ func (m *Manager) handleFileWrite(ev usage.FileEvent) {
 		if string(csID) == ev.SessionID {
 			s.ApplyFileActivity(ev.ModTime)
 			debuglog.Printf("[filewrite] matched session %s (deck=%s) LastActivity -> %s", csID, s.ID, ev.ModTime.Format("15:04:05"))
-			m.notifyChange()
+			m.notifyChange(s.ID)
 			return
 		}
 	}
@@ -147,7 +147,7 @@ func (m *Manager) StreamSession(sessionID DeckSessionID) {
 			sess.rt.mu.Lock()
 			sess.rt.JSONLLogEntries = merged
 			sess.rt.mu.Unlock()
-			m.notifyChange()
+			m.notifyChange(sessionID)
 		}
 
 		// Phase 1: 末尾読み込みで即座に表示
