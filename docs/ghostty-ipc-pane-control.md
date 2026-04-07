@@ -78,6 +78,41 @@ delay なしだと後続操作が誤ったターミナルを対象にする。
 - **ペイン内プロセス差替**: 不可。close → 再 split で対応
 - **初期分割比率**: 指定不可。常に ~50/50 → 作成後に resize
 
+## 設計判断の背景
+
+### 現行のセッション切替が高速な理由
+
+現行の PTY モードでは、セッション切替は**メモリ上の displayCache を差し替えるだけ**で完了する:
+
+```
+j/k キー押下
+  → updateSelected()
+    → selectedID を新セッションに変更
+    → syncLogViewport()
+      → sess.GetPTYDisplayLines()  // displayCache を読むだけ
+      → ptyViewport.SetContent()   // viewport にセット
+```
+
+各セッションが個別に `displayCache`（PTY 出力）と `JSONLLogEntries`（構造化ログ）を保持しているため、PTY プロセスの付け替えは一切発生しない。切替は瞬時（<1ms）。
+
+### Ghostty ではペインのコンテンツ差替が不可能
+
+Ghostty の設計上、1ターミナル=1プロセスであり、既存ペインのプロセスを差し替える API は存在しない。検討した代替手段:
+
+| 方法 | 評価 |
+|------|------|
+| ペイン内のプロセスを入れ替え | **不可**。API なし |
+| `send text Ctrl+C` → 新コマンド | 脆弱。プロセスが SIGINT を正しく処理する保証なし |
+| close → 再 split | **採用**。唯一の信頼できる方法。~0.5s のちらつきあり |
+
+この制約により、セッション切替のたびに右ペインの close → 再 split が必要になる。現行の瞬時切替（displayCache swap）と比べて ~0.5 秒の遅延が生じるが、実用上は許容範囲と判断。
+
+### Linux サポートの見送り
+
+Ghostty の Linux (GTK) 版は D-Bus 経由の IPC だが、現時点で `new-window` のみサポート。split、テキスト送信、ターミナル一覧取得等は未実装。Ghostty メンテナはプラットフォームネイティブ IPC の拡張を表明しているが時期未定。
+
+**判断**: Linux は当面 PTY モード（現行方式）のみ。Ghostty split モードは macOS 限定とする。将来 D-Bus API が拡張されれば `GhosttyIPC` interface の D-Bus 実装を追加する。
+
 ## アーキテクチャ設計
 
 ### 方針: 1ウィンドウ Split モデル
