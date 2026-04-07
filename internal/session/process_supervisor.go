@@ -19,39 +19,39 @@ import (
 // and changes to PTY management don't affect session domain code.
 type ProcessSupervisor struct {
 	mu        sync.RWMutex
-	processes map[string]*pty.Process // deck session ID → PTY process
+	processes map[DeckSessionID]*pty.Process // deck session ID → PTY process
 }
 
 // NewProcessSupervisor creates a new supervisor.
 func NewProcessSupervisor() *ProcessSupervisor {
 	return &ProcessSupervisor{
-		processes: make(map[string]*pty.Process),
+		processes: make(map[DeckSessionID]*pty.Process),
 	}
 }
 
 // Register associates a PTY process with a session ID.
-func (ps *ProcessSupervisor) Register(sessionID string, proc *pty.Process) {
+func (ps *ProcessSupervisor) Register(sessionID DeckSessionID, proc *pty.Process) {
 	ps.mu.Lock()
 	ps.processes[sessionID] = proc
 	ps.mu.Unlock()
 }
 
 // Unregister removes the process association for a session ID.
-func (ps *ProcessSupervisor) Unregister(sessionID string) {
+func (ps *ProcessSupervisor) Unregister(sessionID DeckSessionID) {
 	ps.mu.Lock()
 	delete(ps.processes, sessionID)
 	ps.mu.Unlock()
 }
 
 // Get returns the PTY process for a session, or nil if not found.
-func (ps *ProcessSupervisor) Get(sessionID string) *pty.Process {
+func (ps *ProcessSupervisor) Get(sessionID DeckSessionID) *pty.Process {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 	return ps.processes[sessionID]
 }
 
 // IsAlive returns true if the session has a PTY process that hasn't exited.
-func (ps *ProcessSupervisor) IsAlive(sessionID string) bool {
+func (ps *ProcessSupervisor) IsAlive(sessionID DeckSessionID) bool {
 	ps.mu.RLock()
 	proc, ok := ps.processes[sessionID]
 	ps.mu.RUnlock()
@@ -67,7 +67,7 @@ func (ps *ProcessSupervisor) IsAlive(sessionID string) bool {
 }
 
 // Write sends data to the PTY stdin of a session.
-func (ps *ProcessSupervisor) Write(sessionID string, data []byte) error {
+func (ps *ProcessSupervisor) Write(sessionID DeckSessionID, data []byte) error {
 	proc := ps.Get(sessionID)
 	if proc == nil {
 		return fmt.Errorf("no active process for session %s", sessionID)
@@ -79,7 +79,7 @@ func (ps *ProcessSupervisor) Write(sessionID string, data []byte) error {
 }
 
 // Resize updates the PTY window size for a session.
-func (ps *ProcessSupervisor) Resize(sessionID string, cols, rows uint16) {
+func (ps *ProcessSupervisor) Resize(sessionID DeckSessionID, cols, rows uint16) {
 	proc := ps.Get(sessionID)
 	if proc == nil {
 		return
@@ -89,7 +89,7 @@ func (ps *ProcessSupervisor) Resize(sessionID string, cols, rows uint16) {
 
 // Kill forcefully terminates a session's PTY process.
 // If the process handle is not available but a PID is provided, falls back to SIGTERM.
-func (ps *ProcessSupervisor) Kill(sessionID string, fallbackPID int) error {
+func (ps *ProcessSupervisor) Kill(sessionID DeckSessionID, fallbackPID int) error {
 	proc := ps.Get(sessionID)
 	if proc != nil {
 		return proc.Kill()
@@ -105,10 +105,10 @@ func (ps *ProcessSupervisor) Kill(sessionID string, fallbackPID int) error {
 }
 
 // ActiveSessionIDs returns the IDs of sessions with live processes.
-func (ps *ProcessSupervisor) ActiveSessionIDs() []string {
+func (ps *ProcessSupervisor) ActiveSessionIDs() []DeckSessionID {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
-	ids := make([]string, 0, len(ps.processes))
+	ids := make([]DeckSessionID, 0, len(ps.processes))
 	for id, proc := range ps.processes {
 		select {
 		case <-proc.Done():
@@ -122,7 +122,7 @@ func (ps *ProcessSupervisor) ActiveSessionIDs() []string {
 
 // WaitForExit blocks until the process for the given session exits.
 // Returns immediately if no process is registered.
-func (ps *ProcessSupervisor) WaitForExit(sessionID string) {
+func (ps *ProcessSupervisor) WaitForExit(sessionID DeckSessionID) {
 	proc := ps.Get(sessionID)
 	if proc == nil {
 		return

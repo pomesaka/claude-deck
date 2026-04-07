@@ -40,7 +40,7 @@ type Model struct {
 	sessions     []*session.Session
 	cursor       int
 	scrollOffset int
-	selectedID   string
+	selectedID   session.DeckSessionID
 	focusDetail  bool
 	logViewport  viewport.Model
 	ptyViewport  viewport.Model // PTY リアルタイム出力用
@@ -69,7 +69,7 @@ type Model struct {
 	refreshInterval time.Duration
 	lastResizeCols  int // 前回 ResizeSession に渡した幅
 	lastResizeRows  int // 前回 ResizeSession に渡した高さ
-	lastResizeID    string // 前回 ResizeSession に渡したセッション ID
+	lastResizeID    session.DeckSessionID // 前回 ResizeSession に渡したセッション ID
 
 	// Log rendering cache (JSONL structured logs)
 	logCache renderCache
@@ -90,7 +90,7 @@ type statusClearMsg struct{}
 
 // sessionCreatedMsg is sent when an async session creation completes.
 type sessionCreatedMsg struct {
-	sessionID string
+	sessionID session.DeckSessionID
 	err       error
 }
 
@@ -101,7 +101,7 @@ type sessionResumedMsg struct {
 
 // sessionForkedMsg is sent when an async session fork completes.
 type sessionForkedMsg struct {
-	sessionID string
+	sessionID session.DeckSessionID
 	err       error
 }
 

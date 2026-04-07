@@ -36,7 +36,7 @@ func (m *Manager) StartEventWatcher(ctx context.Context) error {
 func (m *Manager) handleHookEvent(ev hooks.Event) {
 	switch ev.HookEventName {
 	case hooks.EventNotification:
-		sess := m.findSessionByClaudeID(ev.SessionID)
+		sess := m.findSessionByClaudeID(ClaudeSessionID(ev.SessionID))
 		if sess == nil {
 			debuglog.Printf("[event-watcher] Notification: no managed session for %s", ev.SessionID)
 			return
@@ -57,7 +57,7 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 		m.notifyChange()
 
 	case hooks.EventStop:
-		sess := m.findSessionByClaudeID(ev.SessionID)
+		sess := m.findSessionByClaudeID(ClaudeSessionID(ev.SessionID))
 		if sess == nil {
 			debuglog.Printf("[event-watcher] Stop: no managed session for %s", ev.SessionID)
 			return
@@ -78,18 +78,22 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 		debuglog.Printf("[event-watcher] SessionStart: session_id=%s source=%s claude_deck_session_id=%s",
 			ev.SessionID, ev.Source, ev.ClaudeDeckSessionID)
 
+		// Boundary conversion: hooks.Event の string → typed IDs
+		deckID := DeckSessionID(ev.ClaudeDeckSessionID)
+		claudeID := ClaudeSessionID(ev.SessionID)
+
 		// startup/resume: 環境変数で渡した ClaudeDeckSessionID でセッションを特定し、
 		// Claude Code が割り当てた session_id を紐付ける
 		if ev.Source == hooks.SourceStartup || ev.Source == hooks.SourceResume {
-			if ev.ClaudeDeckSessionID == "" {
+			if deckID == "" {
 				debuglog.Printf("[event-watcher] SessionStart source=%s but no ClaudeDeckSessionID, skipping", ev.Source)
 				return
 			}
 			m.mu.RLock()
-			sess := m.sessions[ev.ClaudeDeckSessionID]
+			sess := m.sessions[deckID]
 			m.mu.RUnlock()
 			if sess == nil {
-				debuglog.Printf("[event-watcher] SessionStart: no session for ClaudeDeckSessionID=%s", ev.ClaudeDeckSessionID)
+				debuglog.Printf("[event-watcher] SessionStart: no session for ClaudeDeckSessionID=%s", deckID)
 				return
 			}
 			sess.mu.Lock()
@@ -97,13 +101,13 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 			if curID != "" {
 				sess.mu.Unlock()
 				debuglog.Printf("[event-watcher] SessionStart source=%s skipped: session %s already has ClaudeSessionID=%s",
-					ev.Source, ev.ClaudeDeckSessionID, curID)
+					ev.Source, deckID, curID)
 				return
 			}
-			sess.appendToChainLocked(ev.SessionID)
+			sess.appendToChainLocked(claudeID)
 			sess.mu.Unlock()
 			debuglog.Printf("[event-watcher] session %s: ClaudeSessionID set to %s (source=%s)",
-				ev.ClaudeDeckSessionID, ev.SessionID, ev.Source)
+				deckID, claudeID, ev.Source)
 			m.persist(sess)
 			m.notifyChange()
 			return
@@ -116,12 +120,12 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 
 		// ペアリング: hookProc から対応する SessionEnd を取り出す（mu 不要）
 		var pendEnd *hooks.Event
-		if ev.ClaudeDeckSessionID != "" {
+		if deckID != "" {
 			pendEnd = m.hookProc.consumePending(ev.ClaudeDeckSessionID)
 		}
 
 		if pendEnd == nil {
-			debuglog.Printf("[event-watcher] no pending SessionEnd for source=%s deck_session=%s, skipping", ev.Source, ev.ClaudeDeckSessionID)
+			debuglog.Printf("[event-watcher] no pending SessionEnd for source=%s deck_session=%s, skipping", ev.Source, deckID)
 			return
 		}
 
@@ -133,21 +137,19 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 
 		// ClaudeDeckSessionID で managed セッションを直接特定
 		m.mu.RLock()
-		sess := m.sessions[ev.ClaudeDeckSessionID]
+		sess := m.sessions[deckID]
 		m.mu.RUnlock()
 		if sess == nil {
-			debuglog.Printf("[event-watcher] no managed session for ClaudeDeckSessionID %s", ev.ClaudeDeckSessionID)
+			debuglog.Printf("[event-watcher] no managed session for ClaudeDeckSessionID %s", deckID)
 			return
 		}
 
-		sessionID := ev.ClaudeDeckSessionID
-
 		debuglog.Printf("[event-watcher] session %s: ClaudeSessionID %s → %s (source=%s)",
-			sessionID, oldCSID, newCSID, ev.Source)
+			deckID, oldCSID, newCSID, ev.Source)
 
 		sess.mu.Lock()
 		// SessionChain に新 ID を追記（旧 ID は chain 内に残り knownClaudeSessionIDs で参照される）
-		sess.appendToChainLocked(newCSID)
+		sess.appendToChainLocked(claudeID)
 		sess.mu.Unlock()
 		// /clear 時はログをリセット（新セッションのログのみ表示）
 		// rt.mu と sess.mu を同時保持しないためロックを分ける
@@ -161,9 +163,9 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 		m.mu.RLock()
 		activeID := m.activeStreamID
 		m.mu.RUnlock()
-		if activeID == sessionID {
-			m.stopActiveStream(sessionID)
-			m.StreamSession(sessionID)
+		if activeID == deckID {
+			m.stopActiveStream(deckID)
+			m.StreamSession(deckID)
 		}
 
 		m.notifyChange()
@@ -172,7 +174,7 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 
 // findSessionByClaudeID returns the managed session (with an active process)
 // matching the given Claude Code session ID, or nil if not found.
-func (m *Manager) findSessionByClaudeID(claudeSessionID string) *Session {
+func (m *Manager) findSessionByClaudeID(claudeSessionID ClaudeSessionID) *Session {
 	activeIDs := m.Supervisor.ActiveSessionIDs()
 
 	// m.mu と s.mu を同時に保持しない（ABBA 回避）

@@ -14,7 +14,7 @@ import (
 // must be updated to avoid silent nil panics.
 func newTestManager() *Manager {
 	return &Manager{
-		sessions:   make(map[string]*Session),
+		sessions:   make(map[DeckSessionID]*Session),
 		Supervisor: NewProcessSupervisor(),
 		ctx:        context.Background(),
 		hookProc:   newHookProcessor(),
@@ -22,11 +22,11 @@ func newTestManager() *Manager {
 }
 
 // addTestSession inserts a session into the manager with a preset ID and Claude session ID.
-func addTestSession(m *Manager, deckID, claudeSessionID string) *Session {
+func addTestSession(m *Manager, deckID DeckSessionID, claudeSessionID ClaudeSessionID) *Session {
 	sess := NewSession("/repo", "repo")
 	sess.ID = deckID
 	if claudeSessionID != "" {
-		sess.SessionChain = []string{claudeSessionID}
+		sess.SessionChain = []ClaudeSessionID{claudeSessionID}
 	}
 	m.sessions[deckID] = sess
 	return sess
@@ -329,11 +329,11 @@ func TestHandleHookEvent_MultiClear_ChainGrows(t *testing.T) {
 	})
 
 	sess.mu.RLock()
-	chain := make([]string, len(sess.SessionChain))
+	chain := make([]ClaudeSessionID, len(sess.SessionChain))
 	copy(chain, sess.SessionChain)
 	sess.mu.RUnlock()
 
-	want := []string{"claude-1", "claude-2", "claude-3"}
+	want := []ClaudeSessionID{"claude-1", "claude-2", "claude-3"}
 	if len(chain) != len(want) {
 		t.Fatalf("SessionChain = %v, want %v", chain, want)
 	}
@@ -346,7 +346,7 @@ func TestHandleHookEvent_MultiClear_ChainGrows(t *testing.T) {
 	// All IDs should be known
 	known := m.knownClaudeSessionIDs()
 	for _, id := range want {
-		if !known[id] {
+		if !known[ClaudeSessionID(id)] {
 			t.Errorf("knownClaudeSessionIDs missing %q", id)
 		}
 	}

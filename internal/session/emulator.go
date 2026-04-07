@@ -120,7 +120,7 @@ func (s *Session) refreshDisplayCacheLocked() {
 	scrollbackStyled := s.scrollbackStyled
 	s.mu.RUnlock()
 
-	lines := buildDisplayLines(plain, styled, cursorY, title, scrollbackStyled, s.ID)
+	lines := buildDisplayLines(plain, styled, cursorY, title, scrollbackStyled, string(s.ID))
 	s.displayCache.Store(&lines)
 
 	// カーソルの表示座標をキャッシュ（TUI でカーソルを正確に配置するため）。

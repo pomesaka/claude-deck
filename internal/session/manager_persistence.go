@@ -33,7 +33,7 @@ func (m *Manager) persist(sess *Session) {
 		debuglog.Printf("[persist] session %s: JSON marshal failed: %v", sess.ID, err)
 		return
 	}
-	if err := m.store.SaveBytes(sess.ID, data); err != nil {
+	if err := m.store.SaveBytes(string(sess.ID), data); err != nil {
 		debuglog.Printf("[persist] session %s: store save failed: %v", sess.ID, err)
 	}
 }
@@ -74,9 +74,9 @@ func (m *Manager) LoadExisting() error {
 			var legacy legacySession
 			if err := json.Unmarshal(data, &legacy); err == nil && legacy.ClaudeSessionID != "" {
 				if legacy.PreviousClaudeSessionID != "" {
-					s.SessionChain = []string{legacy.PreviousClaudeSessionID, legacy.ClaudeSessionID}
+					s.SessionChain = []ClaudeSessionID{ClaudeSessionID(legacy.PreviousClaudeSessionID), ClaudeSessionID(legacy.ClaudeSessionID)}
 				} else {
-					s.SessionChain = []string{legacy.ClaudeSessionID}
+					s.SessionChain = []ClaudeSessionID{ClaudeSessionID(legacy.ClaudeSessionID)}
 				}
 			}
 		}
@@ -148,7 +148,7 @@ func (m *Manager) pruneOldSessions() {
 	for _, s := range all[m.config.MaxSessions:] {
 		delete(m.sessions, s.ID)
 		if m.store != nil {
-			_ = m.store.Delete(s.ID)
+			_ = m.store.Delete(string(s.ID))
 		}
 	}
 	m.mu.Unlock()

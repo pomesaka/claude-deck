@@ -104,6 +104,12 @@ func run() error {
 		MaxScrollback:         cfg.Session.MaxScrollback,
 		DiscoveryDays:         cfg.Session.DiscoveryDays,
 		RefreshInterval:       refreshInterval,
+		Pricing: session.PricingPolicy{
+			InputPerMTok:      cfg.Pricing.InputPerMTok,
+			OutputPerMTok:     cfg.Pricing.OutputPerMTok,
+			CacheWritePerMTok: cfg.Pricing.CacheWritePerMTok,
+			CacheReadPerMTok:  cfg.Pricing.CacheReadPerMTok,
+		},
 		WorkspaceSymlinksFunc: cfg.WorkspaceSymlinks,
 		AddDirsFunc:           cfg.ResolvedAddDirs,
 	})

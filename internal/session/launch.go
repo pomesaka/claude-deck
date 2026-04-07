@@ -43,7 +43,7 @@ type LaunchIntent struct {
 	WithWorkspace bool
 
 	// SessionID is the deck session ID to resume. Required for Resume and Fork.
-	SessionID string
+	SessionID DeckSessionID
 
 	// Cols and Rows are the terminal dimensions for the PTY.
 	Cols int

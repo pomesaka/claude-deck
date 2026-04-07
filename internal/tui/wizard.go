@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/pomesaka/claude-deck/internal/config"
+	"github.com/pomesaka/claude-deck/internal/session"
 )
 
 // repoItem carries the jj repository root and the project working directory.
@@ -186,7 +187,7 @@ func (m *Model) selectRepo(item repoItem, withWorkspace bool) tea.Cmd {
 	cols, _, rows := m.detailPaneMetrics()
 	return func() tea.Msg {
 		sess, err := mgr.CreateSession(ctx, item.repoPath, item.projectDir, withWorkspace, cols, rows)
-		var id string
+		var id session.DeckSessionID
 		if sess != nil {
 			id = sess.ID
 		}

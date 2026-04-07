@@ -120,6 +120,17 @@ func (p SessionPhase) String() string {
 	}
 }
 
+// PricingPolicy defines token pricing rates per million tokens (USD).
+// This is a Value Object: immutable, compared by value, no identity.
+// It captures the domain concept of "how much does usage cost" and allows
+// TokenUsage to calculate its own cost without depending on infrastructure.
+type PricingPolicy struct {
+	InputPerMTok      float64
+	OutputPerMTok     float64
+	CacheWritePerMTok float64
+	CacheReadPerMTok  float64
+}
+
 // TokenUsage tracks token consumption for a session.
 type TokenUsage struct {
 	InputTokens              int     `json:"input_tokens"`
@@ -132,6 +143,17 @@ type TokenUsage struct {
 // TotalTokens returns the sum of input and output tokens.
 func (t TokenUsage) TotalTokens() int {
 	return t.InputTokens + t.OutputTokens
+}
+
+// EstimateCost calculates an approximate USD cost based on token usage and pricing policy.
+// This places cost calculation in the domain type that best knows its own data,
+// rather than in infrastructure (usage package).
+func (t TokenUsage) EstimateCost(p PricingPolicy) float64 {
+	cost := float64(t.InputTokens) / 1_000_000 * p.InputPerMTok
+	cost += float64(t.OutputTokens) / 1_000_000 * p.OutputPerMTok
+	cost += float64(t.CacheCreationInputTokens) / 1_000_000 * p.CacheWritePerMTok
+	cost += float64(t.CacheReadInputTokens) / 1_000_000 * p.CacheReadPerMTok
+	return cost
 }
 
 // runtimeFields holds PTY-related state that changes at high frequency.
@@ -173,8 +195,8 @@ type Session struct {
 	rt runtimeFields
 
 	// --- Persisted in store (claude-deck metadata) ---
-	ID               string     `json:"id"`
-	Name             string     `json:"name"`
+	ID               DeckSessionID `json:"id"`
+	Name             string        `json:"name"`
 	RepoPath         string     `json:"repo_path"`
 	RepoName         string     `json:"repo_name"`
 	WorkspacePath    string     `json:"workspace_path"`
@@ -184,7 +206,7 @@ type Session struct {
 	// /clear や compact のたびに末尾に新 ID が追加される。
 	// 現在の ID は SessionChain[len-1]、旧 ID はそれ以前の要素。
 	// アクセスには CurrentClaudeID() / PriorClaudeIDs() を使うこと。
-	SessionChain []string `json:"session_chain,omitempty"`
+	SessionChain []ClaudeSessionID `json:"session_chain,omitempty"`
 	Status       Status   `json:"status"`
 	FinishedAt       *time.Time `json:"finished_at,omitempty"`
 	PID              int        `json:"pid,omitempty"`
@@ -445,13 +467,13 @@ func (s *Session) GetStructuredLogs() []usage.LogEntry {
 
 // Snapshot is a read-only copy of session state, safe to use without locks.
 type Snapshot struct {
-	ID                string
+	ID                DeckSessionID
 	Name              string
 	RepoPath          string
 	RepoName          string
 	WorkspacePath     string
 	SubProjectDir     string
-	ClaudeSessionID   string
+	ClaudeSessionID   ClaudeSessionID
 	// ClearCount is the number of /clear (or compact) operations performed in
 	// this session. 0 means the original session; 1 means cleared once, etc.
 	// Derived from len(SessionChain) - 1.
@@ -531,7 +553,7 @@ func (s *Session) Snapshot() Snapshot {
 
 // CurrentClaudeID returns the active Claude Code session ID, or "" if none.
 // Must be called with mu held (at least for reading), or use Snapshot.ClaudeSessionID.
-func (s *Session) CurrentClaudeID() string {
+func (s *Session) CurrentClaudeID() ClaudeSessionID {
 	if len(s.SessionChain) == 0 {
 		return ""
 	}
@@ -540,18 +562,18 @@ func (s *Session) CurrentClaudeID() string {
 
 // PriorClaudeIDs returns all historical Claude Code session IDs excluding the current one.
 // Returns nil if there is no history. Must be called with mu held for reading.
-func (s *Session) PriorClaudeIDs() []string {
+func (s *Session) PriorClaudeIDs() []ClaudeSessionID {
 	if len(s.SessionChain) <= 1 {
 		return nil
 	}
-	prior := make([]string, len(s.SessionChain)-1)
+	prior := make([]ClaudeSessionID, len(s.SessionChain)-1)
 	copy(prior, s.SessionChain[:len(s.SessionChain)-1])
 	return prior
 }
 
 // appendToChainLocked appends newID to SessionChain under an already-held write lock.
 // No-op if newID is empty or already the current (last) ID.
-func (s *Session) appendToChainLocked(newID string) {
+func (s *Session) appendToChainLocked(newID ClaudeSessionID) {
 	if newID == "" {
 		return
 	}

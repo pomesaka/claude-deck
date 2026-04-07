@@ -40,12 +40,9 @@ func (m *Manager) handleFileWrite(ev usage.FileEvent) {
 		csID := s.CurrentClaudeID()
 		s.mu.RUnlock()
 
-		if csID == ev.SessionID {
-			s.mu.Lock()
-			old := s.LastActivity
-			s.LastActivity = ev.ModTime
-			s.mu.Unlock()
-			debuglog.Printf("[filewrite] matched session %s (deck=%s) LastActivity %s -> %s", csID, s.ID, old.Format("15:04:05"), ev.ModTime.Format("15:04:05"))
+		if string(csID) == ev.SessionID {
+			s.ApplyFileActivity(ev.ModTime)
+			debuglog.Printf("[filewrite] matched session %s (deck=%s) LastActivity -> %s", csID, s.ID, ev.ModTime.Format("15:04:05"))
 			m.notifyChange()
 			return
 		}
@@ -56,7 +53,7 @@ func (m *Manager) handleFileWrite(ev usage.FileEvent) {
 // StreamSession starts JSONL streaming for the given session (detail pane selection).
 // 前回のストリーミングがあれば停止し、新しいセッションのストリーミングを開始する。
 // 同じセッションが既にストリーム中なら何もしない。
-func (m *Manager) StreamSession(sessionID string) {
+func (m *Manager) StreamSession(sessionID DeckSessionID) {
 	m.mu.Lock()
 	if m.activeStreamID == sessionID {
 		m.mu.Unlock()
@@ -90,7 +87,7 @@ func (m *Manager) StreamSession(sessionID string) {
 		return
 	}
 
-	path := m.usage.ResolveSessionPath(csID)
+	path := m.usage.ResolveSessionPath(string(csID))
 	if path == "" {
 		return
 	}
@@ -99,7 +96,7 @@ func (m *Manager) StreamSession(sessionID string) {
 	// SessionChain の全履歴を古い順に prefix として読み込む
 	var priorPaths []string
 	for _, id := range priorIDs {
-		if p := m.usage.ResolveSessionPath(id); p != "" {
+		if p := m.usage.ResolveSessionPath(string(id)); p != "" {
 			priorPaths = append(priorPaths, p)
 		}
 	}
@@ -182,7 +179,7 @@ func (m *Manager) StreamSession(sessionID string) {
 }
 
 // stopActiveStream cancels the current streaming goroutine if it matches the given session.
-func (m *Manager) stopActiveStream(sessionID string) {
+func (m *Manager) stopActiveStream(sessionID DeckSessionID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.activeStreamID == sessionID && m.activeStreamCancel != nil {
@@ -260,16 +257,11 @@ func (m *Manager) refreshBookmarks() {
 			continue
 		}
 
-		sess.mu.Lock()
-		if sess.BookmarkName != bookmark {
-			debuglog.Printf("[refreshBookmarks] session %s: %s -> %s", sess.ID, sess.BookmarkName, bookmark)
-			sess.BookmarkName = bookmark
-		}
-		sess.mu.Unlock()
+		sess.ApplyBookmark(bookmark)
 	}
 }
 
-// hydrateSession updates token usage for a single session.
+// hydrateSession updates token usage for a single session via ApplyJSONLTokens.
 // メタデータ (prompt, timestamps 等) は Discover 時に取得済みなので、
 // ここではトークン数だけを軽量スキャンで更新する。
 func (m *Manager) hydrateSession(sess *Session) {
@@ -281,18 +273,15 @@ func (m *Manager) hydrateSession(sess *Session) {
 		return
 	}
 
-	tokens := m.usage.ReadTokensByID(csID)
+	tokens := m.usage.ReadTokensByID(string(csID))
 	if tokens == nil {
 		return
 	}
 
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	sess.TokenUsage = TokenUsage{
+	sess.ApplyJSONLTokens(JSONLTokenData{
 		InputTokens:              tokens.InputTokens,
 		OutputTokens:             tokens.OutputTokens,
 		CacheCreationInputTokens: tokens.CacheCreationInputTokens,
 		CacheReadInputTokens:     tokens.CacheReadInputTokens,
-		EstimatedCostUSD:         tokens.EstimatedCostUSD,
-	}
+	}, m.config.Pricing)
 }

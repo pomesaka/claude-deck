@@ -529,7 +529,7 @@ func (m *Model) forkSelected() tea.Cmd {
 	cols, _, rows := m.detailPaneMetrics()
 	return func() tea.Msg {
 		newSess, err := mgr.ForkSession(ctx, id, cols, rows)
-		var newID string
+		var newID session.DeckSessionID
 		if newSess != nil {
 			newID = newSess.ID
 		}
