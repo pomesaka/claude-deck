@@ -2,12 +2,20 @@
 
 ## ロック階層
 
+Session には3つのロックがあり、それぞれ独立したリソースを保護する:
+
 ```
 Manager.mu (外側)  →  Session.mu (内側)
+
+PTYDisplay.emuMu     独立 (エミュレータ専用)
+Session.rt.mu        独立 (PTY ログ・JSONL ログ専用)
+Session.mu           その他全フィールド
 ```
 
-**鉄則**: Manager.mu を持ったまま Session.mu を取得してはいけない場合がある。
-安全なパターンは「コピーして解放、その後個別にロック」。
+**鉄則**:
+- Manager.mu を持ったまま Session.mu を取得しない (コピー→解放→個別ロック)
+- PTYDisplay.emuMu は Session.mu/rt.mu と独立。ただし `onTitle` コールバックが Session.mu を取得するため、Session.mu を保持したまま `display.Write()` を呼ばない
+- rt.mu と Session.mu は同時に保持しない
 
 ## 安全なアクセスパターン
 
@@ -60,16 +68,27 @@ sort.Slice(list, func(i, j int) bool {
 })
 ```
 
-### パターン 3: notifyChange() は atomic のみ
+### パターン 3: notifyChange() のデバウンス
+
+notifyChange は変更されたセッション ID を pendingChanges に蓄積し、バッファ 1 のチャネルで通知をデバウンスする。
 
 ```go
-func (m *Manager) notifyChange() {
-    m.dirty.Store(true)  // ロック不要、atomic 操作のみ
+func (m *Manager) notifyChange(sessionIDs ...DeckSessionID) {
+    if len(sessionIDs) > 0 {
+        m.pendingMu.Lock()
+        for _, id := range sessionIDs {
+            m.pendingChanges[id] = true
+        }
+        m.pendingMu.Unlock()
+    }
+    select {
+    case m.notifyCh <- struct{}{}:
+    default: // already pending; coalesce
+    }
 }
 ```
 
-handleOutput() は s.mu.Lock() で LogLines を追記した後に m.notifyChange() を呼ぶ。
-notifyChange() がロックを取らないため、ロック順序の問題は発生しない。
+StartNotifyLoop が 16ms (≈60fps) 間隔でドレインし、onChange コールバックに変更セット全体を渡す。TUI 側は ChangedIDs に選択中セッションが含まれる場合のみ viewport を更新する。
 
 ### パターン 4: setStatusLocked
 
