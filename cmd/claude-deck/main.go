@@ -17,7 +17,6 @@ import (
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/hooks"
 	"github.com/pomesaka/claude-deck/internal/jj"
-	"github.com/pomesaka/claude-deck/internal/pty"
 	"github.com/pomesaka/claude-deck/internal/session"
 	"github.com/pomesaka/claude-deck/internal/store"
 	"github.com/pomesaka/claude-deck/internal/tui"
@@ -57,8 +56,6 @@ func run() error {
 
 	// Apply config to package-level settings
 	tui.InitStyles(cfg.Theme)
-	jj.Command = cfg.Commands.JJ
-	pty.Command = cfg.Commands.Claude
 	usage.SetPricing(cfg.Pricing.InputPerMTok, cfg.Pricing.OutputPerMTok, cfg.Pricing.CacheWritePerMTok, cfg.Pricing.CacheReadPerMTok)
 	usage.MaxEntries = cfg.Session.MaxJSONLEntries
 
@@ -98,6 +95,8 @@ func run() error {
 	// Create session manager
 	mgr := session.NewManager(ctx, st, session.ManagerConfig{
 		DataDir:               cfg.DataDir,
+		ClaudeCommand:         cfg.Commands.Claude,
+		JJ:                    &jj.Runner{Command: cfg.Commands.JJ},
 		DefaultPermissionMode: cfg.Defaults.PermissionMode,
 		MaxSessions:           cfg.Session.MaxSessions,
 		MaxLogLines:           cfg.Session.MaxLogLines,

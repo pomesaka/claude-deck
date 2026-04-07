@@ -29,6 +29,8 @@ const spinnerIdleTimeout = 3 * time.Second
 // ManagerConfig holds configuration values used by Manager for session creation.
 type ManagerConfig struct {
 	DataDir               string
+	ClaudeCommand         string     // claude executable path (passed to pty.StartOptions)
+	JJ                    *jj.Runner // jj CLI runner (nil uses default "jj")
 	DefaultPermissionMode string
 	MaxSessions           int
 	MaxLogLines           int
@@ -89,6 +91,15 @@ func NewManager(ctx context.Context, st *store.Store, cfg ManagerConfig) *Manage
 		notifyCh:   make(chan struct{}, 1),
 		hookProc:   newHookProcessor(),
 	}
+}
+
+// jj returns the configured jj Runner, falling back to a zero-value Runner
+// (which defaults to "jj" executable).
+func (m *Manager) jj() *jj.Runner {
+	if m.config.JJ != nil {
+		return m.config.JJ
+	}
+	return &jj.Runner{}
 }
 
 // SetOnChange registers a callback for session state changes.
@@ -207,7 +218,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 			extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
 		}
 		debuglog.Printf("[CreateSession] creating jj workspace name=%q path=%q", wsName, wsPath)
-		if err := jj.CreateWorkspaceAt(repoPath, wsName, wsPath, extraSymlinks); err != nil {
+		if err := m.jj().CreateWorkspaceAt(repoPath, wsName, wsPath, extraSymlinks); err != nil {
 			return nil, fmt.Errorf("creating jj workspace: %w", err)
 		}
 		debuglog.Printf("[CreateSession] jj workspace created")
@@ -235,6 +246,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	debuglog.Printf("[CreateSession] starting pty workDir=%q", actualWorkDir)
 	addDirArgs := m.buildAddDirArgs(repoPath)
 	proc, err := pty.Start(ctx, pty.StartOptions{
+		Command:        m.config.ClaudeCommand,
 		WorkDir:        actualWorkDir,
 		Prompt:         "",
 		PermissionMode: m.config.DefaultPermissionMode,
@@ -248,7 +260,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	if err != nil {
 		debuglog.Printf("[CreateSession] pty.Start failed: %v", err)
 		if withWorkspace {
-			_ = jj.ForgetWorkspace(repoPath, sess.Name)
+			_ = m.jj().ForgetWorkspace(repoPath, sess.Name)
 		}
 		return nil, fmt.Errorf("starting claude code: %w", err)
 	}
@@ -263,7 +275,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 
 	// ワークスペースの最近接ブックマークをセッションタイトルに設定
 	debuglog.Printf("[CreateSession] getting nearest bookmark for %q", actualWorkDir)
-	if bookmark, err := jj.GetNearestBookmark(actualWorkDir); err == nil && bookmark != "" {
+	if bookmark, err := m.jj().GetNearestBookmark(actualWorkDir); err == nil && bookmark != "" {
 		debuglog.Printf("[CreateSession] bookmark=%q", bookmark)
 		sess.mu.Lock()
 		sess.BookmarkName = bookmark
@@ -418,6 +430,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID, co
 
 	debuglog.Printf("[ResumeSession] calling pty.Start")
 	proc, err := pty.Start(ctx, pty.StartOptions{
+		Command:         m.config.ClaudeCommand,
 		WorkDir:         workDir,
 		ResumeSessionID: string(csID),
 		AdditionalArgs:  m.buildAddDirArgs(sess.RepoPath),
@@ -496,7 +509,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	if m.config.WorkspaceSymlinksFunc != nil {
 		extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
 	}
-	if err := jj.CreateWorkspaceAt(repoPath, wsName, wsPath, extraSymlinks); err != nil {
+	if err := m.jj().CreateWorkspaceAt(repoPath, wsName, wsPath, extraSymlinks); err != nil {
 		return nil, fmt.Errorf("creating jj workspace: %w", err)
 	}
 	sess.WorkspacePath = wsPath
@@ -504,6 +517,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	sess.SubProjectDir = srcSubProjectDir
 
 	proc, err := pty.Start(ctx, pty.StartOptions{
+		Command:         m.config.ClaudeCommand,
 		WorkDir:         srcWorkDir,
 		ResumeSessionID: string(srcClaudeID),
 		ForkSession:     true,
@@ -515,7 +529,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 		m.handleOutput(sess, data)
 	})
 	if err != nil {
-		_ = jj.ForgetWorkspace(repoPath, wsName)
+		_ = m.jj().ForgetWorkspace(repoPath, wsName)
 		return nil, fmt.Errorf("starting forked session: %w", err)
 	}
 
@@ -526,7 +540,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	sess.mu.Unlock()
 
 	// ワークスペースの最近接ブックマークをセッションタイトルに設定
-	if bookmark, err := jj.GetNearestBookmark(wsPath); err == nil && bookmark != "" {
+	if bookmark, err := m.jj().GetNearestBookmark(wsPath); err == nil && bookmark != "" {
 		sess.mu.Lock()
 		sess.BookmarkName = bookmark
 		sess.mu.Unlock()
@@ -613,7 +627,7 @@ func (m *Manager) DeleteSession(sessionID DeckSessionID) (warning string, err er
 
 	// jj ワークスペースを forget（削除時のみ。プロセス終了時は再開用に保持する）
 	if wsName != "" && repoPath != "" {
-		if wsErr := jj.ForgetWorkspace(repoPath, wsName); wsErr != nil {
+		if wsErr := m.jj().ForgetWorkspace(repoPath, wsName); wsErr != nil {
 			msg := fmt.Sprintf("workspace forget失敗: %v", wsErr)
 			if warning != "" {
 				warning += "; " + msg

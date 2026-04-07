@@ -10,22 +10,33 @@ import (
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 )
 
-// Command is the jj executable path. Override from config before use.
-var Command = "jj"
+// Runner executes jj CLI commands. Inject via ManagerConfig instead of
+// relying on a package-level global, so tests can substitute a stub.
+type Runner struct {
+	Command string // jj executable path; defaults to "jj" if empty
+}
+
+func (r *Runner) command() string {
+	if r.Command != "" {
+		return r.Command
+	}
+	return "jj"
+}
 
 // CreateWorkspaceAt creates a new jj workspace at the specified path.
 // The parent directory is created automatically if it doesn't exist.
 // colocated リポジトリの場合、ワークスペースに .git の symlink を作成して
 // gh 等の git 依存ツールが動作するようにする。
 // extraSymlinks にはリポジトリルートからの相対パスを指定し、ワークスペースに symlink を作成する。
-func CreateWorkspaceAt(repoPath, name, wsPath string, extraSymlinks []string) error {
+func (r *Runner) CreateWorkspaceAt(repoPath, name, wsPath string, extraSymlinks []string) error {
 	debuglog.Printf("[jj.CreateWorkspaceAt] repoPath=%q name=%q wsPath=%q", repoPath, name, wsPath)
 	if err := os.MkdirAll(filepath.Dir(wsPath), 0o755); err != nil {
 		return fmt.Errorf("creating workspace parent dir: %w", err)
 	}
 
 	debuglog.Printf("[jj.CreateWorkspaceAt] running: jj workspace add --name %s %s", name, wsPath)
-	cmd := exec.Command(Command, "workspace", "add", "--name", name, wsPath)
+	jjCmd := r.command()
+	cmd := exec.Command(jjCmd, "workspace", "add", "--name", name, wsPath)
 	cmd.Dir = repoPath
 
 	output, err := cmd.CombinedOutput()
@@ -56,13 +67,13 @@ func CreateWorkspaceAt(repoPath, name, wsPath string, extraSymlinks []string) er
 	// リモートから最新を取得し、trunk 上に新 revision を作成
 	// fetch 失敗はネットワーク不通等で起こりうるので無視して続行
 	debuglog.Printf("[jj.CreateWorkspaceAt] running: jj git fetch (may hang on network)")
-	fetch := exec.Command(Command, "git", "fetch")
+	fetch := exec.Command(jjCmd, "git", "fetch")
 	fetch.Dir = wsPath
 	fetchOut, fetchErr := fetch.CombinedOutput()
 	debuglog.Printf("[jj.CreateWorkspaceAt] jj git fetch done: err=%v output=%q", fetchErr, strings.TrimSpace(string(fetchOut)))
 
 	debuglog.Printf("[jj.CreateWorkspaceAt] running: jj new trunk()")
-	newCmd := exec.Command(Command, "new", "trunk()")
+	newCmd := exec.Command(jjCmd, "new", "trunk()")
 	newCmd.Dir = wsPath
 	if output, err := newCmd.CombinedOutput(); err != nil {
 		debuglog.Printf("[jj.CreateWorkspaceAt] jj new trunk() failed: %v output=%q", err, string(output))
@@ -107,9 +118,9 @@ func createExtraSymlink(repoPath, wsPath, rel string) error {
 
 // GetNearestBookmark returns the local bookmark name of the closest ancestor
 // (including @) that has a bookmark. Returns empty string if none found.
-func GetNearestBookmark(dir string) (string, error) {
+func (r *Runner) GetNearestBookmark(dir string) (string, error) {
 	debuglog.Printf("[jj.GetNearestBookmark] dir=%q", dir)
-	cmd := exec.Command(Command, "log", "--no-graph", "--color=never",
+	cmd := exec.Command(r.command(), "log", "--no-graph", "--color=never",
 		"-r", "latest(::@ & bookmarks())",
 		"-T", "bookmarks")
 	cmd.Dir = dir
@@ -137,8 +148,8 @@ func GetNearestBookmark(dir string) (string, error) {
 }
 
 // ForgetWorkspace removes a jj workspace.
-func ForgetWorkspace(repoPath, name string) error {
-	cmd := exec.Command(Command, "workspace", "forget", name)
+func (r *Runner) ForgetWorkspace(repoPath, name string) error {
+	cmd := exec.Command(r.command(), "workspace", "forget", name)
 	cmd.Dir = repoPath
 
 	output, err := cmd.CombinedOutput()

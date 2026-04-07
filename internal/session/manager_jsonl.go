@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/pomesaka/claude-deck/internal/debuglog"
-	"github.com/pomesaka/claude-deck/internal/jj"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
@@ -248,7 +247,7 @@ func (m *Manager) refreshBookmarks() {
 			continue
 		}
 
-		bookmark, err := jj.GetNearestBookmark(wsPath)
+		bookmark, err := m.jj().GetNearestBookmark(wsPath)
 		if err != nil {
 			debuglog.Printf("[refreshBookmarks] session %s: %v", sess.ID, err)
 			continue
