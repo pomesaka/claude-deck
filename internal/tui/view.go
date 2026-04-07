@@ -42,9 +42,9 @@ func (m Model) View() tea.View {
 	// PTY 入力モード中はエミュレータのカーソル位置に TUI カーソルを配置する。
 	// これにより Ghostty のカーソルが Claude の入力行に正しく表示される。
 	if m.ptyInputActive && m.selectedID != "" && m.mode == viewDashboard {
-		if sess := m.manager.GetSession(m.selectedID); sess != nil && m.manager.HasActiveProcess(m.selectedID) {
+		if sess := m.manager.GetSession(m.selectedID); sess != nil && sess.Snapshot().Display == session.DisplayPTY {
 			cursorX, cursorDisplayRow := sess.GetPTYCursorPosition()
-			_, _, ptyHeight := m.detailPaneMetrics()
+			_, _, ptyHeight, _ := m.detailPaneMetrics()
 			cursorViewportRow := cursorDisplayRow - m.ptyViewport.YOffset()
 			if cursorViewportRow >= 0 && cursorViewportRow < ptyHeight {
 				// レイアウト: header(1行) + detail枠top(1行) + viewport行
@@ -408,9 +408,8 @@ func (m Model) renderDetailPane(width, height int) string {
 		innerWidth = 10
 	}
 
-	hasActiveProcess := m.selectedID != "" && m.manager.HasActiveProcess(m.selectedID)
-
-	if hasActiveProcess {
+	switch snap.Display {
+	case session.DisplayPTY:
 		// アクティブプロセス → PTY 全画面表示（ヘッダー非表示）
 		sections = append(sections, m.ptyViewport.View())
 
@@ -428,8 +427,9 @@ func (m Model) renderDetailPane(width, height int) string {
 			}
 			sections = append(sections, separator, placeholder)
 		}
-	} else {
-		// 完了済み → ヘッダー + JSONL ログ表示
+
+	case session.DisplayJSONL:
+		// 完了済み / 外部セッション → ヘッダー + JSONL ログ表示
 		sections = append(sections, titleStyle.Render(truncate(fmt.Sprintf("📋 %s (%s)", snap.Name, snap.RepoName), innerWidth)))
 		sections = append(sections, dimStyle.Render(truncate(fmt.Sprintf("   パス: %s", snap.WorkspacePath), innerWidth)))
 		idLine := fmt.Sprintf("   ID: %s  Claude: %s", snap.ID, snap.ClaudeSessionID)
@@ -452,6 +452,12 @@ func (m Model) renderDetailPane(width, height int) string {
 
 		sections = append(sections, "")
 		sections = append(sections, m.logViewport.View())
+
+	case session.DisplayNone:
+		// 外部ターミナルがホスト中 → プレースホルダ
+		sections = append(sections, titleStyle.Render(truncate(fmt.Sprintf("📋 %s (%s)", snap.Name, snap.RepoName), innerWidth)))
+		sections = append(sections, "")
+		sections = append(sections, dimStyle.Render("  外部ターミナルで表示中"))
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, sections...)
@@ -658,20 +664,24 @@ func detailHeaderLines(snap session.Snapshot) int {
 // detailPaneLayout calculates log viewport height and PTY viewport height
 // from the total terminal height. Pure function — no Model dependency.
 //
-//   - hasActiveProcess true  → PTY 全画面 (ptyHeight = available - 2 for status line)
-//   - hasActiveProcess false → ログ表示   (logHeight = available - headerLines)
-func detailPaneLayout(totalHeight int, hasActiveProcess bool, headerLines int) (logHeight, ptyHeight int) {
+//   - DisplayPTY  → PTY 全画面 (ptyHeight = available - 2 for status line)
+//   - DisplayJSONL → ログ表示   (logHeight = available - headerLines)
+//   - DisplayNone  → プレースホルダ (logHeight = available)
+func detailPaneLayout(totalHeight int, display session.DisplayChannel, headerLines int) (logHeight, ptyHeight int) {
 	contentHeight := totalHeight - 2 // header(1) + footer(1)
 	if contentHeight < 3 {
 		contentHeight = 3
 	}
 	availableLines := contentHeight - 2 // border(top+bottom)
 
-	if hasActiveProcess {
+	switch display {
+	case session.DisplayPTY:
 		availableLines -= 2 // separator + input status line
 		ptyHeight = availableLines
-	} else {
+	case session.DisplayJSONL:
 		availableLines -= headerLines
+		logHeight = availableLines
+	case session.DisplayNone:
 		logHeight = availableLines
 	}
 
@@ -686,22 +696,23 @@ func detailPaneLayout(totalHeight int, hasActiveProcess bool, headerLines int) (
 
 // detailPaneMetrics calculates the inner width, log height, and PTY viewport height for the detail pane.
 // Convenience method that combines the pure functions above with Model state lookups.
-func (m *Model) detailPaneMetrics() (innerWidth, logHeight, ptyHeight int) {
+// Returns the resolved DisplayChannel alongside dimensions.
+func (m *Model) detailPaneMetrics() (innerWidth, logHeight, ptyHeight int, display session.DisplayChannel) {
 	innerWidth = detailPaneInnerWidth(m.width)
 
-	hasActiveProcess := false
-	if m.selectedID != "" {
-		hasActiveProcess = m.manager.HasActiveProcess(m.selectedID)
-	}
-
+	display = session.DisplayJSONL // default for no selection
 	headerLines := 4
-	if !hasActiveProcess && m.selectedID != "" {
+	if m.selectedID != "" {
 		if sess := m.manager.GetSession(m.selectedID); sess != nil {
-			headerLines = detailHeaderLines(sess.Snapshot())
+			snap := sess.Snapshot()
+			display = snap.Display
+			if display != session.DisplayPTY {
+				headerLines = detailHeaderLines(snap)
+			}
 		}
 	}
 
-	logHeight, ptyHeight = detailPaneLayout(m.height, hasActiveProcess, headerLines)
+	logHeight, ptyHeight = detailPaneLayout(m.height, display, headerLines)
 	return
 }
 
@@ -713,10 +724,10 @@ func (m *Model) syncLogViewport() {
 	}
 	debuglog.Printf("[syncLogViewport] selectedID=%q ptyInputActive=%v focusDetail=%v", m.selectedID, m.ptyInputActive, m.focusDetail)
 
-	innerWidth, logHeight, ptyHeight := m.detailPaneMetrics()
+	innerWidth, logHeight, ptyHeight, display := m.detailPaneMetrics()
 	m.syncViewportSize(innerWidth, logHeight, ptyHeight)
 	m.syncPTYSize(m.selectedID, innerWidth, ptyHeight)
-	m.syncViewportContent(m.selectedID, innerWidth, ptyHeight)
+	m.syncViewportContent(m.selectedID, innerWidth, display)
 }
 
 // syncViewportSize updates the Bubble Tea viewport dimensions.
@@ -748,9 +759,11 @@ func (m *Model) syncPTYSize(sessionID session.DeckSessionID, cols, rows int) {
 }
 
 // syncViewportContent populates viewport content from the selected session.
-// アクティブプロセスあり → ptyViewport に PTY 全画面表示
-// 完了済みセッション → logViewport に JSONL ログ表示
-func (m *Model) syncViewportContent(sessionID session.DeckSessionID, innerWidth, ptyHeight int) {
+// DisplayChannel に基づいて表示データを選択する:
+//   - DisplayPTY  → ptyViewport に PTY 全画面表示
+//   - DisplayJSONL → logViewport に JSONL ログ表示
+//   - DisplayNone  → プレースホルダ表示（外部ターミナルがホスト中）
+func (m *Model) syncViewportContent(sessionID session.DeckSessionID, innerWidth int, display session.DisplayChannel) {
 	if sessionID == "" {
 		m.logViewport.SetContent("")
 		m.ptyViewport.SetContent("")
@@ -763,9 +776,9 @@ func (m *Model) syncViewportContent(sessionID session.DeckSessionID, innerWidth,
 		return
 	}
 
-	if ptyHeight > 0 {
-		// ── アクティブプロセス: PTY 全画面 ──
-		debuglog.Printf("[syncViewportContent] calling GetPTYDisplayLines")
+	switch display {
+	case session.DisplayPTY:
+		debuglog.Printf("[syncViewportContent] DisplayPTY: calling GetPTYDisplayLines")
 		lines := sess.GetPTYDisplayLines()
 		debuglog.Printf("[syncViewportContent] GetPTYDisplayLines returned %d lines", len(lines))
 		if len(lines) > 0 {
@@ -777,8 +790,8 @@ func (m *Model) syncViewportContent(sessionID session.DeckSessionID, innerWidth,
 			m.ptyViewport.GotoBottom()
 		}
 		m.logViewport.SetContent("")
-	} else {
-		// ── 完了済み: JSONL ログ表示 ──
+
+	case session.DisplayJSONL:
 		entries := sess.GetStructuredLogs()
 		if len(entries) > 0 {
 			rendered := RenderLogs(entries, innerWidth, &m.logCache)
@@ -789,6 +802,10 @@ func (m *Model) syncViewportContent(sessionID session.DeckSessionID, innerWidth,
 		if m.logFollow {
 			m.logViewport.GotoBottom()
 		}
+		m.ptyViewport.SetContent("")
+
+	case session.DisplayNone:
+		m.logViewport.SetContent(dimStyle.Render("(外部ターミナルで表示中)"))
 		m.ptyViewport.SetContent("")
 	}
 }

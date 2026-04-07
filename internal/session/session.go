@@ -3,10 +3,8 @@ package session
 import (
 	"bytes"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/charmbracelet/x/vt"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
@@ -243,12 +241,14 @@ type runtimeFields struct {
 //   - Runtime only: rt.LogLines, CurrentTool
 //
 // Lock ordering (ABBA デッドロック防止):
-//   - emuMu: emulator 読み書き専用（Write / String / Render / CursorPosition）
-//   - rt.mu:  PTY ログ・JSONL ログ専用（emuMu の後に取得）
-//   - mu:     その他全フィールド（emuMu の後、rt.mu とは独立）
+//   - PTYDisplay.emuMu: emulator 読み書き専用（Write / Resize / Reset）
+//   - rt.mu:  PTY ログ・JSONL ログ専用
+//   - mu:     その他全フィールド
+//
+// PTYDisplay.emuMu は mu/rt.mu と独立。PTYDisplay の onTitle コールバックが
+// mu.Lock() を取得するため、mu を保持したまま display.Write() を呼ばないこと。
 type Session struct {
-	mu    sync.RWMutex
-	emuMu sync.Mutex // emulator 専用。mu/rt.mu より先に取得すること
+	mu sync.RWMutex
 
 	// rt は PTY ログなど高頻度更新フィールドをまとめた struct。
 	// 詳細は runtimeFields のコメントを参照。
@@ -285,39 +285,10 @@ type Session struct {
 	ErrorMessage string `json:"-"` // パーサーが検知したエラー行
 	Hosting      HostingMode        // PTY ホスティング戦略（起動時に決定、不変）
 	managed      bool               // Manager が PTY プロセスを管理中かどうか
-	emulator     *vt.Emulator       // PTY 出力を解釈する仮想端末 (HostEmbedded のみ)
 
-	// displayCache は emulator.Write() 完了後に毎回更新される表示キャッシュ。
-	displayCache atomic.Pointer[[]string]
-
-	// cursorYHighWatermark は観測した cursorY の最大値を保持する単調増加カウンタ。
-	// Ink は再描画時にカーソルを上に移動してから下に描画するため、描画途中に cursorY が
-	// 一時的に下がり表示行数が縮小してちらつく。cursorY の縮小を常に抑制することで
-	// フレーム描画中のちらつきを防ぐ。emulator リセット時（newEmulatorWithCallbacks）のみ 0 に戻る。
-	// buildDisplayLines が trailing blank を除去するため、値が大きいままでも余分な空行は表示されない。
-	cursorYHighWatermark atomic.Int32
-
-	// displayCursorX/Y はエミュレータカーソルの表示座標（displayCache 内の行番号と列番号）。
-	// TUI でカーソルを正確に配置するために refreshDisplayCacheLocked 内で更新される。
-	// stableCursorReady が true の場合は stableCursor* が優先される。
-	displayCursorX atomic.Int32
-	displayCursorY atomic.Int32
-
-	// stableCursor* は \033[?25h（カーソル表示）コールバックで設定される確定カーソル位置。
-	// Ink の描画フレーム終了時に発火するため、refreshDisplayCacheLocked より精度が高い。
-	// stableCursorScreenY はエミュレータのスクリーン行（scrollback を含まない 0-indexed）。
-	stableCursorX       atomic.Int32
-	stableCursorScreenY atomic.Int32
-	stableCursorReady   atomic.Bool
-
-	// scrollback はエミュレータの ScrollUp で画面上端から消えた行の styled テキスト。
-	// エミュレータは viewport サイズで動作するため画面内の行しか保持しないが、
-	// ここにスクロールアウトした行を蓄積することでスクロールバックを実現する。
-	// emuMu 保持中（ScrollOut コールバック）に書き込まれるため sess.mu で保護する。
-	scrollbackPlain  []string
-	scrollbackStyled []string
-
-	maxScrollback int // config から設定。0 の場合はデフォルト 2000
+	// display は PTY エミュレータの表示インフラ。HostEmbedded のみ非 nil。
+	// HostExternal セッションは外部ターミナルが PTY を管理するため nil。
+	display *PTYDisplay
 }
 
 // displayChannelLocked returns the appropriate display data source for this session.
@@ -414,6 +385,34 @@ func (s *Session) SetManaged(v bool) {
 	s.managed = v
 }
 
+// InitDisplay creates a PTYDisplay for this session with the given dimensions.
+// Called by Manager when starting a new PTY process. maxScrollback of 0 uses the default (2000).
+func (s *Session) InitDisplay(cols, rows, maxScrollback int) {
+	sid := string(s.ID)
+	d := newPTYDisplay(sid, cols, rows, maxScrollback, func(title string) {
+		// Bridge title changes back to Session.TerminalTitle (under mu).
+		s.mu.Lock()
+		s.TerminalTitle = title
+		s.mu.Unlock()
+	})
+	s.display = d
+}
+
+// ResetDisplay recreates the PTYDisplay emulator for Resume/Fork.
+// Preserves the existing PTYDisplay but resets its internal state.
+func (s *Session) ResetDisplay(cols, rows int) {
+	if s.display != nil {
+		s.display.Reset(cols, rows)
+	}
+}
+
+// ResizeDisplay resizes the PTYDisplay emulator to match new terminal dimensions.
+func (s *Session) ResizeDisplay(cols, rows int) {
+	if s.display != nil {
+		s.display.Resize(cols, rows)
+	}
+}
+
 
 // touchSpinner records the current time as the last Braille spinner detection.
 func (s *Session) touchSpinner() {
@@ -451,25 +450,14 @@ func (s *Session) AddTokens(input, output int) {
 
 // AppendRaw feeds a raw PTY output chunk to the virtual terminal emulator and
 // appends any newline-delimited lines to LogLines.
-// bufio.Scanner が除去していた \n を復元する必要はなく、生バイトをそのまま渡す。
-// これにより \n なしで画面更新するインタラクティブな TUI も正しく処理できる。
 //
-// lock 順: emuMu（emulator.Write） → mu（LogLines 更新）
-// emulator.Write 中に ScrollOut/Title コールバックが mu.Lock() を取るため、
-// mu.Lock() を保持したまま emulator.Write を呼ぶと Snapshot/GetPTYDisplayLines と
-// デッドロックする。
+// PTYDisplay.Write handles the emulator part (if display is non-nil).
+// LogLines update uses rt.mu independently.
 func (s *Session) AppendRaw(data []byte) {
-	// Step 1: emulator に生バイトを流す（emuMu 保持、mu は未保持）
-	// emulator.Write() 完了後に displayCache を更新する。これにより GetPTYDisplayLines が
-	// emuMu を待たずにキャッシュを返せるため、Bubble Tea イベントループのブロックを防ぐ。
-	s.emuMu.Lock()
-	if s.emulator != nil {
-		debuglog.Printf("[session:%s] emulator.Write %d bytes hex=%x", s.ID, len(data), data)
-		s.emulator.Write(data) //nolint:errcheck
-		debuglog.Printf("[session:%s] emulator.Write done", s.ID)
-		s.refreshDisplayCacheLocked()
+	// Step 1: emulator (display infrastructure, independent of rt.mu)
+	if s.display != nil {
+		s.display.Write(data)
 	}
-	s.emuMu.Unlock()
 
 	// Step 2: LogLines を更新（rt.mu 保持）
 	s.rt.mu.Lock()
@@ -493,15 +481,11 @@ func (s *Session) AppendRaw(data []byte) {
 
 // AppendLog adds a single line to the session log and feeds it to the emulator.
 // テスト互換性のため残す。プロダクションコードは AppendRaw を使う。
-// lock 順は AppendRaw と同じ: emuMu → mu。
 func (s *Session) AppendLog(line string) {
-	// Step 1: emulator に書く（emuMu 保持）
-	s.emuMu.Lock()
-	if s.emulator != nil {
-		s.emulator.Write([]byte(line + "\n")) //nolint:errcheck
-		s.refreshDisplayCacheLocked()
+	// Step 1: emulator (display infrastructure)
+	if s.display != nil {
+		s.display.WriteLine(line)
 	}
-	s.emuMu.Unlock()
 
 	// Step 2: LogLines を更新（rt.mu 保持）
 	s.rt.mu.Lock()
@@ -516,6 +500,22 @@ func (s *Session) AppendLog(line string) {
 		s.rt.LogLines = newLines
 	}
 	s.rt.mu.Unlock()
+}
+
+// IngestPTYOutput feeds raw PTY output to the session, detects Braille spinners,
+// and transitions to Running when appropriate.
+// This encapsulates the domain logic "PTY output with spinner → session is running"
+// within the Session, rather than spreading it across Manager.
+func (s *Session) IngestPTYOutput(data []byte) {
+	s.AppendRaw(data)
+
+	if containsBrailleSpinner(string(data)) {
+		s.touchSpinner()
+		status := s.GetStatus()
+		if status != StatusRunning && status != StatusCompleted && status != StatusError {
+			s.SetStatus(StatusRunning)
+		}
+	}
 }
 
 // GetLogs returns a copy of the PTY log lines (used for running sessions).
@@ -729,7 +729,8 @@ func NewSession(repoPath, repoName string) *Session {
 		Hosting:       HostEmbedded,
 	}
 	s.rt.LogLines = make([]string, 0, 256)
-	s.emulator = newEmulatorWithCallbacks(s, 0, 0)
+	// PTYDisplay is created by Manager when the PTY process starts
+	// with the correct terminal dimensions.
 	return s
 }
 
@@ -747,6 +748,6 @@ func NewExternalSession(repoPath, repoName string) *Session {
 		Hosting:       HostExternal,
 	}
 	s.rt.LogLines = make([]string, 0, 256)
-	// No emulator — external terminal handles PTY rendering.
+	// No PTYDisplay — external terminal handles PTY rendering.
 	return s
 }

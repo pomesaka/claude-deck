@@ -371,6 +371,7 @@ func TestSession_GetPTYDisplayLines(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sess := NewSession("/repo", "repo")
+			sess.InitDisplay(120, 40, 0)
 			for _, line := range tt.lines {
 				sess.AppendLog(line)
 			}
@@ -664,10 +665,10 @@ func TestNewExternalSession(t *testing.T) {
 	if s.Hosting != HostExternal {
 		t.Errorf("Hosting = %v, want HostExternal", s.Hosting)
 	}
-	if s.emulator != nil {
-		t.Error("external session should not have an emulator")
+	if s.display != nil {
+		t.Error("external session should not have a PTYDisplay")
 	}
-	// AppendRaw should not panic with nil emulator
+	// AppendRaw should not panic with nil display
 	s.AppendRaw([]byte("hello\n"))
 	logs := s.GetLogs()
 	if len(logs) == 0 {
@@ -680,7 +681,14 @@ func TestNewSession_DefaultHosting(t *testing.T) {
 	if s.Hosting != HostEmbedded {
 		t.Errorf("Hosting = %v, want HostEmbedded", s.Hosting)
 	}
-	if s.emulator == nil {
-		t.Error("embedded session should have an emulator")
+	// PTYDisplay is nil until InitDisplay is called by Manager.
+	// This avoids double-creation with wrong dimensions.
+	if s.display != nil {
+		t.Error("new session should not have display until InitDisplay is called")
+	}
+	// InitDisplay and verify
+	s.InitDisplay(80, 24, 0)
+	if s.display == nil {
+		t.Error("display should be non-nil after InitDisplay")
 	}
 }

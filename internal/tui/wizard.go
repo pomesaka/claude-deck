@@ -184,7 +184,7 @@ func (m *Model) selectRepo(item repoItem, withWorkspace bool) tea.Cmd {
 
 	mgr := m.manager
 	ctx := m.ctx
-	cols, _, rows := m.detailPaneMetrics()
+	cols, _, rows, _ := m.detailPaneMetrics()
 	return func() tea.Msg {
 		sess, err := mgr.CreateSession(ctx, item.repoPath, item.projectDir, withWorkspace, cols, rows)
 		var id session.DeckSessionID

@@ -217,7 +217,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseWheelMsg:
 		if m.focusDetail && m.mode == viewDashboard {
 			var cmd tea.Cmd
-			if m.selectedID != "" && m.manager.HasActiveProcess(m.selectedID) {
+			if m.selectedDisplayChannel() == session.DisplayPTY {
 				m.ptyViewport, cmd = m.ptyViewport.Update(msg)
 				m.ptyFollow = m.ptyViewport.AtBottom()
 			} else {
@@ -379,6 +379,18 @@ func (m *Model) refreshSessions() {
 	}
 	m.updateSelected()
 	m.ensureCursorVisible()
+}
+
+// selectedDisplayChannel returns the DisplayChannel for the currently selected session.
+// Returns DisplayJSONL as a safe default when no session is selected.
+func (m *Model) selectedDisplayChannel() session.DisplayChannel {
+	if m.selectedID == "" {
+		return session.DisplayJSONL
+	}
+	if sess := m.manager.GetSession(m.selectedID); sess != nil {
+		return sess.Snapshot().Display
+	}
+	return session.DisplayJSONL
 }
 
 // visibleSessions returns sessions filtered by filterText.

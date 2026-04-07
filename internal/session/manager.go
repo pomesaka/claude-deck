@@ -231,7 +231,6 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	repoName := filepath.Base(repoPath)
 	sess := NewSession(repoPath, repoName)
 	sess.rt.maxLogLines = m.config.MaxLogLines
-	sess.maxScrollback = m.config.MaxScrollback
 
 	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("リポジトリが見つかりません: %s", repoPath)
@@ -295,11 +294,11 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	}
 	debuglog.Printf("[CreateSession] pty started pid=%d", proc.PID())
 
+	sess.InitDisplay(cols, rows, m.config.MaxScrollback)
+
 	sess.mu.Lock()
 	sess.PID = proc.PID()
 	sess.managed = true
-	// PTY と同じサイズでエミュレータを再作成
-	sess.emulator = newEmulatorWithCallbacks(sess, cols, rows)
 	sess.mu.Unlock()
 
 	// ワークスペースの最近接ブックマークをセッションタイトルに設定
@@ -327,19 +326,10 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	return sess, nil
 }
 
-// handleOutput processes a raw PTY output chunk from a session (monitor-only).
-// PTY 出力中の Braille スピナー文字を検知して Running に遷移する。
+// handleOutput processes a raw PTY output chunk from a session.
+// Domain logic (spinner detection → Running transition) is delegated to Session.IngestPTYOutput.
 func (m *Manager) handleOutput(sess *Session, data []byte) {
-	sess.AppendRaw(data)
-
-	if containsBrailleSpinner(string(data)) {
-		sess.touchSpinner()
-		status := sess.GetStatus()
-		if status != StatusRunning && status != StatusCompleted && status != StatusError {
-			sess.SetStatus(StatusRunning)
-		}
-	}
-
+	sess.IngestPTYOutput(data)
 	m.notifyChange(sess.ID)
 }
 
@@ -439,9 +429,11 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID, co
 	// PTY 起動前にエミュレータと rt フィールドをリセットする。
 	// 起動後にリセットすると、起動直後の出力が古いエミュレータに流れる
 	// リースウィンドウが生じるため、必ず起動前に行う。
-	sess.emuMu.Lock()
-	sess.emulator = newEmulatorWithCallbacks(sess, cols, rows)
-	sess.emuMu.Unlock()
+	if sess.display != nil {
+		sess.ResetDisplay(cols, rows)
+	} else {
+		sess.InitDisplay(cols, rows, m.config.MaxScrollback)
+	}
 
 	// rt.maxLogLines と rt.LogLines は rt.mu で保護する。
 	// sess.mu との同時保持は禁止（ロック順序規則）。
@@ -454,7 +446,6 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID, co
 	sess.setStatusLocked(StatusIdle)
 	sess.FinishedAt = nil // resume なので終了時刻をクリア
 	sess.managed = true
-	sess.maxScrollback = m.config.MaxScrollback
 	sess.mu.Unlock()
 
 	debuglog.Printf("[ResumeSession] calling pty.Start")
@@ -529,7 +520,6 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	repoName := filepath.Base(repoPath)
 	sess := NewSession(repoPath, repoName)
 	sess.rt.maxLogLines = m.config.MaxLogLines
-	sess.maxScrollback = m.config.MaxScrollback
 
 	wsName := sess.Name
 	wsPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
@@ -562,10 +552,11 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 		return nil, fmt.Errorf("starting forked session: %w", err)
 	}
 
+	sess.InitDisplay(cols, rows, m.config.MaxScrollback)
+
 	sess.mu.Lock()
 	sess.PID = proc.PID()
 	sess.managed = true
-	sess.emulator = newEmulatorWithCallbacks(sess, cols, rows)
 	sess.mu.Unlock()
 
 	// ワークスペースの最近接ブックマークをセッションタイトルに設定
@@ -732,13 +723,7 @@ func (m *Manager) ResizeSession(sessionID DeckSessionID, cols, rows int) {
 	m.Supervisor.Resize(sessionID, uint16(cols), uint16(rows))
 
 	if sess := m.GetSession(sessionID); sess != nil {
-		// emuMu を使う。mu ではなく emuMu がエミュレータ操作専用ロック。
-		// mu を使うと AppendRaw（emuMu）と並行実行されデータレースになる。
-		sess.emuMu.Lock()
-		if sess.emulator != nil {
-			sess.emulator.Resize(cols, rows)
-		}
-		sess.emuMu.Unlock()
+		sess.ResizeDisplay(cols, rows)
 	}
 }
 
