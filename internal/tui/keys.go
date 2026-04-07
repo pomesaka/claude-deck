@@ -57,14 +57,14 @@ func (m *Model) handleDashboardKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.handleFilterKey(msg)
 	}
 
-	hasActivePTY := m.selectedID != "" && m.manager.HasActiveProcess(m.selectedID)
+	display := m.selectedDisplayChannel()
 
 	// Vim-style multi-key sequences: gg, dd
 	if m.pendingG {
 		m.pendingG = false
 		if msg.String() == "g" {
 			if m.focusDetail {
-				m.viewportGotoTop(hasActivePTY)
+				m.viewportGotoTop(display)
 			} else {
 				m.cursor = 0
 				m.updateSelected()
@@ -86,12 +86,12 @@ func (m *Model) handleDashboardKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 
 	if m.focusDetail {
-		if cmd, handled := m.handleDetailPaneKey(msg, hasActivePTY); handled {
+		if cmd, handled := m.handleDetailPaneKey(msg, display); handled {
 			return cmd
 		}
 	}
 
-	return m.handleListKey(msg, hasActivePTY)
+	return m.handleListKey(msg, display)
 }
 
 // handleFilterKey processes keys while the filter input is active.
@@ -118,10 +118,10 @@ func (m *Model) handleFilterKey(msg tea.KeyPressMsg) tea.Cmd {
 
 // handleDetailPaneKey processes scroll keys when the detail pane is focused.
 // Returns (cmd, true) if the key was handled, (nil, false) to fall through.
-func (m *Model) handleDetailPaneKey(msg tea.KeyPressMsg, hasActivePTY bool) (tea.Cmd, bool) {
+func (m *Model) handleDetailPaneKey(msg tea.KeyPressMsg, display session.DisplayChannel) (tea.Cmd, bool) {
 	switch msg.String() {
 	case "G":
-		m.viewportGotoBottom(hasActivePTY)
+		m.viewportGotoBottom(display)
 		return nil, true
 	case "g":
 		m.pendingG = true
@@ -131,21 +131,21 @@ func (m *Model) handleDetailPaneKey(msg tea.KeyPressMsg, hasActivePTY bool) (tea
 		return nil, true
 	case "ctrl+b":
 		// 半ページ下スクロール（ctrl+u と上下ペア）
-		m.viewportHalfPageDown(hasActivePTY)
+		m.viewportHalfPageDown(display)
 		return nil, true
 	case "ctrl+u":
 		// 半ページ上スクロール
-		m.viewportHalfPageUp(hasActivePTY)
+		m.viewportHalfPageUp(display)
 		return nil, true
 	case "j", "down", "k", "up", "pgup", "pgdown", "f", "b", "u":
-		return m.viewportUpdate(msg, hasActivePTY), true
+		return m.viewportUpdate(msg, display), true
 	}
 	// Other keys (n, enter, r, x, dd, tab, ?) fall through to list handling
 	return nil, false
 }
 
 // handleListKey processes navigation and command keys in the session list.
-func (m *Model) handleListKey(msg tea.KeyPressMsg, hasActivePTY bool) tea.Cmd {
+func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChannel) tea.Cmd {
 	key := msg.String()
 	switch key {
 	case "j", "down":
@@ -199,8 +199,8 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, hasActivePTY bool) tea.Cmd {
 
 	case "enter", "i":
 		// 生きた PTY プロセスあり → 詳細ペインに切り替えて PTY 直接入力モード開始
-		debuglog.Printf("[key:%s] selectedID=%q hasActiveProcess=%v", key, m.selectedID, hasActivePTY)
-		if hasActivePTY {
+		debuglog.Printf("[key:%s] selectedID=%q display=%v", key, m.selectedID, display)
+		if display == session.DisplayPTY {
 			debuglog.Printf("[key:%s] activating PTY input mode", key)
 			m.focusDetail = true
 			m.ptyInputActive = true
@@ -268,8 +268,8 @@ func (m *Model) clampCursorToVisible() {
 }
 
 // viewportGotoTop scrolls the active viewport to the top.
-func (m *Model) viewportGotoTop(hasActivePTY bool) {
-	if hasActivePTY {
+func (m *Model) viewportGotoTop(display session.DisplayChannel) {
+	if display == session.DisplayPTY {
 		m.ptyViewport.GotoTop()
 		m.ptyFollow = false
 	} else {
@@ -279,8 +279,8 @@ func (m *Model) viewportGotoTop(hasActivePTY bool) {
 }
 
 // viewportGotoBottom scrolls the active viewport to the bottom and enables follow mode.
-func (m *Model) viewportGotoBottom(hasActivePTY bool) {
-	if hasActivePTY {
+func (m *Model) viewportGotoBottom(display session.DisplayChannel) {
+	if display == session.DisplayPTY {
 		m.ptyFollow = true
 		m.ptyViewport.GotoBottom()
 	} else {
@@ -290,8 +290,8 @@ func (m *Model) viewportGotoBottom(hasActivePTY bool) {
 }
 
 // viewportHalfPageUp scrolls the active viewport half a page up.
-func (m *Model) viewportHalfPageUp(hasActivePTY bool) {
-	if hasActivePTY {
+func (m *Model) viewportHalfPageUp(display session.DisplayChannel) {
+	if display == session.DisplayPTY {
 		m.ptyViewport.HalfPageUp()
 		m.ptyFollow = false
 	} else {
@@ -301,8 +301,8 @@ func (m *Model) viewportHalfPageUp(hasActivePTY bool) {
 }
 
 // viewportHalfPageDown scrolls the active viewport half a page down.
-func (m *Model) viewportHalfPageDown(hasActivePTY bool) {
-	if hasActivePTY {
+func (m *Model) viewportHalfPageDown(display session.DisplayChannel) {
+	if display == session.DisplayPTY {
 		m.ptyViewport.HalfPageDown()
 		m.ptyFollow = m.ptyViewport.AtBottom()
 	} else {
@@ -312,9 +312,9 @@ func (m *Model) viewportHalfPageDown(hasActivePTY bool) {
 }
 
 // viewportUpdate forwards a scroll key to the active viewport and updates follow state.
-func (m *Model) viewportUpdate(msg tea.KeyPressMsg, hasActivePTY bool) tea.Cmd {
+func (m *Model) viewportUpdate(msg tea.KeyPressMsg, display session.DisplayChannel) tea.Cmd {
 	var cmd tea.Cmd
-	if hasActivePTY {
+	if display == session.DisplayPTY {
 		m.ptyViewport, cmd = m.ptyViewport.Update(msg)
 		m.ptyFollow = m.ptyViewport.AtBottom()
 	} else {
@@ -499,7 +499,7 @@ func (m *Model) resumeSelected() tea.Cmd {
 	mgr := m.manager
 	ctx := m.ctx
 	id := m.selectedID
-	cols, _, rows := m.detailPaneMetrics()
+	cols, _, rows, _ := m.detailPaneMetrics()
 	return func() tea.Msg {
 		err := mgr.ResumeSession(ctx, id, cols, rows)
 		return sessionResumedMsg{err: err}
@@ -526,10 +526,10 @@ func (m *Model) forkSelected() tea.Cmd {
 	mgr := m.manager
 	ctx := m.ctx
 	id := m.selectedID
-	cols, _, rows := m.detailPaneMetrics()
+	cols, _, rows, _ := m.detailPaneMetrics()
 	return func() tea.Msg {
 		newSess, err := mgr.ForkSession(ctx, id, cols, rows)
-		var newID string
+		var newID session.DeckSessionID
 		if newSess != nil {
 			newID = newSess.ID
 		}

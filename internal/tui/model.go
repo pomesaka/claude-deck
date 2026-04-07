@@ -40,7 +40,7 @@ type Model struct {
 	sessions     []*session.Session
 	cursor       int
 	scrollOffset int
-	selectedID   string
+	selectedID   session.DeckSessionID
 	focusDetail  bool
 	logViewport  viewport.Model
 	ptyViewport  viewport.Model // PTY リアルタイム出力用
@@ -69,7 +69,7 @@ type Model struct {
 	refreshInterval time.Duration
 	lastResizeCols  int // 前回 ResizeSession に渡した幅
 	lastResizeRows  int // 前回 ResizeSession に渡した高さ
-	lastResizeID    string // 前回 ResizeSession に渡したセッション ID
+	lastResizeID    session.DeckSessionID // 前回 ResizeSession に渡したセッション ID
 
 	// Log rendering cache (JSONL structured logs)
 	logCache renderCache
@@ -82,7 +82,11 @@ type Model struct {
 
 // SessionRefreshMsg triggers a session list refresh.
 // Manager の onChange コールバックからも送信されるためエクスポート。
-type SessionRefreshMsg struct{}
+// ChangedIDs が空の場合はブロードキャスト（全セッション更新）。
+// 非空の場合は指定されたセッションのみ変更された。
+type SessionRefreshMsg struct {
+	ChangedIDs map[session.DeckSessionID]bool
+}
 
 // statusClearMsg clears the status message.
 type statusClearMsg struct{}
@@ -90,7 +94,7 @@ type statusClearMsg struct{}
 
 // sessionCreatedMsg is sent when an async session creation completes.
 type sessionCreatedMsg struct {
-	sessionID string
+	sessionID session.DeckSessionID
 	err       error
 }
 
@@ -101,7 +105,7 @@ type sessionResumedMsg struct {
 
 // sessionForkedMsg is sent when an async session fork completes.
 type sessionForkedMsg struct {
-	sessionID string
+	sessionID session.DeckSessionID
 	err       error
 }
 
@@ -213,7 +217,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseWheelMsg:
 		if m.focusDetail && m.mode == viewDashboard {
 			var cmd tea.Cmd
-			if m.selectedID != "" && m.manager.HasActiveProcess(m.selectedID) {
+			if m.selectedDisplayChannel() == session.DisplayPTY {
 				m.ptyViewport, cmd = m.ptyViewport.Update(msg)
 				m.ptyFollow = m.ptyViewport.AtBottom()
 			} else {
@@ -234,9 +238,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncLogViewport()
 
 	case SessionRefreshMsg:
-		debuglog.Printf("[tui] SessionRefreshMsg received")
+		debuglog.Printf("[tui] SessionRefreshMsg received changedIDs=%d", len(msg.ChangedIDs))
 		m.refreshSessions()
-		m.syncLogViewport()
+		// 選択中のセッションが変更対象に含まれるか、ブロードキャストの場合のみ viewport 更新
+		if len(msg.ChangedIDs) == 0 || msg.ChangedIDs[m.selectedID] {
+			m.syncLogViewport()
+		}
 
 	case metadataTickMsg:
 		debuglog.Printf("[tui] metadataTickMsg (event loop alive)")
@@ -372,6 +379,18 @@ func (m *Model) refreshSessions() {
 	}
 	m.updateSelected()
 	m.ensureCursorVisible()
+}
+
+// selectedDisplayChannel returns the DisplayChannel for the currently selected session.
+// Returns DisplayJSONL as a safe default when no session is selected.
+func (m *Model) selectedDisplayChannel() session.DisplayChannel {
+	if m.selectedID == "" {
+		return session.DisplayJSONL
+	}
+	if sess := m.manager.GetSession(m.selectedID); sess != nil {
+		return sess.Snapshot().Display
+	}
+	return session.DisplayJSONL
 }
 
 // visibleSessions returns sessions filtered by filterText.

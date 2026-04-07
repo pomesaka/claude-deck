@@ -8,7 +8,6 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/pomesaka/claude-deck/internal/debuglog"
@@ -30,12 +29,15 @@ const spinnerIdleTimeout = 3 * time.Second
 // ManagerConfig holds configuration values used by Manager for session creation.
 type ManagerConfig struct {
 	DataDir               string
+	ClaudeCommand         string     // claude executable path (passed to pty.StartOptions)
+	JJ                    *jj.Runner // jj CLI runner (nil uses default "jj")
 	DefaultPermissionMode string
 	MaxSessions           int
 	MaxLogLines           int
 	MaxScrollback         int
 	DiscoveryDays         int
 	RefreshInterval       time.Duration
+	Pricing               PricingPolicy
 	WorkspaceSymlinksFunc func(repoPath string) []string
 	// AddDirsFunc returns the --add-dir paths for the given repository.
 	AddDirsFunc func(repoPath string) []string
@@ -44,17 +46,19 @@ type ManagerConfig struct {
 // Manager coordinates multiple Claude Code sessions.
 // The dashboard is monitor-only; manual intervention is done via Ghostty.
 type Manager struct {
-	mu        sync.RWMutex
-	sessions  map[string]*Session
-	processes map[string]*pty.Process
-	store *store.Store
-	usage     *usage.Reader
-	ctx       context.Context
-	config    ManagerConfig
-	onChange  func()
+	mu       sync.RWMutex
+	sessions map[DeckSessionID]*Session
+	// Supervisor manages PTY process lifecycle (start, stop, I/O, resize).
+	// Extracted from Manager to separate process infrastructure from session domain.
+	Supervisor *ProcessSupervisor
+	store      *store.Store
+	usage      *usage.Reader
+	ctx        context.Context
+	config     ManagerConfig
+	onChange   func(changed map[DeckSessionID]bool)
 
 	// 詳細ペインで選択中のセッションのみストリーミング（最大1つ）
-	activeStreamID     string
+	activeStreamID     DeckSessionID
 	activeStreamCancel context.CancelFunc
 
 	// RefreshFromJSONL の並行実行ガード
@@ -62,6 +66,11 @@ type Manager struct {
 
 	// notifyChange デバウンス用チャネル（バッファ 1 でバーストを吸収）
 	notifyCh chan struct{}
+
+	// pendingChanges はデバウンス間隔中に変更があったセッション ID を蓄積する。
+	// onChange コールバック発火時にドレインされる。空の場合はブロードキャスト（全セッション更新）。
+	pendingMu      sync.Mutex
+	pendingChanges map[DeckSessionID]bool
 
 	// JSONL ファイルの fsnotify 監視
 	fileWatcher *usage.MultiWatcher
@@ -78,29 +87,61 @@ type Manager struct {
 // ctx is used as the parent context for log streaming goroutines.
 func NewManager(ctx context.Context, st *store.Store, cfg ManagerConfig) *Manager {
 	return &Manager{
-		sessions:  make(map[string]*Session),
-		processes: make(map[string]*pty.Process),
-		store:    st,
-		usage:    usage.NewReader(""),
-		ctx:      ctx,
-		config:   cfg,
-		notifyCh: make(chan struct{}, 1),
-		hookProc: newHookProcessor(),
+		sessions:       make(map[DeckSessionID]*Session),
+		Supervisor:     NewProcessSupervisor(),
+		store:          st,
+		usage:          usage.NewReader(""),
+		ctx:            ctx,
+		config:         cfg,
+		notifyCh:       make(chan struct{}, 1),
+		pendingChanges: make(map[DeckSessionID]bool),
+		hookProc:       newHookProcessor(),
 	}
 }
 
+// jj returns the configured jj Runner, falling back to a zero-value Runner
+// (which defaults to "jj" executable).
+func (m *Manager) jj() *jj.Runner {
+	if m.config.JJ != nil {
+		return m.config.JJ
+	}
+	return &jj.Runner{}
+}
+
 // SetOnChange registers a callback for session state changes.
-func (m *Manager) SetOnChange(fn func()) {
+// The callback receives a map of session IDs that changed since the last call.
+// An empty map means a broad change (e.g. discovery) that may affect all sessions.
+func (m *Manager) SetOnChange(fn func(changed map[DeckSessionID]bool)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onChange = fn
 }
 
-func (m *Manager) notifyChange() {
+// notifyChange signals that session state has changed.
+// sessionIDs identifies which sessions changed. If empty, the change is broad
+// (e.g. discovery) and consumers should refresh everything.
+func (m *Manager) notifyChange(sessionIDs ...DeckSessionID) {
+	if len(sessionIDs) > 0 {
+		m.pendingMu.Lock()
+		for _, id := range sessionIDs {
+			m.pendingChanges[id] = true
+		}
+		m.pendingMu.Unlock()
+	}
 	select {
 	case m.notifyCh <- struct{}{}:
 	default: // already pending; coalesce into the buffered signal
 	}
+}
+
+// drainPendingChanges returns and clears the accumulated set of changed session IDs.
+// An empty map means at least one broad (non-session-specific) change occurred.
+func (m *Manager) drainPendingChanges() map[DeckSessionID]bool {
+	m.pendingMu.Lock()
+	changes := m.pendingChanges
+	m.pendingChanges = make(map[DeckSessionID]bool)
+	m.pendingMu.Unlock()
+	return changes
 }
 
 // StartNotifyLoop fires onChange whenever notifyChange is called, debounced to
@@ -127,11 +168,12 @@ func (m *Manager) StartNotifyLoop(ctx context.Context) {
 						return
 					}
 				}
+				changes := m.drainPendingChanges()
 				m.mu.RLock()
 				fn := m.onChange
 				m.mu.RUnlock()
 				if fn != nil {
-					fn()
+					fn(changes)
 				}
 			}
 		}
@@ -154,12 +196,31 @@ func (m *Manager) StartSpinnerIdleLoop(ctx context.Context) {
 					if sess.spinnerIdleSince(spinnerIdleTimeout) {
 						debuglog.Printf("[spinnerIdle] session %s: spinner timeout, transitioning to Idle", sess.ID)
 						sess.SetStatus(StatusIdle)
-						m.notifyChange()
+						m.notifyChange(sess.ID)
 					}
 				}
 			}
 		}
 	}()
+}
+
+// Launch starts a session based on the given LaunchIntent.
+// This is the unified entry point for all session launch operations (New, Resume, Fork).
+// Returns the session (new or existing) and any error.
+func (m *Manager) Launch(ctx context.Context, intent LaunchIntent) (*Session, error) {
+	switch intent.Kind {
+	case LaunchNew:
+		return m.CreateSession(ctx, intent.RepoPath, intent.WorkingDir, intent.WithWorkspace, intent.Cols, intent.Rows)
+	case LaunchResume:
+		if err := m.ResumeSession(ctx, intent.SessionID, intent.Cols, intent.Rows); err != nil {
+			return nil, err
+		}
+		return m.GetSession(intent.SessionID), nil
+	case LaunchFork:
+		return m.ForkSession(ctx, intent.SessionID, intent.Cols, intent.Rows)
+	default:
+		return nil, fmt.Errorf("unknown launch kind: %v", intent.Kind)
+	}
 }
 
 // CreateSession creates and starts a new Claude Code session.
@@ -170,7 +231,6 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	repoName := filepath.Base(repoPath)
 	sess := NewSession(repoPath, repoName)
 	sess.rt.maxLogLines = m.config.MaxLogLines
-	sess.maxScrollback = m.config.MaxScrollback
 
 	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("リポジトリが見つかりません: %s", repoPath)
@@ -186,7 +246,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 			extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
 		}
 		debuglog.Printf("[CreateSession] creating jj workspace name=%q path=%q", wsName, wsPath)
-		if err := jj.CreateWorkspaceAt(repoPath, wsName, wsPath, extraSymlinks); err != nil {
+		if err := m.jj().CreateWorkspaceAt(repoPath, wsName, wsPath, extraSymlinks); err != nil {
 			return nil, fmt.Errorf("creating jj workspace: %w", err)
 		}
 		debuglog.Printf("[CreateSession] jj workspace created")
@@ -214,11 +274,12 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	debuglog.Printf("[CreateSession] starting pty workDir=%q", actualWorkDir)
 	addDirArgs := m.buildAddDirArgs(repoPath)
 	proc, err := pty.Start(ctx, pty.StartOptions{
+		Command:        m.config.ClaudeCommand,
 		WorkDir:        actualWorkDir,
 		Prompt:         "",
 		PermissionMode: m.config.DefaultPermissionMode,
 		AdditionalArgs: append([]string{"--agent", sess.Name}, addDirArgs...),
-		Env:            []string{"CLAUDE_DECK_SESSION_ID=" + sess.ID},
+		Env:            []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
 		Cols:           uint16(cols),
 		Rows:           uint16(rows),
 	}, func(data []byte) {
@@ -227,22 +288,22 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	if err != nil {
 		debuglog.Printf("[CreateSession] pty.Start failed: %v", err)
 		if withWorkspace {
-			_ = jj.ForgetWorkspace(repoPath, sess.Name)
+			_ = m.jj().ForgetWorkspace(repoPath, sess.Name)
 		}
 		return nil, fmt.Errorf("starting claude code: %w", err)
 	}
 	debuglog.Printf("[CreateSession] pty started pid=%d", proc.PID())
 
+	sess.InitDisplay(cols, rows, m.config.MaxScrollback)
+
 	sess.mu.Lock()
 	sess.PID = proc.PID()
 	sess.managed = true
-	// PTY と同じサイズでエミュレータを再作成
-	sess.emulator = newEmulatorWithCallbacks(sess, cols, rows)
 	sess.mu.Unlock()
 
 	// ワークスペースの最近接ブックマークをセッションタイトルに設定
 	debuglog.Printf("[CreateSession] getting nearest bookmark for %q", actualWorkDir)
-	if bookmark, err := jj.GetNearestBookmark(actualWorkDir); err == nil && bookmark != "" {
+	if bookmark, err := m.jj().GetNearestBookmark(actualWorkDir); err == nil && bookmark != "" {
 		debuglog.Printf("[CreateSession] bookmark=%q", bookmark)
 		sess.mu.Lock()
 		sess.BookmarkName = bookmark
@@ -253,32 +314,23 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 
 	m.mu.Lock()
 	m.sessions[sess.ID] = sess
-	m.processes[sess.ID] = proc
 	m.mu.Unlock()
 
+	m.Supervisor.Register(sess.ID, proc)
 	m.persist(sess)
 	m.pruneOldSessions()
-	m.notifyChange()
+	m.notifyChange(sess.ID)
 
 	go m.watchProcess(sess, proc)
 
 	return sess, nil
 }
 
-// handleOutput processes a raw PTY output chunk from a session (monitor-only).
-// PTY 出力中の Braille スピナー文字を検知して Running に遷移する。
+// handleOutput processes a raw PTY output chunk from a session.
+// Domain logic (spinner detection → Running transition) is delegated to Session.IngestPTYOutput.
 func (m *Manager) handleOutput(sess *Session, data []byte) {
-	sess.AppendRaw(data)
-
-	if containsBrailleSpinner(string(data)) {
-		sess.touchSpinner()
-		status := sess.GetStatus()
-		if status != StatusRunning && status != StatusCompleted && status != StatusError {
-			sess.SetStatus(StatusRunning)
-		}
-	}
-
-	m.notifyChange()
+	sess.IngestPTYOutput(data)
+	m.notifyChange(sess.ID)
 }
 
 // watchProcess monitors a session process for exit.
@@ -299,14 +351,14 @@ func (m *Manager) watchProcess(sess *Session, proc *pty.Process) {
 	// /clear 後にメッセージを送らず終了した場合、新 ID の JSONL は空。
 	// resume 不可能なので chain の末尾をポップして旧 ID にフォールバックする。
 	sess.mu.RLock()
-	chain := make([]string, len(sess.SessionChain))
+	chain := make([]ClaudeSessionID, len(sess.SessionChain))
 	copy(chain, sess.SessionChain)
 	sess.mu.RUnlock()
 
 	if len(chain) > 1 {
 		csID := chain[len(chain)-1]
 		prevCSID := chain[len(chain)-2]
-		if !m.usage.HasConversation(csID) {
+		if !m.usage.HasConversation(string(csID)) {
 			// 旧 ID が別の deck セッションに既に紐付いている場合は revert しない。
 			// Discovery が旧 ID を外部セッションとしてインポート済みの場合に
 			// 2つの deck セッションが同じ ClaudeSessionID を持つのを防ぐ。
@@ -324,11 +376,11 @@ func (m *Manager) watchProcess(sess *Session, proc *pty.Process) {
 	}
 
 	m.persist(sess)
-	m.notifyChange()
+	m.notifyChange(sess.ID)
 }
 
 // ResumeSession resumes a completed Claude Code session using --resume.
-func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, rows int) error {
+func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID, cols, rows int) error {
 	debuglog.Printf("[ResumeSession] sessionID=%s cols=%d rows=%d", sessionID, cols, rows)
 	if m.HasActiveProcess(sessionID) {
 		debuglog.Printf("[ResumeSession] already has active process")
@@ -377,9 +429,11 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	// PTY 起動前にエミュレータと rt フィールドをリセットする。
 	// 起動後にリセットすると、起動直後の出力が古いエミュレータに流れる
 	// リースウィンドウが生じるため、必ず起動前に行う。
-	sess.emuMu.Lock()
-	sess.emulator = newEmulatorWithCallbacks(sess, cols, rows)
-	sess.emuMu.Unlock()
+	if sess.display != nil {
+		sess.ResetDisplay(cols, rows)
+	} else {
+		sess.InitDisplay(cols, rows, m.config.MaxScrollback)
+	}
 
 	// rt.maxLogLines と rt.LogLines は rt.mu で保護する。
 	// sess.mu との同時保持は禁止（ロック順序規則）。
@@ -392,15 +446,15 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	sess.setStatusLocked(StatusIdle)
 	sess.FinishedAt = nil // resume なので終了時刻をクリア
 	sess.managed = true
-	sess.maxScrollback = m.config.MaxScrollback
 	sess.mu.Unlock()
 
 	debuglog.Printf("[ResumeSession] calling pty.Start")
 	proc, err := pty.Start(ctx, pty.StartOptions{
+		Command:         m.config.ClaudeCommand,
 		WorkDir:         workDir,
-		ResumeSessionID: csID,
+		ResumeSessionID: string(csID),
 		AdditionalArgs:  m.buildAddDirArgs(sess.RepoPath),
-		Env:             []string{"CLAUDE_DECK_SESSION_ID=" + sessionID},
+		Env:             []string{"CLAUDE_DECK_SESSION_ID=" + string(sessionID)},
 		Cols:            uint16(cols),
 		Rows:            uint16(rows),
 	}, func(data []byte) {
@@ -419,12 +473,10 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	sess.mu.Unlock()
 	debuglog.Printf("[ResumeSession] session state updated")
 
-	m.mu.Lock()
-	m.processes[sessionID] = proc
-	m.mu.Unlock()
+	m.Supervisor.Register(sessionID, proc)
 
 	m.persist(sess)
-	m.notifyChange()
+	m.notifyChange(sessionID)
 	debuglog.Printf("[ResumeSession] done, watching process")
 
 	go m.watchProcess(sess, proc)
@@ -435,7 +487,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 // ForkSession creates a new session that forks from an existing session's conversation.
 // Uses claude --resume <sourceClaudeSessionID> --fork-session to inherit conversation
 // history while creating a new Claude Code session ID and JSONL file.
-func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols, rows int) (*Session, error) {
+func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID, cols, rows int) (*Session, error) {
 	m.mu.RLock()
 	srcSess, ok := m.sessions[sourceSessionID]
 	m.mu.RUnlock()
@@ -468,7 +520,6 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols,
 	repoName := filepath.Base(repoPath)
 	sess := NewSession(repoPath, repoName)
 	sess.rt.maxLogLines = m.config.MaxLogLines
-	sess.maxScrollback = m.config.MaxScrollback
 
 	wsName := sess.Name
 	wsPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
@@ -477,7 +528,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols,
 	if m.config.WorkspaceSymlinksFunc != nil {
 		extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
 	}
-	if err := jj.CreateWorkspaceAt(repoPath, wsName, wsPath, extraSymlinks); err != nil {
+	if err := m.jj().CreateWorkspaceAt(repoPath, wsName, wsPath, extraSymlinks); err != nil {
 		return nil, fmt.Errorf("creating jj workspace: %w", err)
 	}
 	sess.WorkspacePath = wsPath
@@ -485,29 +536,31 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols,
 	sess.SubProjectDir = srcSubProjectDir
 
 	proc, err := pty.Start(ctx, pty.StartOptions{
+		Command:         m.config.ClaudeCommand,
 		WorkDir:         srcWorkDir,
-		ResumeSessionID: srcClaudeID,
+		ResumeSessionID: string(srcClaudeID),
 		ForkSession:     true,
 		AdditionalArgs:  m.buildAddDirArgs(repoPath),
-		Env:             []string{"CLAUDE_DECK_SESSION_ID=" + sess.ID},
+		Env:             []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
 		Cols:            uint16(cols),
 		Rows:            uint16(rows),
 	}, func(data []byte) {
 		m.handleOutput(sess, data)
 	})
 	if err != nil {
-		_ = jj.ForgetWorkspace(repoPath, wsName)
+		_ = m.jj().ForgetWorkspace(repoPath, wsName)
 		return nil, fmt.Errorf("starting forked session: %w", err)
 	}
+
+	sess.InitDisplay(cols, rows, m.config.MaxScrollback)
 
 	sess.mu.Lock()
 	sess.PID = proc.PID()
 	sess.managed = true
-	sess.emulator = newEmulatorWithCallbacks(sess, cols, rows)
 	sess.mu.Unlock()
 
 	// ワークスペースの最近接ブックマークをセッションタイトルに設定
-	if bookmark, err := jj.GetNearestBookmark(wsPath); err == nil && bookmark != "" {
+	if bookmark, err := m.jj().GetNearestBookmark(wsPath); err == nil && bookmark != "" {
 		sess.mu.Lock()
 		sess.BookmarkName = bookmark
 		sess.mu.Unlock()
@@ -515,12 +568,12 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols,
 
 	m.mu.Lock()
 	m.sessions[sess.ID] = sess
-	m.processes[sess.ID] = proc
 	m.mu.Unlock()
 
+	m.Supervisor.Register(sess.ID, proc)
 	m.persist(sess)
 	m.pruneOldSessions()
-	m.notifyChange()
+	m.notifyChange(sess.ID)
 
 	go m.watchProcess(sess, proc)
 
@@ -530,16 +583,15 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols,
 // RemoveSession removes a deck session from the manager and store, but keeps
 // Claude Code JSONL files and jj workspace intact. Use for cleaning up duplicate
 // deck sessions without losing Claude Code data.
-func (m *Manager) RemoveSession(sessionID string) error {
+func (m *Manager) RemoveSession(sessionID DeckSessionID) error {
 	m.mu.RLock()
 	_, ok := m.sessions[sessionID]
-	_, hasProc := m.processes[sessionID]
 	m.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	if hasProc && m.HasActiveProcess(sessionID) {
+	if m.Supervisor.IsAlive(sessionID) {
 		return fmt.Errorf("cannot remove running session (kill it first)")
 	}
 
@@ -547,33 +599,31 @@ func (m *Manager) RemoveSession(sessionID string) error {
 
 	// oldSessionIDs には登録しない。dd は deck メタデータだけ削除し JSONL は残すため、
 	// 次回の DiscoverExternalSessions で外部セッションとして再発見されるのが正しい動作。
+	m.Supervisor.Unregister(sessionID)
 	m.mu.Lock()
 	delete(m.sessions, sessionID)
-	delete(m.processes, sessionID)
 	m.mu.Unlock()
 
 	if m.store != nil {
-		_ = m.store.Delete(sessionID)
+		_ = m.store.Delete(string(sessionID))
 	}
 
-	m.notifyChange()
+	m.notifyChange(sessionID)
 	return nil
 }
 
 // DeleteSession removes a session from the manager, store, and Claude Code JSONL.
 // Running sessions must be killed first.
 // Returns a warning message (non-empty if JSONL cleanup had issues) and an error.
-func (m *Manager) DeleteSession(sessionID string) (warning string, err error) {
+func (m *Manager) DeleteSession(sessionID DeckSessionID) (warning string, err error) {
 	m.mu.RLock()
 	sess, ok := m.sessions[sessionID]
-	_, hasProc := m.processes[sessionID]
 	m.mu.RUnlock()
 	if !ok {
 		return "", fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	status := sess.GetStatus()
-	if hasProc && status != StatusCompleted && status != StatusError && status != StatusUnmanaged {
+	if m.Supervisor.IsAlive(sessionID) {
 		return "", fmt.Errorf("cannot delete running session (kill it first)")
 	}
 
@@ -585,7 +635,7 @@ func (m *Manager) DeleteSession(sessionID string) (warning string, err error) {
 	sess.mu.RUnlock()
 
 	if csID != "" {
-		if jsonlErr := m.usage.DeleteSessionFiles(csID); jsonlErr != nil {
+		if jsonlErr := m.usage.DeleteSessionFiles(string(csID)); jsonlErr != nil {
 			warning = fmt.Sprintf("JSONL削除失敗: %v", jsonlErr)
 		}
 	}
@@ -597,7 +647,7 @@ func (m *Manager) DeleteSession(sessionID string) (warning string, err error) {
 
 	// jj ワークスペースを forget（削除時のみ。プロセス終了時は再開用に保持する）
 	if wsName != "" && repoPath != "" {
-		if wsErr := jj.ForgetWorkspace(repoPath, wsName); wsErr != nil {
+		if wsErr := m.jj().ForgetWorkspace(repoPath, wsName); wsErr != nil {
 			msg := fmt.Sprintf("workspace forget失敗: %v", wsErr)
 			if warning != "" {
 				warning += "; " + msg
@@ -607,13 +657,13 @@ func (m *Manager) DeleteSession(sessionID string) (warning string, err error) {
 		}
 	}
 
+	m.Supervisor.Unregister(sessionID)
 	m.mu.Lock()
 	delete(m.sessions, sessionID)
-	delete(m.processes, sessionID)
 	m.mu.Unlock()
 
 	if m.store != nil {
-		if storeErr := m.store.Delete(sessionID); storeErr != nil {
+		if storeErr := m.store.Delete(string(sessionID)); storeErr != nil {
 			msg := fmt.Sprintf("ストア削除失敗: %v", storeErr)
 			if warning != "" {
 				warning += "; " + msg
@@ -623,14 +673,13 @@ func (m *Manager) DeleteSession(sessionID string) (warning string, err error) {
 		}
 	}
 
-	m.notifyChange()
+	m.notifyChange(sessionID)
 	return warning, nil
 }
 
 // Kill forcefully terminates a session.
-func (m *Manager) Kill(sessionID string) error {
+func (m *Manager) Kill(sessionID DeckSessionID) error {
 	m.mu.RLock()
-	proc, hasProc := m.processes[sessionID]
 	sess, hasSess := m.sessions[sessionID]
 	m.mu.RUnlock()
 
@@ -638,83 +687,48 @@ func (m *Manager) Kill(sessionID string) error {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	if hasProc {
-		return proc.Kill()
-	}
-
-	// プロセスハンドルなし（前回起動時のセッションがストアから復元された場合など）。
-	// PID が残っていれば SIGTERM で終了を試みる。
 	sess.mu.RLock()
 	pid := sess.PID
 	sess.mu.RUnlock()
 
-	if pid > 0 {
-		if p, err := os.FindProcess(pid); err == nil {
-			_ = p.Signal(syscall.SIGTERM)
-		}
+	if err := m.Supervisor.Kill(sessionID, pid); err != nil {
+		return err
 	}
 
-	sess.SetStatus(StatusCompleted)
-	m.persist(sess)
+	// Supervisor.Kill が SIGTERM を送った場合、watchProcess が Completed に遷移させる。
+	// プロセスハンドルがない場合は手動で遷移させる。
+	if !m.Supervisor.IsAlive(sessionID) && m.Supervisor.Get(sessionID) == nil {
+		sess.SetStatus(StatusCompleted)
+		m.persist(sess)
+	}
 	return nil
 }
 
 // WriteToSession sends data to the PTY process of a running session.
 // raw PTY 入力モードでは keyToBytes が1キー分のバイト列を返すため、
 // 一括で書き込む。マルチバイト UTF-8 文字の分断を防ぐ。
-func (m *Manager) WriteToSession(sessionID string, data []byte) error {
-	m.mu.RLock()
-	proc, ok := m.processes[sessionID]
-	m.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("no active process for session %s", sessionID)
-	}
-	if _, err := proc.Write(data); err != nil {
-		return fmt.Errorf("write: %w", err)
-	}
-	return nil
+func (m *Manager) WriteToSession(sessionID DeckSessionID, data []byte) error {
+	return m.Supervisor.Write(sessionID, data)
 }
 
 // HasActiveProcess returns true if the session has a live PTY process.
-func (m *Manager) HasActiveProcess(sessionID string) bool {
-	m.mu.RLock()
-	proc, ok := m.processes[sessionID]
-	m.mu.RUnlock()
-	if !ok {
-		return false
-	}
-	select {
-	case <-proc.Done():
-		return false
-	default:
-		return true
-	}
+func (m *Manager) HasActiveProcess(sessionID DeckSessionID) bool {
+	return m.Supervisor.IsAlive(sessionID)
 }
 
 // ResizeSession updates the PTY process and virtual terminal emulator dimensions.
 // Claude Code re-renders its Ink UI for the new size.
-func (m *Manager) ResizeSession(sessionID string, cols, rows int) {
+func (m *Manager) ResizeSession(sessionID DeckSessionID, cols, rows int) {
 	debuglog.Printf("[resize] session=%s cols=%d rows=%d", sessionID, cols, rows)
-	m.mu.RLock()
-	proc, ok := m.processes[sessionID]
-	m.mu.RUnlock()
-	if ok {
-		proc.Resize(uint16(cols), uint16(rows)) //nolint:errcheck
-	}
+	m.Supervisor.Resize(sessionID, uint16(cols), uint16(rows))
 
 	if sess := m.GetSession(sessionID); sess != nil {
-		// emuMu を使う。mu ではなく emuMu がエミュレータ操作専用ロック。
-		// mu を使うと AppendRaw（emuMu）と並行実行されデータレースになる。
-		sess.emuMu.Lock()
-		if sess.emulator != nil {
-			sess.emulator.Resize(cols, rows)
-		}
-		sess.emuMu.Unlock()
+		sess.ResizeDisplay(cols, rows)
 	}
 }
 
 // GetSession returns a session by ID.
-func (m *Manager) GetSession(id string) *Session {
+func (m *Manager) GetSession(id DeckSessionID) *Session {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.sessions[id]
@@ -767,15 +781,11 @@ func (m *Manager) ListSessions() []*Session {
 // ListManagedSessions returns PTY-managed sessions that are still alive.
 // Only sessions with an active (not-yet-done) process are included.
 func (m *Manager) ListManagedSessions() []*Session {
+	activeIDs := m.Supervisor.ActiveSessionIDs()
+
 	m.mu.RLock()
-	list := make([]*Session, 0, len(m.processes))
-	for id, proc := range m.processes {
-		// non-blocking check: if Done channel is closed, the process has exited
-		select {
-		case <-proc.Done():
-			continue
-		default:
-		}
+	list := make([]*Session, 0, len(activeIDs))
+	for _, id := range activeIDs {
 		if s, ok := m.sessions[id]; ok {
 			list = append(list, s)
 		}
@@ -824,7 +834,7 @@ func (m *Manager) buildAddDirArgs(repoPath string) []string {
 	return args
 }
 
-func (m *Manager) isClaudeIDClaimed(claudeSessionID, excludeID string) bool {
+func (m *Manager) isClaudeIDClaimed(claudeSessionID ClaudeSessionID, excludeID DeckSessionID) bool {
 	for _, s := range m.copySessionsList() {
 		if s.ID == excludeID {
 			continue

@@ -71,7 +71,7 @@ func newExternalSession(info *usage.SessionInfo) *Session { //nolint:unparam
 		RepoName:      repoName,
 		WorkspacePath: info.CWD,
 		SubProjectDir: subProjectDir,
-		SessionChain:  []string{info.SessionID},
+		SessionChain:  []ClaudeSessionID{ClaudeSessionID(info.SessionID)},
 		Status:        StatusUnmanaged,
 		Prompt:          info.Prompt,
 		PermissionMode:  info.PermissionMode,
@@ -138,9 +138,9 @@ func truncateSessionID(id string) string {
 // knownClaudeSessionIDs returns a set of all Claude Code session IDs that are
 // already tracked by the manager. This includes all chain entries (current and
 // historical) for every tracked session, so /clear history is never re-imported.
-func (m *Manager) knownClaudeSessionIDs() map[string]bool {
+func (m *Manager) knownClaudeSessionIDs() map[ClaudeSessionID]bool {
 	sessions := m.copySessionsList()
-	known := make(map[string]bool, len(sessions)*2)
+	known := make(map[ClaudeSessionID]bool, len(sessions)*2)
 	for _, s := range sessions {
 		s.mu.RLock()
 		for _, id := range s.SessionChain {
@@ -155,7 +155,7 @@ func (m *Manager) knownClaudeSessionIDs() map[string]bool {
 
 // hasClaudeSessionID returns true if any session in the chain contains claudeSessionID.
 // REQUIRES m.mu to be held (at least for reading); accessing m.sessions without it is a data race.
-func (m *Manager) hasClaudeSessionID(claudeSessionID string) bool {
+func (m *Manager) hasClaudeSessionID(claudeSessionID ClaudeSessionID) bool {
 	for _, existing := range m.sessions {
 		if slices.Contains(existing.SessionChain, claudeSessionID) {
 			return true
@@ -167,7 +167,8 @@ func (m *Manager) hasClaudeSessionID(claudeSessionID string) bool {
 // handleNewFile imports a newly discovered JSONL file as an external session
 // if it is not already tracked.
 func (m *Manager) handleNewFile(ev usage.FileEvent) {
-	if m.knownClaudeSessionIDs()[ev.SessionID] {
+	csID := ClaudeSessionID(ev.SessionID)
+	if m.knownClaudeSessionIDs()[csID] {
 		return
 	}
 
@@ -180,7 +181,7 @@ func (m *Manager) handleNewFile(ev usage.FileEvent) {
 
 	m.mu.Lock()
 	// Double-check: DiscoverExternalSessions との競合で重複を防ぐ
-	if !m.hasClaudeSessionID(ev.SessionID) {
+	if !m.hasClaudeSessionID(csID) {
 		m.sessions[sess.ID] = sess
 	}
 	m.mu.Unlock()
@@ -199,7 +200,8 @@ func (m *Manager) DiscoverExternalSessions() (added int, hasMore bool) {
 
 	added = 0
 	for _, info := range allInfos {
-		if known[info.SessionID] {
+		csID := ClaudeSessionID(info.SessionID)
+		if known[csID] {
 			continue
 		}
 
@@ -207,7 +209,7 @@ func (m *Manager) DiscoverExternalSessions() (added int, hasMore bool) {
 
 		m.mu.Lock()
 		// Double-check: handleNewFile との競合で重複を防ぐ
-		if !m.hasClaudeSessionID(info.SessionID) {
+		if !m.hasClaudeSessionID(csID) {
 			m.sessions[sess.ID] = sess
 			added++
 		} else {

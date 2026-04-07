@@ -32,6 +32,79 @@ func TestStatus_String(t *testing.T) {
 	}
 }
 
+func TestStatus_IsTerminal(t *testing.T) {
+	tests := []struct {
+		status Status
+		want   bool
+	}{
+		{StatusRunning, false},
+		{StatusWaitingApproval, false},
+		{StatusWaitingAnswer, false},
+		{StatusCompleted, true},
+		{StatusError, true},
+		{StatusIdle, false},
+		{StatusUnmanaged, false},
+	}
+	for _, tt := range tests {
+		if got := tt.status.IsTerminal(); got != tt.want {
+			t.Errorf("Status(%d).IsTerminal() = %v, want %v", tt.status, got, tt.want)
+		}
+	}
+}
+
+func TestStatus_CanTransitionTo(t *testing.T) {
+	tests := []struct {
+		from, to Status
+		want     bool
+	}{
+		// Identity transitions
+		{StatusIdle, StatusIdle, true},
+		{StatusRunning, StatusRunning, true},
+
+		// Idle transitions
+		{StatusIdle, StatusRunning, true},
+		{StatusIdle, StatusCompleted, true},
+		{StatusIdle, StatusError, true},
+		{StatusIdle, StatusWaitingApproval, false},
+
+		// Running transitions
+		{StatusRunning, StatusIdle, true},
+		{StatusRunning, StatusWaitingApproval, true},
+		{StatusRunning, StatusWaitingAnswer, true},
+		{StatusRunning, StatusCompleted, true},
+		{StatusRunning, StatusError, true},
+
+		// WaitingApproval transitions
+		{StatusWaitingApproval, StatusRunning, true},
+		{StatusWaitingApproval, StatusIdle, true},
+		{StatusWaitingApproval, StatusCompleted, true},
+		{StatusWaitingApproval, StatusWaitingAnswer, false},
+
+		// WaitingAnswer transitions
+		{StatusWaitingAnswer, StatusRunning, true},
+		{StatusWaitingAnswer, StatusIdle, true},
+		{StatusWaitingAnswer, StatusCompleted, true},
+		{StatusWaitingAnswer, StatusWaitingApproval, false},
+
+		// Terminal state transitions
+		{StatusCompleted, StatusIdle, true},   // Resume
+		{StatusCompleted, StatusRunning, false},
+		{StatusCompleted, StatusError, true},
+		{StatusError, StatusIdle, true},        // Resume
+		{StatusError, StatusRunning, false},
+
+		// Unmanaged never transitions
+		{StatusUnmanaged, StatusRunning, false},
+		{StatusUnmanaged, StatusCompleted, false},
+	}
+	for _, tt := range tests {
+		got := tt.from.canTransitionTo(tt.to)
+		if got != tt.want {
+			t.Errorf("Status(%v).canTransitionTo(%v) = %v, want %v", tt.from, tt.to, got, tt.want)
+		}
+	}
+}
+
 func TestStatus_NeedsAttention(t *testing.T) {
 	tests := []struct {
 		status Status
@@ -52,10 +125,86 @@ func TestStatus_NeedsAttention(t *testing.T) {
 	}
 }
 
+func TestSessionPhase_String(t *testing.T) {
+	tests := []struct {
+		phase SessionPhase
+		want  string
+	}{
+		{PhaseActive, "Active"},
+		{PhaseArchived, "Archived"},
+		{PhaseExternal, "External"},
+		{SessionPhase(99), "Unknown"},
+	}
+	for _, tt := range tests {
+		if got := tt.phase.String(); got != tt.want {
+			t.Errorf("SessionPhase(%d).String() = %q, want %q", tt.phase, got, tt.want)
+		}
+	}
+}
+
+func TestSession_Phase(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  Status
+		managed bool
+		want    SessionPhase
+	}{
+		{"running managed", StatusRunning, true, PhaseActive},
+		{"idle managed", StatusIdle, true, PhaseActive},
+		{"waiting managed", StatusWaitingApproval, true, PhaseActive},
+		{"idle unmanaged", StatusIdle, false, PhaseActive},       // Idle but not terminal
+		{"completed unmanaged", StatusCompleted, false, PhaseArchived},
+		{"error unmanaged", StatusError, false, PhaseArchived},
+		{"completed still managed", StatusCompleted, true, PhaseActive}, // rare: watchProcess hasn't run yet
+		{"unmanaged", StatusUnmanaged, false, PhaseExternal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sess := NewSession("/repo", "repo")
+			sess.Status = tt.status
+			sess.managed = tt.managed
+			snap := sess.Snapshot()
+			if snap.Phase != tt.want {
+				t.Errorf("Phase = %v, want %v", snap.Phase, tt.want)
+			}
+		})
+	}
+}
+
 func TestTokenUsage_TotalTokens(t *testing.T) {
 	tu := TokenUsage{InputTokens: 100, OutputTokens: 50}
 	if got := tu.TotalTokens(); got != 150 {
 		t.Errorf("TotalTokens() = %d, want 150", got)
+	}
+}
+
+func TestTokenUsage_EstimateCost(t *testing.T) {
+	pricing := PricingPolicy{
+		InputPerMTok:      15.0,
+		OutputPerMTok:     75.0,
+		CacheWritePerMTok: 18.75,
+		CacheReadPerMTok:  1.50,
+	}
+
+	tu := TokenUsage{
+		InputTokens:              1_000_000,
+		OutputTokens:             500_000,
+		CacheCreationInputTokens: 200_000,
+		CacheReadInputTokens:     300_000,
+	}
+
+	cost := tu.EstimateCost(pricing)
+	// 1M * 15/1M + 0.5M * 75/1M + 0.2M * 18.75/1M + 0.3M * 1.5/1M
+	// = 15.0 + 37.5 + 3.75 + 0.45 = 56.7
+	expected := 56.7
+	if cost < expected-0.01 || cost > expected+0.01 {
+		t.Errorf("EstimateCost = %f, want ~%f", cost, expected)
+	}
+
+	// Zero pricing returns 0
+	zeroCost := tu.EstimateCost(PricingPolicy{})
+	if zeroCost != 0 {
+		t.Errorf("EstimateCost with zero pricing = %f, want 0", zeroCost)
 	}
 }
 
@@ -222,6 +371,7 @@ func TestSession_GetPTYDisplayLines(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sess := NewSession("/repo", "repo")
+			sess.InitDisplay(120, 40, 0)
 			for _, line := range tt.lines {
 				sess.AppendLog(line)
 			}
@@ -397,7 +547,7 @@ func TestLoadExisting_DeletedDirectory(t *testing.T) {
 		Status:        StatusCompleted,
 		FinishedAt:    &finishedAt,
 	}
-	if err := st.Save(sess.ID, sess); err != nil {
+	if err := st.Save(string(sess.ID), sess); err != nil {
 		t.Fatal(err)
 	}
 
@@ -411,7 +561,7 @@ func TestLoadExisting_DeletedDirectory(t *testing.T) {
 		Status:        StatusCompleted,
 		FinishedAt:    &finishedAt,
 	}
-	if err := st.Save(sess2.ID, sess2); err != nil {
+	if err := st.Save(string(sess2.ID), sess2); err != nil {
 		t.Fatal(err)
 	}
 
@@ -449,5 +599,96 @@ func TestLoadExisting_DeletedDirectory(t *testing.T) {
 	}
 	if got2.Status != StatusCompleted {
 		t.Errorf("existing dir session status = %v, want StatusCompleted", got2.Status)
+	}
+}
+
+func TestHostingMode_String(t *testing.T) {
+	tests := []struct {
+		mode HostingMode
+		want string
+	}{
+		{HostEmbedded, "Embedded"},
+		{HostExternal, "External"},
+		{HostingMode(99), "Unknown"},
+	}
+	for _, tt := range tests {
+		if got := tt.mode.String(); got != tt.want {
+			t.Errorf("HostingMode(%d).String() = %q, want %q", tt.mode, got, tt.want)
+		}
+	}
+}
+
+func TestDisplayChannel_String(t *testing.T) {
+	tests := []struct {
+		ch   DisplayChannel
+		want string
+	}{
+		{DisplayPTY, "PTY"},
+		{DisplayJSONL, "JSONL"},
+		{DisplayNone, "None"},
+		{DisplayChannel(99), "Unknown"},
+	}
+	for _, tt := range tests {
+		if got := tt.ch.String(); got != tt.want {
+			t.Errorf("DisplayChannel(%d).String() = %q, want %q", tt.ch, got, tt.want)
+		}
+	}
+}
+
+func TestDisplayChannel_Derivation(t *testing.T) {
+	tests := []struct {
+		name    string
+		hosting HostingMode
+		managed bool
+		want    DisplayChannel
+	}{
+		{"embedded+managed", HostEmbedded, true, DisplayPTY},
+		{"embedded+unmanaged", HostEmbedded, false, DisplayJSONL},
+		{"external+managed", HostExternal, true, DisplayNone},
+		{"external+unmanaged", HostExternal, false, DisplayJSONL},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewSession("/tmp/repo", "repo")
+			s.Hosting = tt.hosting
+			s.managed = tt.managed
+			snap := s.Snapshot()
+			if snap.Display != tt.want {
+				t.Errorf("Display = %v, want %v", snap.Display, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewExternalSession(t *testing.T) {
+	s := NewExternalSession("/tmp/repo", "repo")
+	if s.Hosting != HostExternal {
+		t.Errorf("Hosting = %v, want HostExternal", s.Hosting)
+	}
+	if s.display != nil {
+		t.Error("external session should not have a PTYDisplay")
+	}
+	// AppendRaw should not panic with nil display
+	s.AppendRaw([]byte("hello\n"))
+	logs := s.GetLogs()
+	if len(logs) == 0 {
+		t.Error("LogLines should still be populated for external sessions")
+	}
+}
+
+func TestNewSession_DefaultHosting(t *testing.T) {
+	s := NewSession("/tmp/repo", "repo")
+	if s.Hosting != HostEmbedded {
+		t.Errorf("Hosting = %v, want HostEmbedded", s.Hosting)
+	}
+	// PTYDisplay is nil until InitDisplay is called by Manager.
+	// This avoids double-creation with wrong dimensions.
+	if s.display != nil {
+		t.Error("new session should not have display until InitDisplay is called")
+	}
+	// InitDisplay and verify
+	s.InitDisplay(80, 24, 0)
+	if s.display == nil {
+		t.Error("display should be non-nil after InitDisplay")
 	}
 }

@@ -13,9 +13,6 @@ import (
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 )
 
-// Command is the claude executable path. Override from config before use.
-var Command = "claude"
-
 // Process wraps a Claude Code CLI process running in a pseudo-terminal.
 type Process struct {
 	cmd    *exec.Cmd
@@ -34,6 +31,7 @@ type OutputHandler func(data []byte)
 
 // StartOptions configures a new Claude Code process.
 type StartOptions struct {
+	Command          string // claude executable path; defaults to "claude" if empty
 	WorkDir          string
 	Prompt           string
 	PermissionMode   string
@@ -63,9 +61,14 @@ func Start(ctx context.Context, opts StartOptions, handler OutputHandler) (*Proc
 	}
 	args = append(args, opts.AdditionalArgs...)
 
-	debuglog.Printf("[pty.Start] cmd=%s args=%v workDir=%q cols=%d rows=%d", Command, args, opts.WorkDir, opts.Cols, opts.Rows)
+	command := opts.Command
+	if command == "" {
+		command = "claude"
+	}
 
-	cmd := exec.CommandContext(ctx, Command, args...)
+	debuglog.Printf("[pty.Start] cmd=%s args=%v workDir=%q cols=%d rows=%d", command, args, opts.WorkDir, opts.Cols, opts.Rows)
+
+	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = opts.WorkDir
 	cmd.Env = append(os.Environ(),
 		"TERM=xterm-256color",

@@ -44,6 +44,20 @@ internal/
 
 `/review-domain` コマンドでドメイン分析・アーキテクチャレビューを実行可能。
 
+## ドキュメント
+
+新規参加者は以下の順で読むこと:
+
+1. [docs/00-glossary.md](docs/00-glossary.md) — ドメイン用語集
+2. [docs/01-overview.md](docs/01-overview.md) — システム全体像とデータフロー
+3. この CLAUDE.md — 開発規約
+4. [docs/architecture.md](docs/architecture.md) — パッケージ構成と初期化フロー
+5. [docs/concurrency.md](docs/concurrency.md) — 並行処理ルール
+6. [docs/adr/](docs/adr/) — 設計判断の記録
+
+ドキュメントのプラクティスは [docs/documentation-practices.md](docs/documentation-practices.md) を参照。
+ドメイン概念を追加・変更したらコードと同時にドキュメントも更新すること。
+
 ## 開発時の重要事項
 
 ### ロック順序（デッドロック防止）
@@ -51,13 +65,17 @@ internal/
 Manager.mu → Session.mu の順で取得すること。逆順は ABBA デッドロックを起こす。
 パターン: Manager.mu で候補リストをコピー → mu 解放 → Session.mu で個別アクセス。
 
+PTYDisplay.emuMu は Session.mu / rt.mu と独立。ただし onTitle コールバックが
+Session.mu を取るため、Session.mu 保持中に display.Write() を呼ばないこと。
+詳細は [docs/concurrency.md](docs/concurrency.md) を参照。
+
 ### セッション ID の関係
 
 | ID | 役割 |
 |----|------|
-| `Session.ID` | claude-deck 内部 ID（ランダム hex） |
+| `Session.ID` (`DeckSessionID`) | claude-deck 内部 ID（ランダム hex） |
 | `ClaudeSessionID` | Claude Code が割り当てる UUID |
-| `PreviousClaudeSessionID` | /clear 前の旧 Claude UUID（revert 用） |
+| `SessionChain` | /clear を跨いだ ClaudeSessionID の履歴（古い順） |
 | `CLAUDE_DECK_SESSION_ID` | 環境変数でフックに渡す deck ID |
 
 `/clear` で ClaudeSessionID が変わるが、deck の Session.ID は不変。
@@ -76,11 +94,13 @@ Completed / Error      (hook: Stop → Idle)
 - Idle: Hook Stop イベント or スピナータイムアウト (3s)
 - Completed: プロセス終了
 
-### データソース優先度
+### データソース優先度（→ [用語集: Projection](docs/00-glossary.md#projection-投影)）
 
 - **JSONL** (Claude Code 一次データ): Prompt, TokenUsage, StartedAt, LastActivity
+- **Hook** (リアルタイム通知): Status 遷移, SessionChain 更新
+- **PTY** (フォールバック): スピナー検知による Running 検出
 - **Store** (deck メタデータ): ID, Name, RepoPath, WorkspacePath, Status, PID
-- **Runtime** (メモリのみ): LogLines, JSONLLogEntries, CurrentTool, emulator
+- **Runtime** (メモリのみ): LogLines, JSONLLogEntries, CurrentTool, PTYDisplay
 
 ### キーバインド
 

@@ -17,7 +17,6 @@ import (
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/hooks"
 	"github.com/pomesaka/claude-deck/internal/jj"
-	"github.com/pomesaka/claude-deck/internal/pty"
 	"github.com/pomesaka/claude-deck/internal/session"
 	"github.com/pomesaka/claude-deck/internal/store"
 	"github.com/pomesaka/claude-deck/internal/tui"
@@ -57,8 +56,6 @@ func run() error {
 
 	// Apply config to package-level settings
 	tui.InitStyles(cfg.Theme)
-	jj.Command = cfg.Commands.JJ
-	pty.Command = cfg.Commands.Claude
 	usage.SetPricing(cfg.Pricing.InputPerMTok, cfg.Pricing.OutputPerMTok, cfg.Pricing.CacheWritePerMTok, cfg.Pricing.CacheReadPerMTok)
 	usage.MaxEntries = cfg.Session.MaxJSONLEntries
 
@@ -98,12 +95,20 @@ func run() error {
 	// Create session manager
 	mgr := session.NewManager(ctx, st, session.ManagerConfig{
 		DataDir:               cfg.DataDir,
+		ClaudeCommand:         cfg.Commands.Claude,
+		JJ:                    &jj.Runner{Command: cfg.Commands.JJ},
 		DefaultPermissionMode: cfg.Defaults.PermissionMode,
 		MaxSessions:           cfg.Session.MaxSessions,
 		MaxLogLines:           cfg.Session.MaxLogLines,
 		MaxScrollback:         cfg.Session.MaxScrollback,
 		DiscoveryDays:         cfg.Session.DiscoveryDays,
 		RefreshInterval:       refreshInterval,
+		Pricing: session.PricingPolicy{
+			InputPerMTok:      cfg.Pricing.InputPerMTok,
+			OutputPerMTok:     cfg.Pricing.OutputPerMTok,
+			CacheWritePerMTok: cfg.Pricing.CacheWritePerMTok,
+			CacheReadPerMTok:  cfg.Pricing.CacheReadPerMTok,
+		},
 		WorkspaceSymlinksFunc: cfg.WorkspaceSymlinks,
 		AddDirsFunc:           cfg.ResolvedAddDirs,
 	})
@@ -142,8 +147,8 @@ func run() error {
 	}
 
 	// ストリーマーやバックグラウンド処理からの変更通知を Bubble Tea に伝える
-	mgr.SetOnChange(func() {
-		p.Send(tui.SessionRefreshMsg{})
+	mgr.SetOnChange(func(changed map[session.DeckSessionID]bool) {
+		p.Send(tui.SessionRefreshMsg{ChangedIDs: changed})
 	})
 	mgr.StartNotifyLoop(ctx)
 	mgr.StartSpinnerIdleLoop(ctx)

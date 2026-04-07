@@ -3,10 +3,8 @@ package session
 import (
 	"bytes"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/charmbracelet/x/vt"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
@@ -50,6 +48,147 @@ func (s Status) NeedsAttention() bool {
 	return s == StatusWaitingApproval || s == StatusWaitingAnswer
 }
 
+// IsTerminal returns true if the status is a final state (no further transitions expected).
+func (s Status) IsTerminal() bool {
+	return s == StatusCompleted || s == StatusError
+}
+
+// canTransitionTo reports whether a transition from s to next is valid.
+// Invalid transitions are logged but not blocked — this is a diagnostic aid,
+// not a hard gate. The transition table codifies the state diagram in CLAUDE.md.
+func (s Status) canTransitionTo(next Status) bool {
+	if s == next {
+		return true // identity transition is always allowed (idempotent)
+	}
+	switch s {
+	case StatusIdle:
+		// Idle → Running (spinner), Completed (process exit), Error (directory missing)
+		return next == StatusRunning || next == StatusCompleted || next == StatusError
+	case StatusRunning:
+		// Running → Idle (spinner timeout / hook stop), WaitingApproval, WaitingAnswer,
+		//           Completed (process exit), Error
+		return next == StatusIdle || next == StatusWaitingApproval || next == StatusWaitingAnswer ||
+			next == StatusCompleted || next == StatusError
+	case StatusWaitingApproval:
+		// WaitingApproval → Running (approved), Idle (hook stop), Completed (process exit/kill)
+		return next == StatusRunning || next == StatusIdle || next == StatusCompleted || next == StatusError
+	case StatusWaitingAnswer:
+		// WaitingAnswer → Running (answered), Idle (hook stop), Completed (process exit/kill)
+		return next == StatusRunning || next == StatusIdle || next == StatusCompleted || next == StatusError
+	case StatusCompleted:
+		// Terminal state, but Resume resets to Idle via setStatusLocked
+		return next == StatusIdle || next == StatusError
+	case StatusError:
+		// Terminal state, but Resume resets to Idle
+		return next == StatusIdle
+	case StatusUnmanaged:
+		// External sessions don't transition (display-only)
+		return false
+	default:
+		return false
+	}
+}
+
+// SessionPhase represents the high-level lifecycle phase of a session.
+// Status captures fine-grained state (Running/Idle/WaitingApproval/...),
+// while Phase captures the coarse-grained lifecycle stage derived from
+// Status + managed flag. This eliminates scattered "if managed && status != ..."
+// checks across TUI and Manager code.
+type SessionPhase int
+
+const (
+	// PhaseActive means a PTY process is alive and managed by the Manager.
+	PhaseActive SessionPhase = iota
+	// PhaseArchived means the session has finished (Completed or Error).
+	PhaseArchived
+	// PhaseExternal means the session was discovered from JSONL but not launched by claude-deck.
+	PhaseExternal
+)
+
+func (p SessionPhase) String() string {
+	switch p {
+	case PhaseActive:
+		return "Active"
+	case PhaseArchived:
+		return "Archived"
+	case PhaseExternal:
+		return "External"
+	default:
+		return "Unknown"
+	}
+}
+
+// HostingMode describes who manages the PTY process for a session.
+// This is a fundamental attribute set at launch time and immutable for the
+// session's lifetime. It determines whether claude-deck runs an emulator,
+// captures PTY output, and detects spinners — or delegates all of that
+// to an external terminal.
+type HostingMode int
+
+const (
+	// HostEmbedded means claude-deck owns the PTY process.
+	// The emulator captures output, displayCache is maintained, and spinner
+	// detection drives status transitions.
+	HostEmbedded HostingMode = iota
+	// HostExternal means an external terminal (Ghostty, tmux, etc.) owns the PTY.
+	// claude-deck tracks metadata only via JSONL and hooks.
+	// No emulator, no PTY output capture, no spinner detection.
+	HostExternal
+)
+
+func (h HostingMode) String() string {
+	switch h {
+	case HostEmbedded:
+		return "Embedded"
+	case HostExternal:
+		return "External"
+	default:
+		return "Unknown"
+	}
+}
+
+// DisplayChannel describes what data source should be used to render a
+// session's detail pane. Derived from the session's current state rather
+// than stored — it's a projection, not persisted data.
+type DisplayChannel int
+
+const (
+	// DisplayPTY renders live PTY output via the emulator's displayCache.
+	// Used when the session has an active embedded process.
+	DisplayPTY DisplayChannel = iota
+	// DisplayJSONL renders structured JSONL log entries.
+	// Used for completed/archived sessions or external sessions.
+	DisplayJSONL
+	// DisplayNone means no detail content is available from claude-deck.
+	// Used for externally-hosted sessions with an active process —
+	// the user interacts via their external terminal instead.
+	DisplayNone
+)
+
+func (d DisplayChannel) String() string {
+	switch d {
+	case DisplayPTY:
+		return "PTY"
+	case DisplayJSONL:
+		return "JSONL"
+	case DisplayNone:
+		return "None"
+	default:
+		return "Unknown"
+	}
+}
+
+// PricingPolicy defines token pricing rates per million tokens (USD).
+// This is a Value Object: immutable, compared by value, no identity.
+// It captures the domain concept of "how much does usage cost" and allows
+// TokenUsage to calculate its own cost without depending on infrastructure.
+type PricingPolicy struct {
+	InputPerMTok      float64
+	OutputPerMTok     float64
+	CacheWritePerMTok float64
+	CacheReadPerMTok  float64
+}
+
 // TokenUsage tracks token consumption for a session.
 type TokenUsage struct {
 	InputTokens              int     `json:"input_tokens"`
@@ -62,6 +201,17 @@ type TokenUsage struct {
 // TotalTokens returns the sum of input and output tokens.
 func (t TokenUsage) TotalTokens() int {
 	return t.InputTokens + t.OutputTokens
+}
+
+// EstimateCost calculates an approximate USD cost based on token usage and pricing policy.
+// This places cost calculation in the domain type that best knows its own data,
+// rather than in infrastructure (usage package).
+func (t TokenUsage) EstimateCost(p PricingPolicy) float64 {
+	cost := float64(t.InputTokens) / 1_000_000 * p.InputPerMTok
+	cost += float64(t.OutputTokens) / 1_000_000 * p.OutputPerMTok
+	cost += float64(t.CacheCreationInputTokens) / 1_000_000 * p.CacheWritePerMTok
+	cost += float64(t.CacheReadInputTokens) / 1_000_000 * p.CacheReadPerMTok
+	return cost
 }
 
 // runtimeFields holds PTY-related state that changes at high frequency.
@@ -91,20 +241,22 @@ type runtimeFields struct {
 //   - Runtime only: rt.LogLines, CurrentTool
 //
 // Lock ordering (ABBA デッドロック防止):
-//   - emuMu: emulator 読み書き専用（Write / String / Render / CursorPosition）
-//   - rt.mu:  PTY ログ・JSONL ログ専用（emuMu の後に取得）
-//   - mu:     その他全フィールド（emuMu の後、rt.mu とは独立）
+//   - PTYDisplay.emuMu: emulator 読み書き専用（Write / Resize / Reset）
+//   - rt.mu:  PTY ログ・JSONL ログ専用
+//   - mu:     その他全フィールド
+//
+// PTYDisplay.emuMu は mu/rt.mu と独立。PTYDisplay の onTitle コールバックが
+// mu.Lock() を取得するため、mu を保持したまま display.Write() を呼ばないこと。
 type Session struct {
-	mu    sync.RWMutex
-	emuMu sync.Mutex // emulator 専用。mu/rt.mu より先に取得すること
+	mu sync.RWMutex
 
 	// rt は PTY ログなど高頻度更新フィールドをまとめた struct。
 	// 詳細は runtimeFields のコメントを参照。
 	rt runtimeFields
 
 	// --- Persisted in store (claude-deck metadata) ---
-	ID               string     `json:"id"`
-	Name             string     `json:"name"`
+	ID               DeckSessionID `json:"id"`
+	Name             string        `json:"name"`
 	RepoPath         string     `json:"repo_path"`
 	RepoName         string     `json:"repo_name"`
 	WorkspacePath    string     `json:"workspace_path"`
@@ -114,7 +266,7 @@ type Session struct {
 	// /clear や compact のたびに末尾に新 ID が追加される。
 	// 現在の ID は SessionChain[len-1]、旧 ID はそれ以前の要素。
 	// アクセスには CurrentClaudeID() / PriorClaudeIDs() を使うこと。
-	SessionChain []string `json:"session_chain,omitempty"`
+	SessionChain []ClaudeSessionID `json:"session_chain,omitempty"`
 	Status       Status   `json:"status"`
 	FinishedAt       *time.Time `json:"finished_at,omitempty"`
 	PID              int        `json:"pid,omitempty"`
@@ -131,40 +283,40 @@ type Session struct {
 	// --- Runtime fields (not persisted, protected by sess.mu) ---
 	CurrentTool  string `json:"-"` // パーサー検出中のツール名
 	ErrorMessage string `json:"-"` // パーサーが検知したエラー行
+	Hosting      HostingMode        // PTY ホスティング戦略（起動時に決定、不変）
 	managed      bool               // Manager が PTY プロセスを管理中かどうか
-	emulator     *vt.Emulator       // PTY 出力を解釈する仮想端末 (charmbracelet/x/vt)
 
-	// displayCache は emulator.Write() 完了後に毎回更新される表示キャッシュ。
-	displayCache atomic.Pointer[[]string]
+	// display は PTY エミュレータの表示インフラ。HostEmbedded のみ非 nil。
+	// HostExternal セッションは外部ターミナルが PTY を管理するため nil。
+	display *PTYDisplay
+}
 
-	// cursorYHighWatermark は観測した cursorY の最大値を保持する単調増加カウンタ。
-	// Ink は再描画時にカーソルを上に移動してから下に描画するため、描画途中に cursorY が
-	// 一時的に下がり表示行数が縮小してちらつく。cursorY の縮小を常に抑制することで
-	// フレーム描画中のちらつきを防ぐ。emulator リセット時（newEmulatorWithCallbacks）のみ 0 に戻る。
-	// buildDisplayLines が trailing blank を除去するため、値が大きいままでも余分な空行は表示されない。
-	cursorYHighWatermark atomic.Int32
+// displayChannelLocked returns the appropriate display data source for this session.
+// Must be called with mu held (at least for reading), or use Snapshot.DisplayChannel.
+func (s *Session) displayChannelLocked() DisplayChannel {
+	if s.Hosting == HostExternal {
+		if s.managed {
+			return DisplayNone // external terminal is showing live output
+		}
+		return DisplayJSONL // external session finished, show logs
+	}
+	// Embedded hosting
+	if s.managed {
+		return DisplayPTY
+	}
+	return DisplayJSONL
+}
 
-	// displayCursorX/Y はエミュレータカーソルの表示座標（displayCache 内の行番号と列番号）。
-	// TUI でカーソルを正確に配置するために refreshDisplayCacheLocked 内で更新される。
-	// stableCursorReady が true の場合は stableCursor* が優先される。
-	displayCursorX atomic.Int32
-	displayCursorY atomic.Int32
-
-	// stableCursor* は \033[?25h（カーソル表示）コールバックで設定される確定カーソル位置。
-	// Ink の描画フレーム終了時に発火するため、refreshDisplayCacheLocked より精度が高い。
-	// stableCursorScreenY はエミュレータのスクリーン行（scrollback を含まない 0-indexed）。
-	stableCursorX       atomic.Int32
-	stableCursorScreenY atomic.Int32
-	stableCursorReady   atomic.Bool
-
-	// scrollback はエミュレータの ScrollUp で画面上端から消えた行の styled テキスト。
-	// エミュレータは viewport サイズで動作するため画面内の行しか保持しないが、
-	// ここにスクロールアウトした行を蓄積することでスクロールバックを実現する。
-	// emuMu 保持中（ScrollOut コールバック）に書き込まれるため sess.mu で保護する。
-	scrollbackPlain  []string
-	scrollbackStyled []string
-
-	maxScrollback int // config から設定。0 の場合はデフォルト 2000
+// Phase returns the high-level lifecycle phase derived from Status and managed flag.
+// Must be called with mu held (at least for reading), or use Snapshot.Phase.
+func (s *Session) phaseLocked() SessionPhase {
+	if s.Status == StatusUnmanaged {
+		return PhaseExternal
+	}
+	if s.Status.IsTerminal() && !s.managed {
+		return PhaseArchived
+	}
+	return PhaseActive
 }
 
 // Elapsed returns the duration since the session started.
@@ -192,7 +344,11 @@ func (s *Session) SetStatus(status Status) {
 
 // setStatusLocked updates status under an already-held write lock.
 // FinishedAt は Completed/Error 時のみ自動設定される。
+// 不正な遷移はデバッグログに記録するが、ブロックはしない（診断用）。
 func (s *Session) setStatusLocked(status Status) {
+	if !s.Status.canTransitionTo(status) {
+		debuglog.Printf("[session:%s] unexpected transition %s → %s", s.ID, s.Status, status)
+	}
 	s.Status = status
 	if status == StatusCompleted || status == StatusError {
 		now := time.Now()
@@ -227,6 +383,34 @@ func (s *Session) SetManaged(v bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.managed = v
+}
+
+// InitDisplay creates a PTYDisplay for this session with the given dimensions.
+// Called by Manager when starting a new PTY process. maxScrollback of 0 uses the default (2000).
+func (s *Session) InitDisplay(cols, rows, maxScrollback int) {
+	sid := string(s.ID)
+	d := newPTYDisplay(sid, cols, rows, maxScrollback, func(title string) {
+		// Bridge title changes back to Session.TerminalTitle (under mu).
+		s.mu.Lock()
+		s.TerminalTitle = title
+		s.mu.Unlock()
+	})
+	s.display = d
+}
+
+// ResetDisplay recreates the PTYDisplay emulator for Resume/Fork.
+// Preserves the existing PTYDisplay but resets its internal state.
+func (s *Session) ResetDisplay(cols, rows int) {
+	if s.display != nil {
+		s.display.Reset(cols, rows)
+	}
+}
+
+// ResizeDisplay resizes the PTYDisplay emulator to match new terminal dimensions.
+func (s *Session) ResizeDisplay(cols, rows int) {
+	if s.display != nil {
+		s.display.Resize(cols, rows)
+	}
 }
 
 
@@ -266,25 +450,14 @@ func (s *Session) AddTokens(input, output int) {
 
 // AppendRaw feeds a raw PTY output chunk to the virtual terminal emulator and
 // appends any newline-delimited lines to LogLines.
-// bufio.Scanner が除去していた \n を復元する必要はなく、生バイトをそのまま渡す。
-// これにより \n なしで画面更新するインタラクティブな TUI も正しく処理できる。
 //
-// lock 順: emuMu（emulator.Write） → mu（LogLines 更新）
-// emulator.Write 中に ScrollOut/Title コールバックが mu.Lock() を取るため、
-// mu.Lock() を保持したまま emulator.Write を呼ぶと Snapshot/GetPTYDisplayLines と
-// デッドロックする。
+// PTYDisplay.Write handles the emulator part (if display is non-nil).
+// LogLines update uses rt.mu independently.
 func (s *Session) AppendRaw(data []byte) {
-	// Step 1: emulator に生バイトを流す（emuMu 保持、mu は未保持）
-	// emulator.Write() 完了後に displayCache を更新する。これにより GetPTYDisplayLines が
-	// emuMu を待たずにキャッシュを返せるため、Bubble Tea イベントループのブロックを防ぐ。
-	s.emuMu.Lock()
-	if s.emulator != nil {
-		debuglog.Printf("[session:%s] emulator.Write %d bytes hex=%x", s.ID, len(data), data)
-		s.emulator.Write(data) //nolint:errcheck
-		debuglog.Printf("[session:%s] emulator.Write done", s.ID)
-		s.refreshDisplayCacheLocked()
+	// Step 1: emulator (display infrastructure, independent of rt.mu)
+	if s.display != nil {
+		s.display.Write(data)
 	}
-	s.emuMu.Unlock()
 
 	// Step 2: LogLines を更新（rt.mu 保持）
 	s.rt.mu.Lock()
@@ -308,15 +481,11 @@ func (s *Session) AppendRaw(data []byte) {
 
 // AppendLog adds a single line to the session log and feeds it to the emulator.
 // テスト互換性のため残す。プロダクションコードは AppendRaw を使う。
-// lock 順は AppendRaw と同じ: emuMu → mu。
 func (s *Session) AppendLog(line string) {
-	// Step 1: emulator に書く（emuMu 保持）
-	s.emuMu.Lock()
-	if s.emulator != nil {
-		s.emulator.Write([]byte(line + "\n")) //nolint:errcheck
-		s.refreshDisplayCacheLocked()
+	// Step 1: emulator (display infrastructure)
+	if s.display != nil {
+		s.display.WriteLine(line)
 	}
-	s.emuMu.Unlock()
 
 	// Step 2: LogLines を更新（rt.mu 保持）
 	s.rt.mu.Lock()
@@ -331,6 +500,22 @@ func (s *Session) AppendLog(line string) {
 		s.rt.LogLines = newLines
 	}
 	s.rt.mu.Unlock()
+}
+
+// IngestPTYOutput feeds raw PTY output to the session, detects Braille spinners,
+// and transitions to Running when appropriate.
+// This encapsulates the domain logic "PTY output with spinner → session is running"
+// within the Session, rather than spreading it across Manager.
+func (s *Session) IngestPTYOutput(data []byte) {
+	s.AppendRaw(data)
+
+	if containsBrailleSpinner(string(data)) {
+		s.touchSpinner()
+		status := s.GetStatus()
+		if status != StatusRunning && status != StatusCompleted && status != StatusError {
+			s.SetStatus(StatusRunning)
+		}
+	}
 }
 
 // GetLogs returns a copy of the PTY log lines (used for running sessions).
@@ -359,17 +544,20 @@ func (s *Session) GetStructuredLogs() []usage.LogEntry {
 
 // Snapshot is a read-only copy of session state, safe to use without locks.
 type Snapshot struct {
-	ID                string
+	ID                DeckSessionID
 	Name              string
 	RepoPath          string
 	RepoName          string
 	WorkspacePath     string
 	SubProjectDir     string
-	ClaudeSessionID   string
+	ClaudeSessionID   ClaudeSessionID
 	// ClearCount is the number of /clear (or compact) operations performed in
 	// this session. 0 means the original session; 1 means cleared once, etc.
 	// Derived from len(SessionChain) - 1.
 	ClearCount        int
+	Phase             SessionPhase
+	Hosting           HostingMode
+	Display           DisplayChannel
 	Status            Status
 	Managed           bool
 	Prompt            string
@@ -424,6 +612,9 @@ func (s *Session) Snapshot() Snapshot {
 		SubProjectDir:     s.SubProjectDir,
 		ClaudeSessionID:   s.CurrentClaudeID(),
 		ClearCount:        max(0, len(s.SessionChain)-1),
+		Phase:             s.phaseLocked(),
+		Hosting:           s.Hosting,
+		Display:           s.displayChannelLocked(),
 		Status:            s.Status,
 		Managed:           s.managed,
 		Prompt:            s.Prompt,
@@ -443,7 +634,7 @@ func (s *Session) Snapshot() Snapshot {
 
 // CurrentClaudeID returns the active Claude Code session ID, or "" if none.
 // Must be called with mu held (at least for reading), or use Snapshot.ClaudeSessionID.
-func (s *Session) CurrentClaudeID() string {
+func (s *Session) CurrentClaudeID() ClaudeSessionID {
 	if len(s.SessionChain) == 0 {
 		return ""
 	}
@@ -452,18 +643,18 @@ func (s *Session) CurrentClaudeID() string {
 
 // PriorClaudeIDs returns all historical Claude Code session IDs excluding the current one.
 // Returns nil if there is no history. Must be called with mu held for reading.
-func (s *Session) PriorClaudeIDs() []string {
+func (s *Session) PriorClaudeIDs() []ClaudeSessionID {
 	if len(s.SessionChain) <= 1 {
 		return nil
 	}
-	prior := make([]string, len(s.SessionChain)-1)
+	prior := make([]ClaudeSessionID, len(s.SessionChain)-1)
 	copy(prior, s.SessionChain[:len(s.SessionChain)-1])
 	return prior
 }
 
 // appendToChainLocked appends newID to SessionChain under an already-held write lock.
 // No-op if newID is empty or already the current (last) ID.
-func (s *Session) appendToChainLocked(newID string) {
+func (s *Session) appendToChainLocked(newID ClaudeSessionID) {
 	if newID == "" {
 		return
 	}
@@ -525,6 +716,7 @@ func (s *Session) sortGroup() int {
 }
 
 // NewSession creates a new session with the given parameters.
+// Hosting defaults to HostEmbedded; callers may set HostExternal before launch.
 func NewSession(repoPath, repoName string) *Session {
 	s := &Session{
 		ID:            GenerateSessionID(),
@@ -534,8 +726,28 @@ func NewSession(repoPath, repoName string) *Session {
 		TerminalTitle: "New Session",
 		Status:        StatusIdle,
 		StartedAt:     time.Now(),
+		Hosting:       HostEmbedded,
 	}
 	s.rt.LogLines = make([]string, 0, 256)
-	s.emulator = newEmulatorWithCallbacks(s, 0, 0)
+	// PTYDisplay is created by Manager when the PTY process starts
+	// with the correct terminal dimensions.
+	return s
+}
+
+// NewExternalSession creates a session for external PTY hosting.
+// No emulator is allocated — the external terminal handles PTY rendering.
+func NewExternalSession(repoPath, repoName string) *Session {
+	s := &Session{
+		ID:            GenerateSessionID(),
+		Name:          GenerateWorkspaceName(),
+		RepoPath:      repoPath,
+		RepoName:      repoName,
+		TerminalTitle: "New Session",
+		Status:        StatusIdle,
+		StartedAt:     time.Now(),
+		Hosting:       HostExternal,
+	}
+	s.rt.LogLines = make([]string, 0, 256)
+	// No PTYDisplay — external terminal handles PTY rendering.
 	return s
 }
