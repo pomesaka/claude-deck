@@ -50,6 +50,76 @@ func (s Status) NeedsAttention() bool {
 	return s == StatusWaitingApproval || s == StatusWaitingAnswer
 }
 
+// IsTerminal returns true if the status is a final state (no further transitions expected).
+func (s Status) IsTerminal() bool {
+	return s == StatusCompleted || s == StatusError
+}
+
+// canTransitionTo reports whether a transition from s to next is valid.
+// Invalid transitions are logged but not blocked — this is a diagnostic aid,
+// not a hard gate. The transition table codifies the state diagram in CLAUDE.md.
+func (s Status) canTransitionTo(next Status) bool {
+	if s == next {
+		return true // identity transition is always allowed (idempotent)
+	}
+	switch s {
+	case StatusIdle:
+		// Idle → Running (spinner), Completed (process exit), Error (directory missing)
+		return next == StatusRunning || next == StatusCompleted || next == StatusError
+	case StatusRunning:
+		// Running → Idle (spinner timeout / hook stop), WaitingApproval, WaitingAnswer,
+		//           Completed (process exit), Error
+		return next == StatusIdle || next == StatusWaitingApproval || next == StatusWaitingAnswer ||
+			next == StatusCompleted || next == StatusError
+	case StatusWaitingApproval:
+		// WaitingApproval → Running (approved), Idle (hook stop), Completed (process exit/kill)
+		return next == StatusRunning || next == StatusIdle || next == StatusCompleted || next == StatusError
+	case StatusWaitingAnswer:
+		// WaitingAnswer → Running (answered), Idle (hook stop), Completed (process exit/kill)
+		return next == StatusRunning || next == StatusIdle || next == StatusCompleted || next == StatusError
+	case StatusCompleted:
+		// Terminal state, but Resume resets to Idle via setStatusLocked
+		return next == StatusIdle || next == StatusError
+	case StatusError:
+		// Terminal state, but Resume resets to Idle
+		return next == StatusIdle
+	case StatusUnmanaged:
+		// External sessions don't transition (display-only)
+		return false
+	default:
+		return false
+	}
+}
+
+// SessionPhase represents the high-level lifecycle phase of a session.
+// Status captures fine-grained state (Running/Idle/WaitingApproval/...),
+// while Phase captures the coarse-grained lifecycle stage derived from
+// Status + managed flag. This eliminates scattered "if managed && status != ..."
+// checks across TUI and Manager code.
+type SessionPhase int
+
+const (
+	// PhaseActive means a PTY process is alive and managed by the Manager.
+	PhaseActive SessionPhase = iota
+	// PhaseArchived means the session has finished (Completed or Error).
+	PhaseArchived
+	// PhaseExternal means the session was discovered from JSONL but not launched by claude-deck.
+	PhaseExternal
+)
+
+func (p SessionPhase) String() string {
+	switch p {
+	case PhaseActive:
+		return "Active"
+	case PhaseArchived:
+		return "Archived"
+	case PhaseExternal:
+		return "External"
+	default:
+		return "Unknown"
+	}
+}
+
 // TokenUsage tracks token consumption for a session.
 type TokenUsage struct {
 	InputTokens              int     `json:"input_tokens"`
@@ -167,6 +237,18 @@ type Session struct {
 	maxScrollback int // config から設定。0 の場合はデフォルト 2000
 }
 
+// Phase returns the high-level lifecycle phase derived from Status and managed flag.
+// Must be called with mu held (at least for reading), or use Snapshot.Phase.
+func (s *Session) phaseLocked() SessionPhase {
+	if s.Status == StatusUnmanaged {
+		return PhaseExternal
+	}
+	if s.Status.IsTerminal() && !s.managed {
+		return PhaseArchived
+	}
+	return PhaseActive
+}
+
 // Elapsed returns the duration since the session started.
 func (s *Session) Elapsed() time.Duration {
 	s.mu.RLock()
@@ -192,7 +274,11 @@ func (s *Session) SetStatus(status Status) {
 
 // setStatusLocked updates status under an already-held write lock.
 // FinishedAt は Completed/Error 時のみ自動設定される。
+// 不正な遷移はデバッグログに記録するが、ブロックはしない（診断用）。
 func (s *Session) setStatusLocked(status Status) {
+	if !s.Status.canTransitionTo(status) {
+		debuglog.Printf("[session:%s] unexpected transition %s → %s", s.ID, s.Status, status)
+	}
 	s.Status = status
 	if status == StatusCompleted || status == StatusError {
 		now := time.Now()
@@ -370,6 +456,7 @@ type Snapshot struct {
 	// this session. 0 means the original session; 1 means cleared once, etc.
 	// Derived from len(SessionChain) - 1.
 	ClearCount        int
+	Phase             SessionPhase
 	Status            Status
 	Managed           bool
 	Prompt            string
@@ -424,6 +511,7 @@ func (s *Session) Snapshot() Snapshot {
 		SubProjectDir:     s.SubProjectDir,
 		ClaudeSessionID:   s.CurrentClaudeID(),
 		ClearCount:        max(0, len(s.SessionChain)-1),
+		Phase:             s.phaseLocked(),
 		Status:            s.Status,
 		Managed:           s.managed,
 		Prompt:            s.Prompt,

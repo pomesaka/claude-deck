@@ -32,6 +32,79 @@ func TestStatus_String(t *testing.T) {
 	}
 }
 
+func TestStatus_IsTerminal(t *testing.T) {
+	tests := []struct {
+		status Status
+		want   bool
+	}{
+		{StatusRunning, false},
+		{StatusWaitingApproval, false},
+		{StatusWaitingAnswer, false},
+		{StatusCompleted, true},
+		{StatusError, true},
+		{StatusIdle, false},
+		{StatusUnmanaged, false},
+	}
+	for _, tt := range tests {
+		if got := tt.status.IsTerminal(); got != tt.want {
+			t.Errorf("Status(%d).IsTerminal() = %v, want %v", tt.status, got, tt.want)
+		}
+	}
+}
+
+func TestStatus_CanTransitionTo(t *testing.T) {
+	tests := []struct {
+		from, to Status
+		want     bool
+	}{
+		// Identity transitions
+		{StatusIdle, StatusIdle, true},
+		{StatusRunning, StatusRunning, true},
+
+		// Idle transitions
+		{StatusIdle, StatusRunning, true},
+		{StatusIdle, StatusCompleted, true},
+		{StatusIdle, StatusError, true},
+		{StatusIdle, StatusWaitingApproval, false},
+
+		// Running transitions
+		{StatusRunning, StatusIdle, true},
+		{StatusRunning, StatusWaitingApproval, true},
+		{StatusRunning, StatusWaitingAnswer, true},
+		{StatusRunning, StatusCompleted, true},
+		{StatusRunning, StatusError, true},
+
+		// WaitingApproval transitions
+		{StatusWaitingApproval, StatusRunning, true},
+		{StatusWaitingApproval, StatusIdle, true},
+		{StatusWaitingApproval, StatusCompleted, true},
+		{StatusWaitingApproval, StatusWaitingAnswer, false},
+
+		// WaitingAnswer transitions
+		{StatusWaitingAnswer, StatusRunning, true},
+		{StatusWaitingAnswer, StatusIdle, true},
+		{StatusWaitingAnswer, StatusCompleted, true},
+		{StatusWaitingAnswer, StatusWaitingApproval, false},
+
+		// Terminal state transitions
+		{StatusCompleted, StatusIdle, true},   // Resume
+		{StatusCompleted, StatusRunning, false},
+		{StatusCompleted, StatusError, true},
+		{StatusError, StatusIdle, true},        // Resume
+		{StatusError, StatusRunning, false},
+
+		// Unmanaged never transitions
+		{StatusUnmanaged, StatusRunning, false},
+		{StatusUnmanaged, StatusCompleted, false},
+	}
+	for _, tt := range tests {
+		got := tt.from.canTransitionTo(tt.to)
+		if got != tt.want {
+			t.Errorf("Status(%v).canTransitionTo(%v) = %v, want %v", tt.from, tt.to, got, tt.want)
+		}
+	}
+}
+
 func TestStatus_NeedsAttention(t *testing.T) {
 	tests := []struct {
 		status Status
@@ -49,6 +122,52 @@ func TestStatus_NeedsAttention(t *testing.T) {
 		if got := tt.status.NeedsAttention(); got != tt.want {
 			t.Errorf("Status(%d).NeedsAttention() = %v, want %v", tt.status, got, tt.want)
 		}
+	}
+}
+
+func TestSessionPhase_String(t *testing.T) {
+	tests := []struct {
+		phase SessionPhase
+		want  string
+	}{
+		{PhaseActive, "Active"},
+		{PhaseArchived, "Archived"},
+		{PhaseExternal, "External"},
+		{SessionPhase(99), "Unknown"},
+	}
+	for _, tt := range tests {
+		if got := tt.phase.String(); got != tt.want {
+			t.Errorf("SessionPhase(%d).String() = %q, want %q", tt.phase, got, tt.want)
+		}
+	}
+}
+
+func TestSession_Phase(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  Status
+		managed bool
+		want    SessionPhase
+	}{
+		{"running managed", StatusRunning, true, PhaseActive},
+		{"idle managed", StatusIdle, true, PhaseActive},
+		{"waiting managed", StatusWaitingApproval, true, PhaseActive},
+		{"idle unmanaged", StatusIdle, false, PhaseActive},       // Idle but not terminal
+		{"completed unmanaged", StatusCompleted, false, PhaseArchived},
+		{"error unmanaged", StatusError, false, PhaseArchived},
+		{"completed still managed", StatusCompleted, true, PhaseActive}, // rare: watchProcess hasn't run yet
+		{"unmanaged", StatusUnmanaged, false, PhaseExternal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sess := NewSession("/repo", "repo")
+			sess.Status = tt.status
+			sess.managed = tt.managed
+			snap := sess.Snapshot()
+			if snap.Phase != tt.want {
+				t.Errorf("Phase = %v, want %v", snap.Phase, tt.want)
+			}
+		})
 	}
 }
 

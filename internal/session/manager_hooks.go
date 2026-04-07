@@ -173,15 +173,12 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 // findSessionByClaudeID returns the managed session (with an active process)
 // matching the given Claude Code session ID, or nil if not found.
 func (m *Manager) findSessionByClaudeID(claudeSessionID string) *Session {
+	activeIDs := m.Supervisor.ActiveSessionIDs()
+
 	// m.mu と s.mu を同時に保持しない（ABBA 回避）
 	m.mu.RLock()
-	var candidates []*Session
-	for id, proc := range m.processes {
-		select {
-		case <-proc.Done():
-			continue
-		default:
-		}
+	candidates := make([]*Session, 0, len(activeIDs))
+	for _, id := range activeIDs {
 		if s, ok := m.sessions[id]; ok {
 			candidates = append(candidates, s)
 		}

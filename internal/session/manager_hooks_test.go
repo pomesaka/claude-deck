@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/pomesaka/claude-deck/internal/hooks"
-	"github.com/pomesaka/claude-deck/internal/pty"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
@@ -15,10 +14,10 @@ import (
 // must be updated to avoid silent nil panics.
 func newTestManager() *Manager {
 	return &Manager{
-		sessions:  make(map[string]*Session),
-		processes: make(map[string]*pty.Process),
-		ctx:       context.Background(),
-		hookProc:  newHookProcessor(),
+		sessions:   make(map[string]*Session),
+		Supervisor: NewProcessSupervisor(),
+		ctx:        context.Background(),
+		hookProc:   newHookProcessor(),
 	}
 }
 

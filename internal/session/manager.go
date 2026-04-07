@@ -8,7 +8,6 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/pomesaka/claude-deck/internal/debuglog"
@@ -44,14 +43,16 @@ type ManagerConfig struct {
 // Manager coordinates multiple Claude Code sessions.
 // The dashboard is monitor-only; manual intervention is done via Ghostty.
 type Manager struct {
-	mu        sync.RWMutex
-	sessions  map[string]*Session
-	processes map[string]*pty.Process
-	store *store.Store
-	usage     *usage.Reader
-	ctx       context.Context
-	config    ManagerConfig
-	onChange  func()
+	mu       sync.RWMutex
+	sessions map[string]*Session
+	// Supervisor manages PTY process lifecycle (start, stop, I/O, resize).
+	// Extracted from Manager to separate process infrastructure from session domain.
+	Supervisor *ProcessSupervisor
+	store      *store.Store
+	usage      *usage.Reader
+	ctx        context.Context
+	config     ManagerConfig
+	onChange   func()
 
 	// 詳細ペインで選択中のセッションのみストリーミング（最大1つ）
 	activeStreamID     string
@@ -78,14 +79,14 @@ type Manager struct {
 // ctx is used as the parent context for log streaming goroutines.
 func NewManager(ctx context.Context, st *store.Store, cfg ManagerConfig) *Manager {
 	return &Manager{
-		sessions:  make(map[string]*Session),
-		processes: make(map[string]*pty.Process),
-		store:    st,
-		usage:    usage.NewReader(""),
-		ctx:      ctx,
-		config:   cfg,
-		notifyCh: make(chan struct{}, 1),
-		hookProc: newHookProcessor(),
+		sessions:   make(map[string]*Session),
+		Supervisor: NewProcessSupervisor(),
+		store:      st,
+		usage:      usage.NewReader(""),
+		ctx:        ctx,
+		config:     cfg,
+		notifyCh:   make(chan struct{}, 1),
+		hookProc:   newHookProcessor(),
 	}
 }
 
@@ -160,6 +161,25 @@ func (m *Manager) StartSpinnerIdleLoop(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// Launch starts a session based on the given LaunchIntent.
+// This is the unified entry point for all session launch operations (New, Resume, Fork).
+// Returns the session (new or existing) and any error.
+func (m *Manager) Launch(ctx context.Context, intent LaunchIntent) (*Session, error) {
+	switch intent.Kind {
+	case LaunchNew:
+		return m.CreateSession(ctx, intent.RepoPath, intent.WorkingDir, intent.WithWorkspace, intent.Cols, intent.Rows)
+	case LaunchResume:
+		if err := m.ResumeSession(ctx, intent.SessionID, intent.Cols, intent.Rows); err != nil {
+			return nil, err
+		}
+		return m.GetSession(intent.SessionID), nil
+	case LaunchFork:
+		return m.ForkSession(ctx, intent.SessionID, intent.Cols, intent.Rows)
+	default:
+		return nil, fmt.Errorf("unknown launch kind: %v", intent.Kind)
+	}
 }
 
 // CreateSession creates and starts a new Claude Code session.
@@ -253,9 +273,9 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 
 	m.mu.Lock()
 	m.sessions[sess.ID] = sess
-	m.processes[sess.ID] = proc
 	m.mu.Unlock()
 
+	m.Supervisor.Register(sess.ID, proc)
 	m.persist(sess)
 	m.pruneOldSessions()
 	m.notifyChange()
@@ -419,9 +439,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID string, cols, row
 	sess.mu.Unlock()
 	debuglog.Printf("[ResumeSession] session state updated")
 
-	m.mu.Lock()
-	m.processes[sessionID] = proc
-	m.mu.Unlock()
+	m.Supervisor.Register(sessionID, proc)
 
 	m.persist(sess)
 	m.notifyChange()
@@ -515,9 +533,9 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols,
 
 	m.mu.Lock()
 	m.sessions[sess.ID] = sess
-	m.processes[sess.ID] = proc
 	m.mu.Unlock()
 
+	m.Supervisor.Register(sess.ID, proc)
 	m.persist(sess)
 	m.pruneOldSessions()
 	m.notifyChange()
@@ -533,13 +551,12 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID string, cols,
 func (m *Manager) RemoveSession(sessionID string) error {
 	m.mu.RLock()
 	_, ok := m.sessions[sessionID]
-	_, hasProc := m.processes[sessionID]
 	m.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	if hasProc && m.HasActiveProcess(sessionID) {
+	if m.Supervisor.IsAlive(sessionID) {
 		return fmt.Errorf("cannot remove running session (kill it first)")
 	}
 
@@ -547,9 +564,9 @@ func (m *Manager) RemoveSession(sessionID string) error {
 
 	// oldSessionIDs には登録しない。dd は deck メタデータだけ削除し JSONL は残すため、
 	// 次回の DiscoverExternalSessions で外部セッションとして再発見されるのが正しい動作。
+	m.Supervisor.Unregister(sessionID)
 	m.mu.Lock()
 	delete(m.sessions, sessionID)
-	delete(m.processes, sessionID)
 	m.mu.Unlock()
 
 	if m.store != nil {
@@ -566,14 +583,12 @@ func (m *Manager) RemoveSession(sessionID string) error {
 func (m *Manager) DeleteSession(sessionID string) (warning string, err error) {
 	m.mu.RLock()
 	sess, ok := m.sessions[sessionID]
-	_, hasProc := m.processes[sessionID]
 	m.mu.RUnlock()
 	if !ok {
 		return "", fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	status := sess.GetStatus()
-	if hasProc && status != StatusCompleted && status != StatusError && status != StatusUnmanaged {
+	if m.Supervisor.IsAlive(sessionID) {
 		return "", fmt.Errorf("cannot delete running session (kill it first)")
 	}
 
@@ -607,9 +622,9 @@ func (m *Manager) DeleteSession(sessionID string) (warning string, err error) {
 		}
 	}
 
+	m.Supervisor.Unregister(sessionID)
 	m.mu.Lock()
 	delete(m.sessions, sessionID)
-	delete(m.processes, sessionID)
 	m.mu.Unlock()
 
 	if m.store != nil {
@@ -630,7 +645,6 @@ func (m *Manager) DeleteSession(sessionID string) (warning string, err error) {
 // Kill forcefully terminates a session.
 func (m *Manager) Kill(sessionID string) error {
 	m.mu.RLock()
-	proc, hasProc := m.processes[sessionID]
 	sess, hasSess := m.sessions[sessionID]
 	m.mu.RUnlock()
 
@@ -638,24 +652,20 @@ func (m *Manager) Kill(sessionID string) error {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	if hasProc {
-		return proc.Kill()
-	}
-
-	// プロセスハンドルなし（前回起動時のセッションがストアから復元された場合など）。
-	// PID が残っていれば SIGTERM で終了を試みる。
 	sess.mu.RLock()
 	pid := sess.PID
 	sess.mu.RUnlock()
 
-	if pid > 0 {
-		if p, err := os.FindProcess(pid); err == nil {
-			_ = p.Signal(syscall.SIGTERM)
-		}
+	if err := m.Supervisor.Kill(sessionID, pid); err != nil {
+		return err
 	}
 
-	sess.SetStatus(StatusCompleted)
-	m.persist(sess)
+	// Supervisor.Kill が SIGTERM を送った場合、watchProcess が Completed に遷移させる。
+	// プロセスハンドルがない場合は手動で遷移させる。
+	if !m.Supervisor.IsAlive(sessionID) && m.Supervisor.Get(sessionID) == nil {
+		sess.SetStatus(StatusCompleted)
+		m.persist(sess)
+	}
 	return nil
 }
 
@@ -663,44 +673,19 @@ func (m *Manager) Kill(sessionID string) error {
 // raw PTY 入力モードでは keyToBytes が1キー分のバイト列を返すため、
 // 一括で書き込む。マルチバイト UTF-8 文字の分断を防ぐ。
 func (m *Manager) WriteToSession(sessionID string, data []byte) error {
-	m.mu.RLock()
-	proc, ok := m.processes[sessionID]
-	m.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("no active process for session %s", sessionID)
-	}
-	if _, err := proc.Write(data); err != nil {
-		return fmt.Errorf("write: %w", err)
-	}
-	return nil
+	return m.Supervisor.Write(sessionID, data)
 }
 
 // HasActiveProcess returns true if the session has a live PTY process.
 func (m *Manager) HasActiveProcess(sessionID string) bool {
-	m.mu.RLock()
-	proc, ok := m.processes[sessionID]
-	m.mu.RUnlock()
-	if !ok {
-		return false
-	}
-	select {
-	case <-proc.Done():
-		return false
-	default:
-		return true
-	}
+	return m.Supervisor.IsAlive(sessionID)
 }
 
 // ResizeSession updates the PTY process and virtual terminal emulator dimensions.
 // Claude Code re-renders its Ink UI for the new size.
 func (m *Manager) ResizeSession(sessionID string, cols, rows int) {
 	debuglog.Printf("[resize] session=%s cols=%d rows=%d", sessionID, cols, rows)
-	m.mu.RLock()
-	proc, ok := m.processes[sessionID]
-	m.mu.RUnlock()
-	if ok {
-		proc.Resize(uint16(cols), uint16(rows)) //nolint:errcheck
-	}
+	m.Supervisor.Resize(sessionID, uint16(cols), uint16(rows))
 
 	if sess := m.GetSession(sessionID); sess != nil {
 		// emuMu を使う。mu ではなく emuMu がエミュレータ操作専用ロック。
@@ -767,15 +752,11 @@ func (m *Manager) ListSessions() []*Session {
 // ListManagedSessions returns PTY-managed sessions that are still alive.
 // Only sessions with an active (not-yet-done) process are included.
 func (m *Manager) ListManagedSessions() []*Session {
+	activeIDs := m.Supervisor.ActiveSessionIDs()
+
 	m.mu.RLock()
-	list := make([]*Session, 0, len(m.processes))
-	for id, proc := range m.processes {
-		// non-blocking check: if Done channel is closed, the process has exited
-		select {
-		case <-proc.Done():
-			continue
-		default:
-		}
+	list := make([]*Session, 0, len(activeIDs))
+	for _, id := range activeIDs {
 		if s, ok := m.sessions[id]; ok {
 			list = append(list, s)
 		}
