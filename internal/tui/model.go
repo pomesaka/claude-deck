@@ -40,9 +40,9 @@ type Model struct {
 	sessions     []*session.Session
 	cursor       int
 	scrollOffset int
-	selectedID   session.DeckSessionID
-	focusDetail  bool
-	logViewport  viewport.Model
+	selectedID  session.DeckSessionID
+	layout      Layout
+	logViewport viewport.Model
 	ptyViewport  viewport.Model // PTY リアルタイム出力用
 
 	// View state
@@ -215,7 +215,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseWheelMsg:
-		if m.focusDetail && m.mode == viewDashboard {
+		if m.layout.IsDetailFocused() && m.mode == viewDashboard {
 			var cmd tea.Cmd
 			if m.selectedDisplayChannel() == session.DisplayPTY {
 				m.ptyViewport, cmd = m.ptyViewport.Update(msg)
@@ -260,7 +260,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "新規セッションを作成しました"
 			m.selectedID = msg.sessionID
 			m.refreshSessions()
-			m.focusDetail = true
+			m.layout.FocusDetail()
 			m.ptyInputActive = true
 		}
 		cmds = append(cmds, clearStatusCmd())
@@ -270,7 +270,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "再開エラー: " + msg.err.Error()
 		} else {
 			m.statusMsg = "セッションを再開しました"
-			m.focusDetail = true
+			m.layout.FocusDetail()
 			m.ptyInputActive = true
 		}
 		cmds = append(cmds, clearStatusCmd())
@@ -282,7 +282,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "セッションをフォークしました"
 			m.selectedID = msg.sessionID
 			m.refreshSessions()
-			m.focusDetail = true
+			m.layout.FocusDetail()
 			m.ptyInputActive = true
 		}
 		cmds = append(cmds, clearStatusCmd())

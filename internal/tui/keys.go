@@ -57,13 +57,20 @@ func (m *Model) handleDashboardKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.handleFilterKey(msg)
 	}
 
+	// TODO: config.toml の keybind 設定に対応する
+	if msg.String() == "ctrl+e" {
+		m.layout.CycleMode()
+		m.syncLogViewport()
+		return nil
+	}
+
 	display := m.selectedDisplayChannel()
 
 	// Vim-style multi-key sequences: gg, dd
 	if m.pendingG {
 		m.pendingG = false
 		if msg.String() == "g" {
-			if m.focusDetail {
+			if m.layout.IsDetailFocused() {
 				m.viewportGotoTop(display)
 			} else {
 				m.cursor = 0
@@ -85,7 +92,7 @@ func (m *Model) handleDashboardKey(msg tea.KeyPressMsg) tea.Cmd {
 		// Not dd or dD — fall through to normal handling
 	}
 
-	if m.focusDetail {
+	if m.layout.IsDetailFocused() {
 		if cmd, handled := m.handleDetailPaneKey(msg, display); handled {
 			return cmd
 		}
@@ -127,7 +134,7 @@ func (m *Model) handleDetailPaneKey(msg tea.KeyPressMsg, display session.Display
 		m.pendingG = true
 		return nil, true
 	case "h", "left":
-		m.focusDetail = false
+		m.layout.FocusList()
 		return nil, true
 	case "ctrl+b":
 		// 半ページ下スクロール（ctrl+u と上下ペア）
@@ -174,25 +181,25 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 		m.pendingG = true
 
 	case "h", "left":
-		m.focusDetail = false
+		m.layout.FocusList()
 
 	case "l", "right":
-		m.focusDetail = true
+		m.layout.FocusDetail()
 
 	case "tab":
-		if !m.focusDetail {
+		if !m.layout.IsDetailFocused() {
 			// リストフォーカス時: 次の approve/answer 待ちセッションへジャンプして PTY 入力開始
 			if idx := m.findNextAttentionSession(); idx >= 0 {
 				m.cursor = idx
 				m.updateSelected()
 				m.ensureCursorVisible()
-				m.focusDetail = true
+				m.layout.FocusDetail()
 				m.ptyInputActive = true
 				m.syncLogViewport()
 				return nil
 			}
 		}
-		m.focusDetail = !m.focusDetail
+		m.layout.ToggleFocus()
 
 	case "n":
 		return m.startNewSession()
@@ -202,7 +209,7 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 		debuglog.Printf("[key:%s] selectedID=%q display=%v", key, m.selectedID, display)
 		if display == session.DisplayPTY {
 			debuglog.Printf("[key:%s] activating PTY input mode", key)
-			m.focusDetail = true
+			m.layout.FocusDetail()
 			m.ptyInputActive = true
 			m.syncLogViewport()
 			debuglog.Printf("[key:%s] PTY input mode activated", key)
@@ -233,7 +240,7 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 		return m.openTerminal()
 
 	case "/":
-		if !m.focusDetail {
+		if !m.layout.IsDetailFocused() {
 			m.filterActive = true
 			m.filterInput.Focus()
 			return nil
@@ -370,7 +377,7 @@ func (m *Model) handlePTYInputKey(msg tea.KeyPressMsg) tea.Cmd {
 
 func (m *Model) deactivatePTYInput() {
 	m.ptyInputActive = false
-	m.focusDetail = false
+	m.layout.FocusList()
 	m.syncLogViewport()
 }
 

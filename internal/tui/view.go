@@ -48,17 +48,22 @@ func (m Model) View() tea.View {
 			cursorViewportRow := cursorDisplayRow - m.ptyViewport.YOffset()
 			if cursorViewportRow >= 0 && cursorViewportRow < ptyHeight {
 				// レイアウト: header(1行) + detail枠top(1行) + viewport行
-				// 列: list幅 + ペイン間スペース(1) + detail枠left(1) + padding(1) + cursorX
-				const frameOverhead = 1
-				available := m.width - frameOverhead
-				listWidth := available * 35 / 100
-				if listWidth < 20 {
-					listWidth = 20
+				// 列: detailペインの左端オフセット + detail枠left(1) + padding(1) + cursorX
+				var detailLeft int
+				if m.layout.IsListVisible() && !m.layout.IsListRight() {
+					// リストが左側にある場合: list幅 + ペイン間スペース(1)
+					const frameOverhead = 1
+					available := m.width - frameOverhead
+					listWidth := available * 35 / 100
+					if listWidth < 20 {
+						listWidth = 20
+					}
+					detailLeft = listWidth + 1
 				}
-				tuiCol := listWidth + 3 + cursorX
+				tuiCol := detailLeft + 2 + cursorX
 				tuiRow := 2 + cursorViewportRow
-				debuglog.Printf("[cursor] cursorX=%d cursorDisplayRow=%d ptyViewportYOffset=%d cursorViewportRow=%d listWidth=%d → tuiCol=%d tuiRow=%d ptyHeight=%d",
-					cursorX, cursorDisplayRow, m.ptyViewport.YOffset(), cursorViewportRow, listWidth, tuiCol, tuiRow, ptyHeight)
+				debuglog.Printf("[cursor] cursorX=%d cursorDisplayRow=%d ptyViewportYOffset=%d cursorViewportRow=%d detailLeft=%d → tuiCol=%d tuiRow=%d ptyHeight=%d",
+					cursorX, cursorDisplayRow, m.ptyViewport.YOffset(), cursorViewportRow, detailLeft, tuiCol, tuiRow, ptyHeight)
 				c := tea.NewCursor(tuiCol, tuiRow)
 				c.Shape = tea.CursorBar
 				v.Cursor = c
@@ -109,6 +114,10 @@ func (m Model) renderMain() string {
 		available = 20
 	}
 
+	if !m.layout.IsListVisible() {
+		return m.renderDetailPane(available, contentHeight)
+	}
+
 	listWidth := available * 35 / 100
 	if listWidth < 20 {
 		listWidth = 20
@@ -121,12 +130,15 @@ func (m Model) renderMain() string {
 	list := m.renderSessionList(listWidth, contentHeight)
 	detail := m.renderDetailPane(detailWidth, contentHeight)
 
+	if m.layout.IsListRight() {
+		return lipgloss.JoinHorizontal(lipgloss.Top, detail, " ", list)
+	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, list, " ", detail)
 }
 
 func (m Model) renderSessionList(width, height int) string {
 	style := sessionListStyle
-	if !m.focusDetail {
+	if !m.layout.IsDetailFocused() {
 		style = sessionListFocusedStyle
 	}
 
@@ -386,7 +398,7 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 
 func (m Model) renderDetailPane(width, height int) string {
 	style := detailPaneStyle
-	if m.focusDetail {
+	if m.layout.IsDetailFocused() {
 		style = detailPaneFocusedStyle
 	}
 
@@ -475,9 +487,9 @@ func (m Model) renderFooter() string {
 	} else if m.filterText != "" {
 		helpText = fmt.Sprintf("フィルタ: %s / Esc:解除 ?:ヘルプ", m.filterText)
 	} else {
-		helpText = "h/l:ペイン切替 j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter/i:入力/再開 r:再開 f:フォーク t:ターミナル R:再描画 dd:削除 x:終了 C-c:quit"
+		helpText = "h/l:ペイン切替 j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter/i:入力/再開 r:再開 f:フォーク t:ターミナル R:再描画 dd:削除 x:終了 C-e:レイアウト C-c:quit"
 	}
-	left := dimStyle.Render(helpText)
+	left := dimStyle.Render(helpText + m.layout.Indicator())
 
 	var right string
 	if m.statusMsg != "" {
@@ -620,22 +632,27 @@ func padRightBg(s string, w int, bg lipgloss.Style) string {
 	return s + bg.Render(strings.Repeat(" ", w-cur))
 }
 
-// detailPaneInnerWidth calculates the content width of the detail pane from the
-// total terminal width. This is a pure function — it depends only on the width
-// value, not on Model state.
-func detailPaneInnerWidth(totalWidth int) int {
+// detailPaneInnerWidth calculates the content width of the detail pane.
+// Depends on m.width and m.layout so it is a method rather than a pure function.
+func (m Model) detailPaneInnerWidth() int {
 	const frameOverhead = 1 // pane gap
-	available := totalWidth - frameOverhead
+	available := m.width - frameOverhead
 	if available < 20 {
 		available = 20
 	}
-	listWidth := available * 35 / 100
-	if listWidth < 20 {
-		listWidth = 20
-	}
-	detailWidth := available - listWidth
-	if detailWidth < 20 {
-		detailWidth = 20
+
+	var detailWidth int
+	if !m.layout.IsListVisible() {
+		detailWidth = available
+	} else {
+		listWidth := available * 35 / 100
+		if listWidth < 20 {
+			listWidth = 20
+		}
+		detailWidth = available - listWidth
+		if detailWidth < 20 {
+			detailWidth = 20
+		}
 	}
 	// border(2) + padding(2)
 	innerWidth := detailWidth - 4
@@ -698,7 +715,7 @@ func detailPaneLayout(totalHeight int, display session.DisplayChannel, headerLin
 // Convenience method that combines the pure functions above with Model state lookups.
 // Returns the resolved DisplayChannel alongside dimensions.
 func (m *Model) detailPaneMetrics() (innerWidth, logHeight, ptyHeight int, display session.DisplayChannel) {
-	innerWidth = detailPaneInnerWidth(m.width)
+	innerWidth = m.detailPaneInnerWidth()
 
 	display = session.DisplayJSONL // default for no selection
 	headerLines := 4
@@ -722,7 +739,7 @@ func (m *Model) syncLogViewport() {
 	if m.width == 0 {
 		return
 	}
-	debuglog.Printf("[syncLogViewport] selectedID=%q ptyInputActive=%v focusDetail=%v", m.selectedID, m.ptyInputActive, m.focusDetail)
+	debuglog.Printf("[syncLogViewport] selectedID=%q ptyInputActive=%v detailFocused=%v", m.selectedID, m.ptyInputActive, m.layout.IsDetailFocused())
 
 	innerWidth, logHeight, ptyHeight, display := m.detailPaneMetrics()
 	m.syncViewportSize(innerWidth, logHeight, ptyHeight)
