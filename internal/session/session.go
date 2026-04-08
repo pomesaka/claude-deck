@@ -203,6 +203,15 @@ func (t TokenUsage) TotalTokens() int {
 	return t.InputTokens + t.OutputTokens
 }
 
+// Add returns a new TokenUsage with input and output tokens incremented.
+// EstimatedCostUSD is not recalculated; use ApplyJSONLTokens (which calls EstimateCost)
+// for authoritative cost tracking.
+func (t TokenUsage) Add(input, output int) TokenUsage {
+	t.InputTokens += input
+	t.OutputTokens += output
+	return t
+}
+
 // EstimateCost calculates an approximate USD cost based on token usage and pricing policy.
 // This places cost calculation in the domain type that best knows its own data,
 // rather than in infrastructure (usage package).
@@ -444,8 +453,7 @@ func (s *Session) spinnerIdleSince(timeout time.Duration) bool {
 func (s *Session) AddTokens(input, output int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.TokenUsage.InputTokens += input
-	s.TokenUsage.OutputTokens += output
+	s.TokenUsage = s.TokenUsage.Add(input, output)
 }
 
 // AppendRaw feeds a raw PTY output chunk to the virtual terminal emulator and

@@ -55,7 +55,6 @@ internal/
 5. [docs/concurrency.md](docs/concurrency.md) — 並行処理ルール
 6. [docs/adr/](docs/adr/) — 設計判断の記録
 
-ドキュメントのプラクティスは [docs/documentation-practices.md](docs/documentation-practices.md) を参照。
 ドメイン概念を追加・変更したらコードと同時にドキュメントも更新すること。
 
 ## 開発時の重要事項
