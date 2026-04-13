@@ -32,6 +32,9 @@ type PTYDisplay struct {
 
 	// Atomic display cache — lock-free reads for TUI rendering.
 	displayCache        atomic.Pointer[[]string]
+	// displayVersion is incremented each time displayCache is updated.
+	// TUI can compare versions to skip redundant SetContentLines calls.
+	displayVersion      atomic.Uint64
 	cursorYHighWatermark atomic.Int32
 	displayCursorX      atomic.Int32
 	displayCursorY      atomic.Int32
@@ -214,6 +217,15 @@ func (d *PTYDisplay) Reset(cols, rows int) {
 	})
 
 	d.emulator = em
+
+	// Reset display cache so the TUI detects the screen as changed after Resume/Fork.
+	// displayVersion is cleared to 0 and immediately incremented to 1 by
+	// refreshDisplayCacheLocked, ensuring the new version is always distinct
+	// from any TUI-side cached value (≥1 before reset, or 0 for a brand-new session
+	// whose first paint hasn't fired yet — handled by the sessionID check).
+	d.displayCache.Store(nil)
+	d.displayVersion.Store(0)
+	d.refreshDisplayCacheLocked()
 }
 
 // Resize changes the emulator dimensions.
@@ -221,6 +233,13 @@ func (d *PTYDisplay) Resize(cols, rows int) {
 	d.emuMu.Lock()
 	d.emulator.Resize(cols, rows)
 	d.emuMu.Unlock()
+}
+
+// Version returns the current display version. Non-blocking (atomic read).
+// Incremented each time displayCache is updated. Used by the TUI to skip
+// redundant SetContentLines calls when content has not changed.
+func (d *PTYDisplay) Version() uint64 {
+	return d.displayVersion.Load()
 }
 
 // Lines returns the cached display lines. Non-blocking (atomic read).
@@ -258,6 +277,7 @@ func (d *PTYDisplay) refreshDisplayCacheLocked() {
 
 	lines := buildDisplayLines(plain, styled, cursorY, d.title, d.scrollbackStyled, d.sessionID)
 	d.displayCache.Store(&lines)
+	d.displayVersion.Add(1)
 
 	displayRow := int32(max(len(lines)-1, 0))
 	d.displayCursorX.Store(int32(cursor.X))

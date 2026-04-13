@@ -74,6 +74,28 @@ type Model struct {
 	// Log rendering cache (JSONL structured logs)
 	logCache renderCache
 
+	// PTY viewport content tracking — skips SetContentLines when display
+	// version has not changed since the last call, avoiding expensive
+	// maxLineWidth O(n) computation over all scrollback lines.
+	ptyViewCache ptyViewCache
+
+	// Pre-computed view data — populated in Update(), read-only in View().
+	// Eliminates all Snapshot() / GetSession() calls from the View() path,
+	// making View() lock-free. Without this, View() acquires ~40-60 RLocks per
+	// frame, contending with PTY writer goroutines that hold write locks for
+	// OSC title updates (~12 Hz) and causing the convoy effect that freezes
+	// the TUI during rapid mouse scroll.
+	// viewSnaps[i] is a snapshot of visibleSessions()[i] and shares the same
+	// index space as m.cursor. Sorting or filtering changes must always be
+	// followed by refreshViewData() to keep this invariant.
+	viewSnaps      []session.Snapshot
+	selectedSnap   *session.Snapshot // snapshot for the selected session (nil = no selection)
+	// selectedSess holds the live *Session pointer solely for lock-free PTY atomic
+	// APIs (GetPTYCursorPosition, GetDisplayVersion, GetPTYDisplayLines) that cannot
+	// be served by the value-type selectedSnap. Not used for any locked access.
+	selectedSess   *session.Session
+	attentionCount int // sessions with Status.NeedsAttention() == true
+
 	quitting bool
 
 	// rate limits data from Claude Code statusline (Pro/Max subscribers only)
@@ -379,22 +401,72 @@ func (m *Model) refreshSessions() {
 	}
 	m.updateSelected()
 	m.ensureCursorVisible()
+	// refreshViewData は updateSelected 内で選択が変わった場合だけ部分更新される。
+	// ここで全体を更新してセッションリスト・attention count も同期させる。
+	m.refreshViewData()
+}
+
+// refreshViewData pre-computes all session data that View() needs.
+// Called from Update() whenever session data changes (SessionRefreshMsg etc.).
+// By caching Snapshot values here (with locks, in Update goroutine),
+// View() can read plain struct fields without acquiring any locks.
+//
+// Invariant: viewSnaps[i] == visibleSessions()[i].Snapshot(), so viewSnaps
+// shares the same index space as m.cursor. Always call refreshViewData() after
+// any change to session order, filter text, or the visible session set.
+//
+// Note: selectedSnap/selectedSess are updated by updateSelected() → refreshSelectedSnap()
+// whenever the selection changes. refreshViewData() intentionally does NOT call
+// refreshSelectedSnap() again to avoid the double-call when coming through
+// refreshSessions() → updateSelected() → refreshSelectedSnap() → refreshViewData().
+func (m *Model) refreshViewData() {
+	// attention count — iterate all sessions
+	count := 0
+	for _, s := range m.sessions {
+		if s.Snapshot().Status.NeedsAttention() {
+			count++
+		}
+	}
+	m.attentionCount = count
+
+	// snapshots for visible sessions — shares index space with m.cursor
+	visible := m.visibleSessions()
+	snaps := make([]session.Snapshot, len(visible))
+	for i, s := range visible {
+		snaps[i] = s.Snapshot()
+	}
+	m.viewSnaps = snaps
+}
+
+// refreshSelectedSnap updates selectedSnap and selectedSess for the current selectedID.
+// Called from updateSelected() on cursor movement — a fast partial update that avoids
+// re-scanning all sessions (unlike the full refreshViewData).
+func (m *Model) refreshSelectedSnap() {
+	if m.selectedID != "" {
+		if sess := m.manager.GetSession(m.selectedID); sess != nil {
+			snap := sess.Snapshot()
+			m.selectedSnap = &snap
+			m.selectedSess = sess
+			return
+		}
+	}
+	m.selectedSnap = nil
+	m.selectedSess = nil
 }
 
 // selectedDisplayChannel returns the DisplayChannel for the currently selected session.
-// Returns DisplayJSONL as a safe default when no session is selected.
+// Uses the pre-computed selectedSnap to avoid lock acquisition in the Update path.
 func (m *Model) selectedDisplayChannel() session.DisplayChannel {
-	if m.selectedID == "" {
-		return session.DisplayJSONL
-	}
-	if sess := m.manager.GetSession(m.selectedID); sess != nil {
-		return sess.Snapshot().Display
+	if m.selectedSnap != nil {
+		return m.selectedSnap.Display
 	}
 	return session.DisplayJSONL
 }
 
 // visibleSessions returns sessions filtered by filterText.
 // filterText が空なら全セッション、非空なら RepoName/Name に対して case-insensitive 部分一致でフィルタ。
+// Note: this is called from refreshViewData() (Update path, locks acceptable).
+// View() uses m.viewSnaps instead and never calls this directly.
 func (m *Model) visibleSessions() []*session.Session {
 	ft := m.filterText
 	if m.filterActive {
@@ -428,6 +500,8 @@ func (m *Model) updateSelected() {
 		m.ptyFollow = true
 		// 選択中のセッションだけ JSONL ストリーミングを開始
 		m.manager.StreamSession(m.selectedID)
+		// 選択変更 → selectedSnap/selectedSess を即座に更新
+		m.refreshSelectedSnap()
 		m.syncLogViewport()
 	}
 }

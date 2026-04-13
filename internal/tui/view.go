@@ -41,33 +41,33 @@ func (m Model) View() tea.View {
 
 	// PTY 入力モード中はエミュレータのカーソル位置に TUI カーソルを配置する。
 	// これにより Ghostty のカーソルが Claude の入力行に正しく表示される。
-	if m.ptyInputActive && m.selectedID != "" && m.mode == viewDashboard {
-		if sess := m.manager.GetSession(m.selectedID); sess != nil && sess.Snapshot().Display == session.DisplayPTY {
-			cursorX, cursorDisplayRow := sess.GetPTYCursorPosition()
-			_, _, ptyHeight, _ := m.detailPaneMetrics()
-			cursorViewportRow := cursorDisplayRow - m.ptyViewport.YOffset()
-			if cursorViewportRow >= 0 && cursorViewportRow < ptyHeight {
-				// レイアウト: header(1行) + detail枠top(1行) + viewport行
-				// 列: detailペインの左端オフセット + detail枠left(1) + padding(1) + cursorX
-				var detailLeft int
-				if m.layout.IsListVisible() && !m.layout.IsListRight() {
-					// リストが左側にある場合: list幅 + ペイン間スペース(1)
-					const frameOverhead = 1
-					available := m.width - frameOverhead
-					listWidth := available * 35 / 100
-					if listWidth < 20 {
-						listWidth = 20
-					}
-					detailLeft = listWidth + 1
+	// selectedSess.GetPTYCursorPosition() は atomic 読み取りのみでロック不要。
+	if m.ptyInputActive && m.selectedSess != nil && m.selectedSnap != nil &&
+		m.selectedSnap.Display == session.DisplayPTY && m.mode == viewDashboard {
+		cursorX, cursorDisplayRow := m.selectedSess.GetPTYCursorPosition()
+		_, _, ptyHeight, _ := m.detailPaneMetrics()
+		cursorViewportRow := cursorDisplayRow - m.ptyViewport.YOffset()
+		if cursorViewportRow >= 0 && cursorViewportRow < ptyHeight {
+			// レイアウト: header(1行) + detail枠top(1行) + viewport行
+			// 列: detailペインの左端オフセット + detail枠left(1) + padding(1) + cursorX
+			var detailLeft int
+			if m.layout.IsListVisible() && !m.layout.IsListRight() {
+				// リストが左側にある場合: list幅 + ペイン間スペース(1)
+				const frameOverhead = 1
+				available := m.width - frameOverhead
+				listWidth := available * 35 / 100
+				if listWidth < 20 {
+					listWidth = 20
 				}
-				tuiCol := detailLeft + 2 + cursorX
-				tuiRow := 2 + cursorViewportRow
-				debuglog.Printf("[cursor] cursorX=%d cursorDisplayRow=%d ptyViewportYOffset=%d cursorViewportRow=%d detailLeft=%d → tuiCol=%d tuiRow=%d ptyHeight=%d",
-					cursorX, cursorDisplayRow, m.ptyViewport.YOffset(), cursorViewportRow, detailLeft, tuiCol, tuiRow, ptyHeight)
-				c := tea.NewCursor(tuiCol, tuiRow)
-				c.Shape = tea.CursorBar
-				v.Cursor = c
+				detailLeft = listWidth + 1
 			}
+			tuiCol := detailLeft + 2 + cursorX
+			tuiRow := 2 + cursorViewportRow
+			debuglog.Printf("[cursor] cursorX=%d cursorDisplayRow=%d ptyViewportYOffset=%d cursorViewportRow=%d detailLeft=%d → tuiCol=%d tuiRow=%d ptyHeight=%d",
+				cursorX, cursorDisplayRow, m.ptyViewport.YOffset(), cursorViewportRow, detailLeft, tuiCol, tuiRow, ptyHeight)
+			c := tea.NewCursor(tuiCol, tuiRow)
+			c.Shape = tea.CursorBar
+			v.Cursor = c
 		}
 	}
 
@@ -77,19 +77,12 @@ func (m Model) View() tea.View {
 func (m Model) renderHeader() string {
 	title := headerStyle.Render("🎛  claude-deck")
 
-	var attentionCount int
-	for _, s := range m.sessions {
-		if s.Snapshot().Status.NeedsAttention() {
-			attentionCount++
-		}
-	}
-
 	infoStr := fmt.Sprintf("Sessions: %d", len(m.sessions))
 	info := tokenStyle.Render(infoStr)
 
 	var badge string
-	if attentionCount > 0 {
-		badge = statusApproveStyle.Render(fmt.Sprintf(" [%d asking...]", attentionCount))
+	if m.attentionCount > 0 {
+		badge = statusApproveStyle.Render(fmt.Sprintf(" [%d asking...]", m.attentionCount))
 	}
 
 	right := lipgloss.JoinHorizontal(lipgloss.Top, info, badge)
@@ -106,10 +99,11 @@ func (m Model) renderMain() string {
 		contentHeight = 3
 	}
 
-	// Width() はボーダー・パディング込みの全体幅を設定するため、フレーム分の減算は不要。
-	// ペイン間スペースの " " 分のみ差し引く。
-	const frameOverhead = 1
-	available := m.width - frameOverhead
+	// リスト非表示時はペイン間スペースが不要なので frameOverhead を引かない。
+	available := m.width
+	if m.layout.IsListVisible() {
+		available -= 1 // pane gap " "
+	}
 	if available < 20 {
 		available = 20
 	}
@@ -142,7 +136,9 @@ func (m Model) renderSessionList(width, height int) string {
 		style = sessionListFocusedStyle
 	}
 
-	sessions := m.visibleSessions()
+	// m.viewSnaps は Update() 内で事前計算済み。View() でのロック取得を避けるため
+	// visibleSessions() は呼ばず、キャッシュ済みスナップショットを直接参照する。
+	snaps := m.viewSnaps
 
 	// フィルタバーの高さを確保
 	var filterBar string
@@ -155,7 +151,7 @@ func (m Model) renderSessionList(width, height int) string {
 		filterBarHeight = 1
 	}
 
-	if len(sessions) == 0 {
+	if len(snaps) == 0 {
 		var msg string
 		if m.filterText != "" || m.filterActive {
 			msg = dimStyle.Render("一致するセッションなし")
@@ -181,8 +177,8 @@ func (m Model) renderSessionList(width, height int) string {
 	if offset < 0 {
 		offset = 0
 	}
-	if offset >= len(sessions) {
-		offset = max(0, len(sessions)-1)
+	if offset >= len(snaps) {
+		offset = max(0, len(snaps)-1)
 	}
 
 	availHeight := listHeight
@@ -197,19 +193,19 @@ func (m Model) renderSessionList(width, height int) string {
 	}
 
 	end := offset + visibleCount
-	if end > len(sessions) {
-		end = len(sessions)
+	if end > len(snaps) {
+		end = len(snaps)
 	}
 
 	// 下にまだあるなら、インジケータ分を確保して再計算
-	if end < len(sessions) {
+	if end < len(snaps) {
 		revised := (availHeight - 1) / itemHeight
 		if revised < 1 {
 			revised = 1
 		}
 		end = offset + revised
-		if end > len(sessions) {
-			end = len(sessions)
+		if end > len(snaps) {
+			end = len(snaps)
 		}
 	}
 
@@ -225,11 +221,10 @@ func (m Model) renderSessionList(width, height int) string {
 		itemWidth = 10
 	}
 	for i := offset; i < end; i++ {
-		snap := sessions[i].Snapshot()
-		items = append(items, renderSessionItem(snap, i == m.cursor, itemWidth))
+		items = append(items, renderSessionItem(snaps[i], i == m.cursor, itemWidth))
 	}
 
-	if remaining := len(sessions) - end; remaining > 0 {
+	if remaining := len(snaps) - end; remaining > 0 {
 		items = append(items, dimStyle.Render(fmt.Sprintf("  ↓ 他%d件", remaining)))
 	}
 
@@ -402,16 +397,11 @@ func (m Model) renderDetailPane(width, height int) string {
 		style = detailPaneFocusedStyle
 	}
 
-	if m.selectedID == "" {
+	if m.selectedSnap == nil {
 		return style.Width(width).Height(height).Render(dimStyle.Render("セッションを選択してください"))
 	}
 
-	sess := m.manager.GetSession(m.selectedID)
-	if sess == nil {
-		return style.Width(width).Height(height).Render(dimStyle.Render("セッションが見つかりません"))
-	}
-
-	snap := sess.Snapshot()
+	snap := *m.selectedSnap
 	var sections []string
 
 	// Width() はボーダー・パディング込みなので、コンテンツ幅は border(2) + padding(2) を引く
@@ -635,8 +625,11 @@ func padRightBg(s string, w int, bg lipgloss.Style) string {
 // detailPaneInnerWidth calculates the content width of the detail pane.
 // Depends on m.width and m.layout so it is a method rather than a pure function.
 func (m Model) detailPaneInnerWidth() int {
-	const frameOverhead = 1 // pane gap
-	available := m.width - frameOverhead
+	// リスト非表示時はペイン間スペースが存在しないため frameOverhead を引かない。
+	available := m.width
+	if m.layout.IsListVisible() {
+		available -= 1 // pane gap
+	}
 	if available < 20 {
 		available = 20
 	}
@@ -719,13 +712,10 @@ func (m *Model) detailPaneMetrics() (innerWidth, logHeight, ptyHeight int, displ
 
 	display = session.DisplayJSONL // default for no selection
 	headerLines := 4
-	if m.selectedID != "" {
-		if sess := m.manager.GetSession(m.selectedID); sess != nil {
-			snap := sess.Snapshot()
-			display = snap.Display
-			if display != session.DisplayPTY {
-				headerLines = detailHeaderLines(snap)
-			}
+	if m.selectedSnap != nil {
+		display = m.selectedSnap.Display
+		if display != session.DisplayPTY {
+			headerLines = detailHeaderLines(*m.selectedSnap)
 		}
 	}
 
@@ -795,13 +785,21 @@ func (m *Model) syncViewportContent(sessionID session.DeckSessionID, innerWidth 
 
 	switch display {
 	case session.DisplayPTY:
-		debuglog.Printf("[syncViewportContent] DisplayPTY: calling GetPTYDisplayLines")
-		lines := sess.GetPTYDisplayLines()
-		debuglog.Printf("[syncViewportContent] GetPTYDisplayLines returned %d lines", len(lines))
-		if len(lines) > 0 {
-			m.ptyViewport.SetContent(strings.Join(lines, "\n"))
-		} else {
-			m.ptyViewport.SetContent(dimStyle.Render("(PTY 出力待ち)"))
+		// Only call SetContentLines when the display version has changed.
+		// viewport.SetContentLines internally computes maxLineWidth over ALL lines
+		// (O(n) ANSI-width scan), so calling it at 60fps with 2000+ scrollback
+		// lines causes significant main-thread blocking and TUI freezes.
+		newVer := sess.GetDisplayVersion()
+		if !m.ptyViewCache.isUpToDate(sessionID, newVer) {
+			debuglog.Printf("[syncViewportContent] DisplayPTY: version changed, updating content (ver=%d)", newVer)
+			lines := sess.GetPTYDisplayLines()
+			debuglog.Printf("[syncViewportContent] GetPTYDisplayLines returned %d lines", len(lines))
+			if len(lines) > 0 {
+				m.ptyViewport.SetContentLines(lines)
+			} else {
+				m.ptyViewport.SetContent(dimStyle.Render("(PTY 出力待ち)"))
+			}
+			m.ptyViewCache.update(sessionID, newVer)
 		}
 		if m.ptyFollow {
 			m.ptyViewport.GotoBottom()
