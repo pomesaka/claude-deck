@@ -126,6 +126,9 @@ end tell`
 // are passed as-is inside the AppleScript string literal.  AppleScript allows
 // literal newlines in string values, which is intentional here: SplitRight
 // appends "\n" so that the command executes automatically via "initial input".
+//
+// Callers must pass only trusted input (e.g. config-derived values).
+// User-supplied or external strings must not be passed without additional sanitisation.
 func applescriptString(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)

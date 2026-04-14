@@ -111,28 +111,7 @@ func run() error {
 	}
 
 	// Create session manager
-	mgr := session.NewManager(ctx, st, session.ManagerConfig{
-		DataDir:               cfg.DataDir,
-		ClaudeCommand:         cfg.Commands.Claude,
-		JJ:                    &jj.Runner{Command: cfg.Commands.JJ},
-		DefaultPermissionMode: cfg.Defaults.PermissionMode,
-		MaxSessions:           cfg.Session.MaxSessions,
-		MaxLogLines:           cfg.Session.MaxLogLines,
-		MaxScrollback:         cfg.Session.MaxScrollback,
-		DiscoveryDays:         cfg.Session.DiscoveryDays,
-		RefreshInterval:       refreshInterval,
-		Pricing: session.PricingPolicy{
-			InputPerMTok:      cfg.Pricing.InputPerMTok,
-			OutputPerMTok:     cfg.Pricing.OutputPerMTok,
-			CacheWritePerMTok: cfg.Pricing.CacheWritePerMTok,
-			CacheReadPerMTok:  cfg.Pricing.CacheReadPerMTok,
-		},
-		WorkspaceSymlinksFunc: cfg.WorkspaceSymlinks,
-		AddDirsFunc:           cfg.ResolvedAddDirs,
-		BackendMode:           backendMode,
-		TmuxCommand:           cfg.Tmux.Command,
-		TmuxSession:           cfg.Tmux.SessionName,
-	})
+	mgr := session.NewManager(ctx, st, buildManagerConfig(cfg, backendMode, refreshInterval))
 
 	// Load session metadata from store (fast: local JSON files only)
 	if err := mgr.LoadExisting(); err != nil {
@@ -167,44 +146,13 @@ func run() error {
 	var splitMode bool
 	var splitTermUUID string // Ghostty terminal UUID for cleanup on exit
 	if mgr.IsTmuxMode() {
-		if err := ensurePreviewWindow(mgr); err != nil {
+		if err := mgr.EnsurePreviewWindow(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: preview window setup: %v\n", err)
 		} else {
 			splitMode = true
 		}
 
-		// Ghostty 内なら右ペインに自動分割して tmux attach を起動する。
-		if ghostty.IsRunningInGhostty() {
-			tmuxSession := cfg.Tmux.SessionName
-			if tmuxSession == "" {
-				tmuxSession = "claude-deck"
-			}
-			attachCmd := "tmux attach-session -t " + tmuxSession
-			uuid, err := ghostty.SplitRight(attachCmd)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: Ghostty split: %v\n", err)
-			} else {
-				splitTermUUID = uuid
-				// 分割後に少し待ってからリサイズし、フォーカスをリストペインに戻す
-				time.Sleep(300 * time.Millisecond)
-				if cfg.Ghostty.DeckWidth > 0 {
-					if err := ghostty.ResizeSplit(cfg.Ghostty.DeckWidth); err != nil {
-						debuglog.Printf("ghostty resize split: %v", err)
-					}
-				}
-				// SplitRight で右ペインにフォーカスが移るので左ペイン（一覧 TUI）に戻す
-				if err := ghostty.FocusLeft(); err != nil {
-					debuglog.Printf("ghostty focus left: %v", err)
-				}
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "  別ペインで: tmux attach-session -t %s\n", func() string {
-				if cfg.Tmux.SessionName != "" {
-					return cfg.Tmux.SessionName
-				}
-				return "claude-deck"
-			}())
-		}
+		splitTermUUID = setupGhosttySplit(cfg)
 	}
 
 	// Create and run TUI
@@ -321,28 +269,7 @@ func runPreview() error {
 		backendMode = session.BackendTmux
 	}
 
-	mgr := session.NewManager(ctx, st, session.ManagerConfig{
-		DataDir:               cfg.DataDir,
-		ClaudeCommand:         cfg.Commands.Claude,
-		JJ:                    &jj.Runner{Command: cfg.Commands.JJ},
-		DefaultPermissionMode: cfg.Defaults.PermissionMode,
-		MaxSessions:           cfg.Session.MaxSessions,
-		MaxLogLines:           cfg.Session.MaxLogLines,
-		MaxScrollback:         cfg.Session.MaxScrollback,
-		DiscoveryDays:         cfg.Session.DiscoveryDays,
-		RefreshInterval:       refreshInterval,
-		Pricing: session.PricingPolicy{
-			InputPerMTok:      cfg.Pricing.InputPerMTok,
-			OutputPerMTok:     cfg.Pricing.OutputPerMTok,
-			CacheWritePerMTok: cfg.Pricing.CacheWritePerMTok,
-			CacheReadPerMTok:  cfg.Pricing.CacheReadPerMTok,
-		},
-		WorkspaceSymlinksFunc: cfg.WorkspaceSymlinks,
-		AddDirsFunc:           cfg.ResolvedAddDirs,
-		BackendMode:           backendMode,
-		TmuxCommand:           cfg.Tmux.Command,
-		TmuxSession:           cfg.Tmux.SessionName,
-	})
+	mgr := session.NewManager(ctx, st, buildManagerConfig(cfg, backendMode, refreshInterval))
 
 	if err := mgr.LoadExisting(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: load existing sessions: %v\n", err)
@@ -380,11 +307,67 @@ func runPreview() error {
 	return nil
 }
 
-// ensurePreviewWindow creates the tmux __preview__ window if it does not exist.
-// The window runs "claude-deck --preview" and shows JSONL logs for the session
-// currently selected in the list TUI.
-func ensurePreviewWindow(mgr *session.Manager) error {
-	return mgr.EnsurePreviewWindow()
+// buildManagerConfig constructs the ManagerConfig from app config and derived values.
+// Centralised here so run() and runPreview() stay in sync.
+func buildManagerConfig(cfg *config.Config, backendMode session.BackendMode, refreshInterval time.Duration) session.ManagerConfig {
+	return session.ManagerConfig{
+		DataDir:               cfg.DataDir,
+		ClaudeCommand:         cfg.Commands.Claude,
+		JJ:                    &jj.Runner{Command: cfg.Commands.JJ},
+		DefaultPermissionMode: cfg.Defaults.PermissionMode,
+		MaxSessions:           cfg.Session.MaxSessions,
+		MaxLogLines:           cfg.Session.MaxLogLines,
+		MaxScrollback:         cfg.Session.MaxScrollback,
+		DiscoveryDays:         cfg.Session.DiscoveryDays,
+		RefreshInterval:       refreshInterval,
+		Pricing: session.PricingPolicy{
+			InputPerMTok:      cfg.Pricing.InputPerMTok,
+			OutputPerMTok:     cfg.Pricing.OutputPerMTok,
+			CacheWritePerMTok: cfg.Pricing.CacheWritePerMTok,
+			CacheReadPerMTok:  cfg.Pricing.CacheReadPerMTok,
+		},
+		WorkspaceSymlinksFunc: cfg.WorkspaceSymlinks,
+		AddDirsFunc:           cfg.ResolvedAddDirs,
+		BackendMode:           backendMode,
+		TmuxCommand:           cfg.Tmux.Command,
+		TmuxSession:           cfg.Tmux.SessionName,
+	}
+}
+
+// setupGhosttySplit opens the tmux right pane in Ghostty if running inside it.
+// Returns the Ghostty terminal UUID for cleanup on exit (empty string if not split).
+func setupGhosttySplit(cfg *config.Config) string {
+	tmuxSession := cfg.Tmux.SessionName
+	if tmuxSession == "" {
+		tmuxSession = "claude-deck"
+	}
+
+	if !ghostty.IsRunningInGhostty() {
+		fmt.Fprintf(os.Stderr, "  別ペインで: tmux attach-session -t %s\n", tmuxSession)
+		return ""
+	}
+
+	// Ghostty 内なら右ペインに自動分割して tmux attach を起動する。
+	attachCmd := "tmux attach-session -t " + tmuxSession
+	uuid, err := ghostty.SplitRight(attachCmd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: Ghostty split: %v\n", err)
+		return ""
+	}
+
+	// 分割後に少し待ってからリサイズし、フォーカスをリストペインに戻す
+	time.Sleep(300 * time.Millisecond)
+	if cfg.Ghostty.DeckWidth > 0 {
+		if err := ghostty.ResizeSplit(cfg.Ghostty.DeckWidth); err != nil {
+			debuglog.Printf("ghostty resize split: %v", err)
+		}
+	}
+	// SplitRight で右ペインにフォーカスが移るので左ペイン（一覧 TUI）に戻す
+	if err := ghostty.FocusLeft(); err != nil {
+		debuglog.Printf("ghostty focus left: %v", err)
+	}
+
+	return uuid
 }
 
 func hookWarningMessage(status hooks.HookStatus) string {

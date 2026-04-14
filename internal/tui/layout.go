@@ -13,7 +13,7 @@ const (
 type pane int
 
 const (
-	paneList   pane = iota
+	paneList pane = iota
 	paneDetail
 )
 

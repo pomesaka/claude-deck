@@ -129,6 +129,29 @@ func truncateSessionID(id string) string {
 	return id
 }
 
+// hasManagedSessionAtWorkspaceLocked returns true if any active (non-terminal,
+// non-unmanaged) session has the given workspacePath.
+// Caller must hold m.mu (at least for reading).
+//
+// SessionChain が空のまま hook 着火前に DiscoverExternalSessions が走ると
+// 同じワークスペースの外部セッションが重複生成されるレースを防ぐ。
+func (m *Manager) hasManagedSessionAtWorkspaceLocked(workspacePath string) bool {
+	if workspacePath == "" {
+		return false
+	}
+	for _, s := range m.sessions {
+		// WorkspacePath は CreateSession 時に固定され変更されないため sess.mu 不要
+		if s.WorkspacePath != workspacePath {
+			continue
+		}
+		// Status は sess.mu なしで読むが、ここではベストエフォートで十分
+		if s.Status != StatusUnmanaged && !s.Status.IsTerminal() {
+			return true
+		}
+	}
+	return false
+}
+
 // knownClaudeSessionIDs returns a set of all Claude Code session IDs that are
 // already tracked by the manager. This includes all chain entries (current and
 // historical) for every tracked session, so /clear history is never re-imported.
@@ -175,7 +198,7 @@ func (m *Manager) handleNewFile(ev usage.FileEvent) {
 
 	m.mu.Lock()
 	// Double-check: DiscoverExternalSessions との競合で重複を防ぐ
-	if !m.hasClaudeSessionID(csID) {
+	if !m.hasClaudeSessionID(csID) && !m.hasManagedSessionAtWorkspaceLocked(info.CWD) {
 		m.sessions[sess.ID] = sess
 	}
 	m.mu.Unlock()
@@ -203,11 +226,15 @@ func (m *Manager) DiscoverExternalSessions() (added int, hasMore bool) {
 
 		m.mu.Lock()
 		// Double-check: handleNewFile との競合で重複を防ぐ
-		if !m.hasClaudeSessionID(csID) {
+		// さらに、hook 着火前（SessionChain 空）の managed セッションと同じワークスペースの
+		// 外部セッションを誤って生成しないようワークスペースパスでもチェックする。
+		if m.hasClaudeSessionID(csID) {
+			debuglog.Printf("[discover] skipping duplicate session %s (known claude ID)", info.SessionID)
+		} else if m.hasManagedSessionAtWorkspaceLocked(info.CWD) {
+			debuglog.Printf("[discover] skipping session %s: active managed session at %s", info.SessionID, info.CWD)
+		} else {
 			m.sessions[sess.ID] = sess
 			added++
-		} else {
-			debuglog.Printf("[discover] skipping duplicate session %s", info.SessionID)
 		}
 		m.mu.Unlock()
 	}

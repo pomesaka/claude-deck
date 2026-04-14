@@ -24,19 +24,24 @@ import (
 type Event struct {
 	SessionID           string `json:"session_id"`
 	CWD                 string `json:"cwd"`
-	HookEventName       string `json:"hook_event_name"` // "SessionStart", "SessionEnd", "Notification", "Stop"
-	Source              string `json:"source,omitempty"` // SessionStart: "startup", "resume", "clear", "compact"
-	Reason              string `json:"reason,omitempty"` // SessionEnd: "clear", "logout", etc.
-	NotificationType    string `json:"notification_type,omitempty"` // Notification: "permission_prompt", "elicitation_dialog", "idle_prompt"
+	HookEventName       string `json:"hook_event_name"`                  // "SessionStart", "SessionEnd", "Notification", "Stop"
+	Source              string `json:"source,omitempty"`                 // SessionStart: "startup", "resume", "clear", "compact"
+	Reason              string `json:"reason,omitempty"`                 // SessionEnd: "clear", "logout", etc.
+	NotificationType    string `json:"notification_type,omitempty"`      // Notification: "permission_prompt", "elicitation_dialog", "idle_prompt"
+	ToolName            string `json:"tool_name,omitempty"`              // PreToolUse / PostToolUseFailure: ツール名
 	ClaudeDeckSessionID string `json:"claude_deck_session_id,omitempty"` // PTY 起動時に環境変数から注入
 }
 
 // Hook event name constants.
 const (
-	EventNotification = "Notification"
-	EventStop         = "Stop"
-	EventSessionEnd   = "SessionEnd"
-	EventSessionStart = "SessionStart"
+	EventNotification       = "Notification"
+	EventStop               = "Stop"
+	EventStopFailure        = "StopFailure"
+	EventSessionEnd         = "SessionEnd"
+	EventSessionStart       = "SessionStart"
+	EventUserPromptSubmit   = "UserPromptSubmit"
+	EventPreToolUse         = "PreToolUse"
+	EventPostToolUseFailure = "PostToolUseFailure"
 )
 
 // Notification type constants.
@@ -238,4 +243,3 @@ func TruncateEventsFile(eventsPath string) error {
 	}
 	return os.Truncate(eventsPath, 0)
 }
-

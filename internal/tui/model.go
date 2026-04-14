@@ -665,29 +665,53 @@ func (m *Model) updateSelected() []tea.Cmd {
 
 // doSwitchRightPane は右ペイン制御のコアロジック。goroutine または tea.Cmd から呼ぶ。
 //
-// セッション状態（DisplayChannel）に基づいて:
-//   - DisplayNone (起動中) → tmux select-window <sessionID>
-//   - それ以外 (停止中)    → preview IPC 書き込み + tmux select-window __preview__
-//                            ※ splitMode のみ。tmuxMode 単体では preview は存在しない。
+// focusRight の意味でペイン切替先を決定する:
 //
-// focusRight=true のとき Ghostty の右ペインにフォーカスを移す（明示的ユーザー操作時のみ）。
+//   - focusRight=false (カーソル移動): 常に __preview__ (JSONL viewer) を表示する。
+//     稼働中・停止中を問わず、マウスホイールで会話履歴をスクロールして見られる。
+//
+//   - focusRight=true (Enter/新規/再開/fork) かつ稼働中 (DisplayNone): ライブ端末を表示し
+//     Ghostty のフォーカスを右ペインに移す（Claude Code と直接対話するため）。
+//
+//   - focusRight=true かつ非稼働: __preview__ を表示（ライブ端末が存在しない）。
+//
+// split でない tmux mode では __preview__ が存在しないため、稼働中セッションのみ
+// tmux select-window を発行する（従来通り）。
 func (m *Model) doSwitchRightPane(sid session.DeckSessionID, focusRight bool) {
+	if !m.backendMode.IsTmuxLike() {
+		return
+	}
+
 	var display session.DisplayChannel
 	if sess := m.manager.GetSession(sid); sess != nil {
-		snap := sess.Snapshot()
-		display = snap.Display
+		display = sess.Snapshot().Display
 	}
-	if display == session.DisplayNone {
-		_ = m.manager.FocusSession(sid)
-	} else if m.backendMode.IsSplit() {
-		// preview window は split mode にのみ存在する
+
+	if m.backendMode.IsSplit() {
+		if display == session.DisplayNone {
+			// 稼働中セッション: カーソル移動・明示操作いずれも実際の tmux ウィンドウを表示。
+			// __preview__ は DisplayNone の場合にヘッダー数行のみとなり大部分が黒くなるため。
+			// focusRight=true（Enter/新規/再開）のときのみ Ghostty フォーカスを右ペインに移す。
+			_ = m.manager.FocusSession(sid)
+			if focusRight {
+				_ = ghostty.FocusRight()
+			}
+			return
+		}
+		// 非稼働セッション → JSONL プレビュー（会話履歴をスクロールして見られる）
 		if err := preview.WriteSelection(m.config.DataDir, sid); err != nil {
 			debuglog.Printf("[switchRightPane] preview IPC: %v", err)
 		}
 		_ = m.manager.FocusPreviewWindow()
+		if focusRight {
+			_ = ghostty.FocusRight()
+		}
+		return
 	}
-	if focusRight && m.backendMode.IsSplit() {
-		_ = ghostty.FocusRight()
+
+	// split なし tmux mode: 稼働中セッションのウィンドウに切替
+	if display == session.DisplayNone {
+		_ = m.manager.FocusSession(sid)
 	}
 }
 

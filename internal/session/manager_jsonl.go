@@ -218,6 +218,9 @@ func (m *Manager) RefreshFromJSONL() {
 	}
 	defer m.refreshing.Store(false)
 
+	// SyncNewFromStore を先に呼ぶことで、この tick 内に追加された新規セッションが
+	// HydrateFromJSONL の対象に含まれる（同一 tick で JSONL データが反映される）。
+	m.SyncNewFromStore()
 	m.HydrateFromJSONL()
 	m.refreshBookmarks()
 

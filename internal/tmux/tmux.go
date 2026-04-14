@@ -75,6 +75,16 @@ func (r *Runner) SetOption(option, value string) error {
 	return err
 }
 
+// ApplyDefaultOptions configures the session with claude-deck defaults:
+// status bar off (no UI chrome) and mouse mode on (scroll wheel support).
+// Call after NewSession whenever a new tmux session is created.
+// SetOption errors are intentionally ignored — the session is still usable
+// without these options, and the caller cannot meaningfully recover from them.
+func (r *Runner) ApplyDefaultOptions() {
+	_ = r.SetOption("status", "off")
+	_ = r.SetOption("mouse", "on")
+}
+
 // ── Window lifecycle ─────────────────────────────────────────────────────────
 
 // WindowOpts configures the window created by NewWindow.

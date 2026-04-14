@@ -301,23 +301,23 @@ type Session struct {
 	rt runtimeFields
 
 	// --- Persisted in store (claude-deck metadata) ---
-	ID               DeckSessionID `json:"id"`
-	Name             string        `json:"name"`
-	RepoPath         string     `json:"repo_path"`
-	RepoName         string     `json:"repo_name"`
-	WorkspacePath    string     `json:"workspace_path"`
-	WorkspaceName    string     `json:"workspace_name"`
-	SubProjectDir    string     `json:"sub_project_dir,omitempty"` // リポジトリ内サブプロジェクトの相対パス
+	ID            DeckSessionID `json:"id"`
+	Name          string        `json:"name"`
+	RepoPath      string        `json:"repo_path"`
+	RepoName      string        `json:"repo_name"`
+	WorkspacePath string        `json:"workspace_path"`
+	WorkspaceName string        `json:"workspace_name"`
+	SubProjectDir string        `json:"sub_project_dir,omitempty"` // リポジトリ内サブプロジェクトの相対パス
 	// SessionChain は Claude Code が割り当てるセッション ID の履歴（古い順）。
 	// /clear や compact のたびに末尾に新 ID が追加される。
 	// 現在の ID は SessionChain[len-1]、旧 ID はそれ以前の要素。
 	// アクセスには CurrentClaudeID() / PriorClaudeIDs() を使うこと。
-	SessionChain []ClaudeSessionID `json:"session_chain,omitempty"`
-	Status       Status   `json:"status"`
-	FinishedAt       *time.Time `json:"finished_at,omitempty"`
-	PID              int        `json:"pid,omitempty"`
-	TerminalTitle    string     `json:"terminal_title,omitempty"` // OSC 0/2 で設定されたターミナルタイトル（PTY表示フィルタ用）
-	BookmarkName     string     `json:"bookmark_name,omitempty"`  // jj の最近接ブックマーク名（セッション一覧表示用）
+	SessionChain  []ClaudeSessionID `json:"session_chain,omitempty"`
+	Status        Status            `json:"status"`
+	FinishedAt    *time.Time        `json:"finished_at,omitempty"`
+	PID           int               `json:"pid,omitempty"`
+	TerminalTitle string            `json:"terminal_title,omitempty"` // OSC 0/2 で設定されたターミナルタイトル（PTY表示フィルタ用）
+	BookmarkName  string            `json:"bookmark_name,omitempty"`  // jj の最近接ブックマーク名（セッション一覧表示用）
 
 	// --- Hydrated from JSONL (JSONL が最新値を上書きするが、ストアにも保存して再起動時に即表示) ---
 	Prompt         string     `json:"prompt,omitempty"`
@@ -453,6 +453,27 @@ func (s *Session) AttachProcess(pid int, display *PTYDisplay) {
 	s.process.Store(rp)
 }
 
+// ReconcileStatusFromStore corrects the session status when loaded from the store.
+// ストア復元直後に呼び出し、保存時に実行中だったセッションが実際には死んでいる場合に
+// StatusCompleted へ補正し FinishedAt を記録する。
+// StatusRunning / WaitingApproval / WaitingAnswer / Idle のいずれかで PID が生存していなければ補正し、
+// true を返す。補正が不要なときは false を返す。
+//
+// LoadExisting と SyncNewFromStore の両方から呼ばれる共通ロジック。
+// ワーキングディレクトリの存在確認など起動時固有の補正は呼び出し側で行うこと。
+func (s *Session) ReconcileStatusFromStore() bool {
+	switch s.Status {
+	case StatusRunning, StatusWaitingApproval, StatusWaitingAnswer, StatusIdle:
+		if !isProcessAlive(s.PID) {
+			s.Status = StatusCompleted
+			now := time.Now()
+			s.FinishedAt = &now
+			return true
+		}
+	}
+	return false
+}
+
 // SetPID stores the OS process ID after the process has started.
 // Used by ptyBackend: AttachProcess(0, display) before pty.Start (to wire
 // the display before the output goroutine runs), then SetPID after pty.Start.
@@ -484,7 +505,6 @@ func (s *Session) ResizeDisplay(cols, rows int) {
 		rp.display.Resize(cols, rows)
 	}
 }
-
 
 // touchSpinner records the current time as the last Braille spinner detection.
 func (s *Session) touchSpinner() {
@@ -615,32 +635,32 @@ func (s *Session) GetStructuredLogs() []usage.LogEntry {
 
 // Snapshot is a read-only copy of session state, safe to use without locks.
 type Snapshot struct {
-	ID                DeckSessionID
-	Name              string
-	RepoPath          string
-	RepoName          string
-	WorkspacePath     string
-	SubProjectDir     string
-	ClaudeSessionID   ClaudeSessionID
+	ID              DeckSessionID
+	Name            string
+	RepoPath        string
+	RepoName        string
+	WorkspacePath   string
+	SubProjectDir   string
+	ClaudeSessionID ClaudeSessionID
 	// ClearCount is the number of /clear (or compact) operations performed in
 	// this session. 0 means the original session; 1 means cleared once, etc.
 	// Derived from len(SessionChain) - 1.
-	ClearCount        int
-	Phase             SessionPhase
-	Hosting           HostingMode // derived from process state: HostEmbedded or HostExternal
-	Display           DisplayChannel
-	Status            Status
-	Prompt            string
-	PermissionMode    string
-	StartedAt    time.Time
-	LastActivity time.Time
-	FinishedAt   *time.Time
-	TokenUsage        TokenUsage
-	CurrentTool       string
-	ErrorMessage      string
-	TerminalTitle     string
-	BookmarkName      string
-	Elapsed           time.Duration
+	ClearCount     int
+	Phase          SessionPhase
+	Hosting        HostingMode // derived from process state: HostEmbedded or HostExternal
+	Display        DisplayChannel
+	Status         Status
+	Prompt         string
+	PermissionMode string
+	StartedAt      time.Time
+	LastActivity   time.Time
+	FinishedAt     *time.Time
+	TokenUsage     TokenUsage
+	CurrentTool    string
+	ErrorMessage   string
+	TerminalTitle  string
+	BookmarkName   string
+	Elapsed        time.Duration
 }
 
 // WorkDir returns the effective working directory for this session.
@@ -674,29 +694,29 @@ func (s *Session) Snapshot() Snapshot {
 	}
 
 	snap := Snapshot{
-		ID:                s.ID,
-		Name:              s.Name,
-		RepoPath:          s.RepoPath,
-		RepoName:          s.RepoName,
-		WorkspacePath:     s.WorkspacePath,
-		SubProjectDir:     s.SubProjectDir,
-		ClaudeSessionID:   s.CurrentClaudeID(),
-		ClearCount:        max(0, len(s.SessionChain)-1),
-		Phase:             s.phaseLocked(),
-		Hosting:           s.hostingLocked(),
-		Display:           s.displayChannelLocked(),
-		Status:            s.Status,
-		Prompt:            s.Prompt,
-		PermissionMode:    s.PermissionMode,
-		StartedAt:    s.StartedAt,
-		LastActivity: s.LastActivity,
-		FinishedAt:   finishedAt,
-		TokenUsage:        s.TokenUsage,
-		CurrentTool:       s.CurrentTool,
-		ErrorMessage:      s.ErrorMessage,
-		TerminalTitle:     s.TerminalTitle,
-		BookmarkName:      s.BookmarkName,
-		Elapsed:           elapsed,
+		ID:              s.ID,
+		Name:            s.Name,
+		RepoPath:        s.RepoPath,
+		RepoName:        s.RepoName,
+		WorkspacePath:   s.WorkspacePath,
+		SubProjectDir:   s.SubProjectDir,
+		ClaudeSessionID: s.CurrentClaudeID(),
+		ClearCount:      max(0, len(s.SessionChain)-1),
+		Phase:           s.phaseLocked(),
+		Hosting:         s.hostingLocked(),
+		Display:         s.displayChannelLocked(),
+		Status:          s.Status,
+		Prompt:          s.Prompt,
+		PermissionMode:  s.PermissionMode,
+		StartedAt:       s.StartedAt,
+		LastActivity:    s.LastActivity,
+		FinishedAt:      finishedAt,
+		TokenUsage:      s.TokenUsage,
+		CurrentTool:     s.CurrentTool,
+		ErrorMessage:    s.ErrorMessage,
+		TerminalTitle:   s.TerminalTitle,
+		BookmarkName:    s.BookmarkName,
+		Elapsed:         elapsed,
 	}
 	return snap
 }

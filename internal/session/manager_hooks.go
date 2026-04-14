@@ -56,6 +56,29 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 			ev.SessionID, ev.NotificationType, sess.GetStatus())
 		m.notifyChange(sess.ID)
 
+	case hooks.EventUserPromptSubmit:
+		sess := m.findSessionByClaudeID(ClaudeSessionID(ev.SessionID))
+		if sess == nil {
+			debuglog.Printf("[event-watcher] UserPromptSubmit: no managed session for %s", ev.SessionID)
+			return
+		}
+		sess.SetStatus(StatusRunning)
+		debuglog.Printf("[event-watcher] UserPromptSubmit: session=%s → StatusRunning", ev.SessionID)
+		m.notifyChange(sess.ID)
+
+	case hooks.EventPreToolUse:
+		// ツール実行開始 = Claude が処理中。WaitingAnswer/WaitingApproval からの復帰も含む。
+		// ask_followup_question 自体も PreToolUse を発火するが、直後の Notification
+		// (elicitation_dialog) が WaitingAnswer に上書きするため問題ない。
+		sess := m.findSessionByClaudeID(ClaudeSessionID(ev.SessionID))
+		if sess == nil {
+			debuglog.Printf("[event-watcher] PreToolUse: no managed session for %s", ev.SessionID)
+			return
+		}
+		sess.SetStatus(StatusRunning)
+		debuglog.Printf("[event-watcher] PreToolUse: session=%s tool=%s → StatusRunning", ev.SessionID, ev.ToolName)
+		m.notifyChange(sess.ID)
+
 	case hooks.EventStop:
 		sess := m.findSessionByClaudeID(ClaudeSessionID(ev.SessionID))
 		if sess == nil {
@@ -64,6 +87,28 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 		}
 		sess.SetStatus(StatusIdle)
 		debuglog.Printf("[event-watcher] Stop: session=%s → StatusIdle", ev.SessionID)
+		m.notifyChange(sess.ID)
+
+	case hooks.EventPostToolUseFailure:
+		// ユーザーが Esc 等でツール実行を中断した場合。プロセスは生きているので Idle に戻す。
+		sess := m.findSessionByClaudeID(ClaudeSessionID(ev.SessionID))
+		if sess == nil {
+			debuglog.Printf("[event-watcher] PostToolUseFailure: no managed session for %s", ev.SessionID)
+			return
+		}
+		sess.SetStatus(StatusIdle)
+		debuglog.Printf("[event-watcher] PostToolUseFailure: session=%s tool=%s → StatusIdle", ev.SessionID, ev.ToolName)
+		m.notifyChange(sess.ID)
+
+	case hooks.EventStopFailure:
+		// API エラーでターンが失敗した場合。プロセスは生きているので Idle に戻す。
+		sess := m.findSessionByClaudeID(ClaudeSessionID(ev.SessionID))
+		if sess == nil {
+			debuglog.Printf("[event-watcher] StopFailure: no managed session for %s", ev.SessionID)
+			return
+		}
+		sess.SetStatus(StatusIdle)
+		debuglog.Printf("[event-watcher] StopFailure: session=%s → StatusIdle", ev.SessionID)
 		m.notifyChange(sess.ID)
 
 	case hooks.EventSessionEnd:
@@ -178,6 +223,10 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 //
 // m.mu を解放してから IsActive を呼ぶ（tmux モードでは外部コマンド実行になるため
 // ロック保持中の長時間ブロックを避ける）。
+//
+// tmux モードでは IsActive が tmux list-windows を呼ぶため、セッション数 N に対して
+// O(N) の外部プロセス呼び出しになる。セッション上限 30 件では実用上問題ないが、
+// 将来的には ListWindows を一度だけ呼んで結果をキャッシュする最適化が可能。
 func (m *Manager) findSessionByClaudeID(claudeSessionID ClaudeSessionID) *Session {
 	candidates := m.copySessionsList()
 

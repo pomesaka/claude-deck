@@ -58,6 +58,46 @@
           }
         ]
       }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -c '{session_id, cwd, hook_event_name, claude_deck_session_id: env.CLAUDE_DECK_SESSION_ID}' >> \"${XDG_DATA_HOME:-$HOME/.local/share}/claude-deck/claude-deck-events.jsonl\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -c '{session_id, cwd, hook_event_name, claude_deck_session_id: env.CLAUDE_DECK_SESSION_ID}' >> \"${XDG_DATA_HOME:-$HOME/.local/share}/claude-deck/claude-deck-events.jsonl\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -c '{session_id, cwd, hook_event_name, tool_name, claude_deck_session_id: env.CLAUDE_DECK_SESSION_ID}' >> \"${XDG_DATA_HOME:-$HOME/.local/share}/claude-deck/claude-deck-events.jsonl\""
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -c '{session_id, cwd, hook_event_name, tool_name, claude_deck_session_id: env.CLAUDE_DECK_SESSION_ID}' >> \"${XDG_DATA_HOME:-$HOME/.local/share}/claude-deck/claude-deck-events.jsonl\""
+          }
+        ]
+      }
     ]
   }
 }

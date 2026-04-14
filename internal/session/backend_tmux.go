@@ -69,8 +69,7 @@ func (b *tmuxBackend) StartProcess(ctx context.Context, sess *Session, opts Proc
 		if rerr := b.runner.NewSession(); rerr != nil {
 			return fmt.Errorf("tmux new-window: %w (session re-create also failed: %v)", err, rerr)
 		}
-		_ = b.runner.SetOption("status", "off")
-		_ = b.runner.SetOption("mouse", "on") // NewSession 時と Reconcile 時に設定するのと同じオプション
+		b.runner.ApplyDefaultOptions()
 		if rerr := b.runner.NewWindow(windowName, wopts); rerr != nil {
 			return fmt.Errorf("tmux new-window: %w", rerr)
 		}
@@ -251,8 +250,7 @@ func (b *tmuxBackend) Reconcile(sessions []*Session) (ReconcileResult, error) {
 		if err := b.runner.NewSession(); err != nil {
 			debuglog.Printf("[tmuxBackend.Reconcile] re-creating session failed: %v", err)
 		} else {
-			_ = b.runner.SetOption("status", "off")
-			_ = b.runner.SetOption("mouse", "on")
+			b.runner.ApplyDefaultOptions()
 		}
 	}
 
