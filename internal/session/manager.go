@@ -50,7 +50,11 @@ type Manager struct {
 	sessions map[DeckSessionID]*Session
 	// Supervisor manages PTY process lifecycle (start, stop, I/O, resize).
 	// Extracted from Manager to separate process infrastructure from session domain.
+	// Kept as a public field for test access; production code uses backend instead.
 	Supervisor *ProcessSupervisor
+	// backend abstracts the process hosting mechanism (PTY, tmux, Ghostty split, etc.).
+	// Initialized in NewManager to ptyBackend backed by Supervisor.
+	backend    SessionBackend
 	store      *store.Store
 	usage      *usage.Reader
 	ctx        context.Context
@@ -86,9 +90,10 @@ type Manager struct {
 // NewManager creates a new session manager.
 // ctx is used as the parent context for log streaming goroutines.
 func NewManager(ctx context.Context, st *store.Store, cfg ManagerConfig) *Manager {
-	return &Manager{
+	sup := NewProcessSupervisor()
+	m := &Manager{
 		sessions:       make(map[DeckSessionID]*Session),
-		Supervisor:     NewProcessSupervisor(),
+		Supervisor:     sup,
 		store:          st,
 		usage:          usage.NewReader(""),
 		ctx:            ctx,
@@ -97,6 +102,10 @@ func NewManager(ctx context.Context, st *store.Store, cfg ManagerConfig) *Manage
 		pendingChanges: make(map[DeckSessionID]bool),
 		hookProc:       newHookProcessor(),
 	}
+	// Wire ptyBackend with the exit callback. watchProcess handles all post-exit
+	// domain logic; the backend only needs to fire it after <-proc.Done().
+	m.backend = newPTYBackend(sup, m.watchProcess)
+	return m
 }
 
 // jj returns the configured jj Runner, falling back to a zero-value Runner
@@ -106,6 +115,27 @@ func (m *Manager) jj() *jj.Runner {
 		return m.config.JJ
 	}
 	return &jj.Runner{}
+}
+
+// buildStartArgs pre-assembles the CLI arg list for a Claude Code process start.
+// It mirrors the arg construction that pty.Start performs from its StartOptions fields,
+// allowing the SessionBackend interface to accept a plain []string instead of a
+// PTY-specific typed struct. This keeps backend implementations decoupled from
+// claude CLI flag semantics.
+func buildStartArgs(resumeID string, forkSession bool, prompt, permMode string, additionalArgs []string) []string {
+	var args []string
+	if resumeID != "" {
+		args = append(args, "--resume", resumeID)
+		if forkSession {
+			args = append(args, "--fork-session")
+		}
+	} else if prompt != "" {
+		args = append(args, "-p", prompt)
+	}
+	if permMode != "" {
+		args = append(args, "--permission-mode", permMode)
+	}
+	return append(args, additionalArgs...)
 }
 
 // SetOnChange registers a callback for session state changes.
@@ -271,33 +301,32 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 		}
 	}
 
-	debuglog.Printf("[CreateSession] starting pty workDir=%q", actualWorkDir)
+	debuglog.Printf("[CreateSession] starting process workDir=%q", actualWorkDir)
 	addDirArgs := m.buildAddDirArgs(repoPath)
-	proc, err := pty.Start(ctx, pty.StartOptions{
-		Command:        m.config.ClaudeCommand,
-		WorkDir:        actualWorkDir,
-		Prompt:         "",
-		PermissionMode: m.config.DefaultPermissionMode,
-		AdditionalArgs: append([]string{"--agent", sess.Name}, addDirArgs...),
-		Env:            []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
-		Cols:           uint16(cols),
-		Rows:           uint16(rows),
+	additionalArgs := append([]string{"--agent", sess.Name}, addDirArgs...)
+	pid, err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
+		Command: m.config.ClaudeCommand,
+		WorkDir: actualWorkDir,
+		Args:    buildStartArgs("", false, "", m.config.DefaultPermissionMode, additionalArgs),
+		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
+		Cols:    uint16(cols),
+		Rows:    uint16(rows),
 	}, func(data []byte) {
 		m.handleOutput(sess, data)
 	})
 	if err != nil {
-		debuglog.Printf("[CreateSession] pty.Start failed: %v", err)
+		debuglog.Printf("[CreateSession] StartProcess failed: %v", err)
 		if withWorkspace {
 			_ = m.jj().ForgetWorkspace(repoPath, sess.Name)
 		}
 		return nil, fmt.Errorf("starting claude code: %w", err)
 	}
-	debuglog.Printf("[CreateSession] pty started pid=%d", proc.PID())
+	debuglog.Printf("[CreateSession] process started pid=%d", pid)
 
 	sess.InitDisplay(cols, rows, m.config.MaxScrollback)
 
 	sess.mu.Lock()
-	sess.PID = proc.PID()
+	sess.PID = pid
 	sess.managed = true
 	sess.mu.Unlock()
 
@@ -316,12 +345,10 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	m.sessions[sess.ID] = sess
 	m.mu.Unlock()
 
-	m.Supervisor.Register(sess.ID, proc)
+	// backend.StartProcess already registered the process and wired the exit watcher.
 	m.persist(sess)
 	m.pruneOldSessions()
 	m.notifyChange(sess.ID)
-
-	go m.watchProcess(sess, proc)
 
 	return sess, nil
 }
@@ -448,38 +475,34 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID, co
 	sess.managed = true
 	sess.mu.Unlock()
 
-	debuglog.Printf("[ResumeSession] calling pty.Start")
-	proc, err := pty.Start(ctx, pty.StartOptions{
-		Command:         m.config.ClaudeCommand,
-		WorkDir:         workDir,
-		ResumeSessionID: string(csID),
-		AdditionalArgs:  m.buildAddDirArgs(sess.RepoPath),
-		Env:             []string{"CLAUDE_DECK_SESSION_ID=" + string(sessionID)},
-		Cols:            uint16(cols),
-		Rows:            uint16(rows),
+	debuglog.Printf("[ResumeSession] calling backend.StartProcess")
+	pid, err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
+		Command: m.config.ClaudeCommand,
+		WorkDir: workDir,
+		Args:    buildStartArgs(string(csID), false, "", "", m.buildAddDirArgs(sess.RepoPath)),
+		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sessionID)},
+		Cols:    uint16(cols),
+		Rows:    uint16(rows),
 	}, func(data []byte) {
 		m.handleOutput(sess, data)
 	})
 	if err != nil {
-		debuglog.Printf("[ResumeSession] pty.Start failed: %v", err)
+		debuglog.Printf("[ResumeSession] StartProcess failed: %v", err)
 		return fmt.Errorf("resuming claude code: %w", err)
 	}
-	debuglog.Printf("[ResumeSession] pty started pid=%d", proc.PID())
+	debuglog.Printf("[ResumeSession] process started pid=%d", pid)
 
 	sess.mu.Lock()
-	sess.PID = proc.PID()
+	sess.PID = pid
 	// JSONLLogEntries は上部ログビューポートで表示に使用し続ける。
 	// PTY 出力は下部の専用ビューポートに表示される。
 	sess.mu.Unlock()
 	debuglog.Printf("[ResumeSession] session state updated")
 
-	m.Supervisor.Register(sessionID, proc)
-
+	// backend.StartProcess already registered the process and wired the exit watcher.
 	m.persist(sess)
 	m.notifyChange(sessionID)
 	debuglog.Printf("[ResumeSession] done, watching process")
-
-	go m.watchProcess(sess, proc)
 
 	return nil
 }
@@ -535,15 +558,13 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	sess.WorkspaceName = wsName
 	sess.SubProjectDir = srcSubProjectDir
 
-	proc, err := pty.Start(ctx, pty.StartOptions{
-		Command:         m.config.ClaudeCommand,
-		WorkDir:         srcWorkDir,
-		ResumeSessionID: string(srcClaudeID),
-		ForkSession:     true,
-		AdditionalArgs:  m.buildAddDirArgs(repoPath),
-		Env:             []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
-		Cols:            uint16(cols),
-		Rows:            uint16(rows),
+	pid, err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
+		Command: m.config.ClaudeCommand,
+		WorkDir: srcWorkDir,
+		Args:    buildStartArgs(string(srcClaudeID), true, "", "", m.buildAddDirArgs(repoPath)),
+		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
+		Cols:    uint16(cols),
+		Rows:    uint16(rows),
 	}, func(data []byte) {
 		m.handleOutput(sess, data)
 	})
@@ -555,7 +576,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	sess.InitDisplay(cols, rows, m.config.MaxScrollback)
 
 	sess.mu.Lock()
-	sess.PID = proc.PID()
+	sess.PID = pid
 	sess.managed = true
 	sess.mu.Unlock()
 
@@ -570,12 +591,10 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	m.sessions[sess.ID] = sess
 	m.mu.Unlock()
 
-	m.Supervisor.Register(sess.ID, proc)
+	// backend.StartProcess already registered the process and wired the exit watcher.
 	m.persist(sess)
 	m.pruneOldSessions()
 	m.notifyChange(sess.ID)
-
-	go m.watchProcess(sess, proc)
 
 	return sess, nil
 }
@@ -591,7 +610,7 @@ func (m *Manager) RemoveSession(sessionID DeckSessionID) error {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	if m.Supervisor.IsAlive(sessionID) {
+	if m.backend.IsActive(sessionID) {
 		return fmt.Errorf("cannot remove running session (kill it first)")
 	}
 
@@ -623,7 +642,7 @@ func (m *Manager) DeleteSession(sessionID DeckSessionID) (warning string, err er
 		return "", fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	if m.Supervisor.IsAlive(sessionID) {
+	if m.backend.IsActive(sessionID) {
 		return "", fmt.Errorf("cannot delete running session (kill it first)")
 	}
 
@@ -691,13 +710,13 @@ func (m *Manager) Kill(sessionID DeckSessionID) error {
 	pid := sess.PID
 	sess.mu.RUnlock()
 
-	if err := m.Supervisor.Kill(sessionID, pid); err != nil {
+	if err := m.backend.StopProcess(sessionID, pid); err != nil {
 		return err
 	}
 
-	// Supervisor.Kill が SIGTERM を送った場合、watchProcess が Completed に遷移させる。
-	// プロセスハンドルがない場合は手動で遷移させる。
-	if !m.Supervisor.IsAlive(sessionID) && m.Supervisor.Get(sessionID) == nil {
+	// StopProcess が SIGTERM を送った場合、watchProcess が Completed に遷移させる。
+	// プロセスハンドルがない（PID フォールバック）場合は手動で遷移させる。
+	if !m.backend.IsActive(sessionID) && m.Supervisor.Get(sessionID) == nil {
 		sess.SetStatus(StatusCompleted)
 		m.persist(sess)
 	}
@@ -708,19 +727,19 @@ func (m *Manager) Kill(sessionID DeckSessionID) error {
 // raw PTY 入力モードでは keyToBytes が1キー分のバイト列を返すため、
 // 一括で書き込む。マルチバイト UTF-8 文字の分断を防ぐ。
 func (m *Manager) WriteToSession(sessionID DeckSessionID, data []byte) error {
-	return m.Supervisor.Write(sessionID, data)
+	return m.backend.WriteInput(sessionID, data)
 }
 
 // HasActiveProcess returns true if the session has a live PTY process.
 func (m *Manager) HasActiveProcess(sessionID DeckSessionID) bool {
-	return m.Supervisor.IsAlive(sessionID)
+	return m.backend.IsActive(sessionID)
 }
 
 // ResizeSession updates the PTY process and virtual terminal emulator dimensions.
 // Claude Code re-renders its Ink UI for the new size.
 func (m *Manager) ResizeSession(sessionID DeckSessionID, cols, rows int) {
 	debuglog.Printf("[resize] session=%s cols=%d rows=%d", sessionID, cols, rows)
-	m.Supervisor.Resize(sessionID, uint16(cols), uint16(rows))
+	m.backend.Resize(sessionID, uint16(cols), uint16(rows))
 
 	if sess := m.GetSession(sessionID); sess != nil {
 		sess.ResizeDisplay(cols, rows)

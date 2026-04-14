@@ -41,10 +41,10 @@ func (m Model) View() tea.View {
 
 	// PTY 入力モード中はエミュレータのカーソル位置に TUI カーソルを配置する。
 	// これにより Ghostty のカーソルが Claude の入力行に正しく表示される。
-	// selectedSess.GetPTYCursorPosition() は atomic 読み取りのみでロック不要。
-	if m.ptyInputActive && m.selectedSess != nil && m.selectedSnap != nil &&
+	// selectedPTY.GetPTYCursorPosition() は atomic 読み取りのみでロック不要。
+	if m.ptyInputActive && m.selectedPTY != nil && m.selectedSnap != nil &&
 		m.selectedSnap.Display == session.DisplayPTY && m.mode == viewDashboard {
-		cursorX, cursorDisplayRow := m.selectedSess.GetPTYCursorPosition()
+		cursorX, cursorDisplayRow := m.selectedPTY.GetPTYCursorPosition()
 		_, _, ptyHeight, _ := m.detailPaneMetrics()
 		cursorViewportRow := cursorDisplayRow - m.ptyViewport.YOffset()
 		if cursorViewportRow >= 0 && cursorViewportRow < ptyHeight {

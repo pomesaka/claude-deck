@@ -7,7 +7,6 @@ import (
 
 	"github.com/charmbracelet/glamour"
 
-	"github.com/pomesaka/claude-deck/internal/session"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
@@ -15,34 +14,6 @@ import (
 type renderCache struct {
 	key    string
 	result string
-}
-
-// ptyViewCache tracks which PTY display version was last rendered into
-// the ptyViewport. Used to skip redundant SetContentLines calls, avoiding
-// the expensive O(n) maxLineWidth scan over all scrollback lines.
-// sessionID and version must always be updated atomically (via update) to
-// prevent partial-update bugs — mirroring the renderCache key+result invariant.
-type ptyViewCache struct {
-	sessionID session.DeckSessionID
-	version   uint64
-}
-
-// isUpToDate returns true when the cached session and version match, meaning
-// the ptyViewport content is already current and SetContentLines can be skipped.
-//
-// Edge case: a brand-new session starts with displayVersion==0 before its first
-// paint. A stale cache entry for the same sessionID would also have version==0
-// (from a prior session that was deleted before ever painting). This is harmless
-// because ptyViewCache.sessionID changes when the selected session changes, so
-// isUpToDate returns false on every session switch regardless of version.
-func (c ptyViewCache) isUpToDate(sid session.DeckSessionID, ver uint64) bool {
-	return c.sessionID == sid && c.version == ver
-}
-
-// update records the session and version after SetContentLines has been called.
-func (c *ptyViewCache) update(sid session.DeckSessionID, ver uint64) {
-	c.sessionID = sid
-	c.version = ver
 }
 
 // RenderLogs renders structured log entries into a styled string.

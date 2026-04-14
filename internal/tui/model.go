@@ -26,6 +26,53 @@ const (
 	viewSelectRepo
 )
 
+// ptyViewCache tracks which PTY display version was last rendered into the
+// ptyViewport. Used to skip redundant SetContentLines calls, avoiding the
+// expensive O(n) maxLineWidth scan over all scrollback lines.
+// sessionID and version must always be updated atomically (via update) to
+// prevent partial-update bugs — mirroring the renderCache key+result invariant.
+//
+// Placed in model.go (not logrender.go) because it is a PTY viewport tracking
+// concern, independent of JSONL log rendering.
+type ptyViewCache struct {
+	sessionID session.DeckSessionID
+	version   uint64
+}
+
+// isUpToDate returns true when the cached session and version match, meaning
+// the ptyViewport content is already current and SetContentLines can be skipped.
+//
+// Edge case: a brand-new session starts with displayVersion==0 before its first
+// paint. A stale cache entry for the same sessionID would also have version==0
+// (from a prior session that was deleted before ever painting). This is harmless
+// because ptyViewCache.sessionID changes when the selected session changes, so
+// isUpToDate returns false on every session switch regardless of version.
+func (c ptyViewCache) isUpToDate(sid session.DeckSessionID, ver uint64) bool {
+	return c.sessionID == sid && c.version == ver
+}
+
+// update records the session and version after SetContentLines has been called.
+func (c *ptyViewCache) update(sid session.DeckSessionID, ver uint64) {
+	c.sessionID = sid
+	c.version = ver
+}
+
+// ptyAtomicView is the read-only PTY handle exposed to View() for the currently
+// selected session. It wraps *session.Session but exposes only lock-free atomic
+// accessors — methods that acquire session.mu, session.rt.mu, or display.emuMu
+// must NOT appear here.
+//
+// This structural constraint prevents callers from accidentally reaching locked
+// Session methods through the View() path, which would reintroduce the convoy
+// effect that causes TUI freezes during rapid mouse scroll.
+type ptyAtomicView struct {
+	sess *session.Session
+}
+
+func (v *ptyAtomicView) GetPTYCursorPosition() (int, int) { return v.sess.GetPTYCursorPosition() }
+func (v *ptyAtomicView) GetDisplayVersion() uint64        { return v.sess.GetDisplayVersion() }
+func (v *ptyAtomicView) GetPTYDisplayLines() []string     { return v.sess.GetPTYDisplayLines() }
+
 // Model is the Bubble Tea model for the TUI.
 type Model struct {
 	manager *session.Manager
@@ -88,12 +135,13 @@ type Model struct {
 	// viewSnaps[i] is a snapshot of visibleSessions()[i] and shares the same
 	// index space as m.cursor. Sorting or filtering changes must always be
 	// followed by refreshViewData() to keep this invariant.
-	viewSnaps      []session.Snapshot
-	selectedSnap   *session.Snapshot // snapshot for the selected session (nil = no selection)
-	// selectedSess holds the live *Session pointer solely for lock-free PTY atomic
-	// APIs (GetPTYCursorPosition, GetDisplayVersion, GetPTYDisplayLines) that cannot
-	// be served by the value-type selectedSnap. Not used for any locked access.
-	selectedSess   *session.Session
+	viewSnaps    []session.Snapshot
+	selectedSnap *session.Snapshot // snapshot for the selected session (nil = no selection)
+	// selectedPTY provides lock-free PTY atomic access for View() rendering.
+	// It exposes only atomic accessors (GetPTYCursorPosition, GetDisplayVersion,
+	// GetPTYDisplayLines) — methods that acquire any lock must NOT be called through it.
+	// See ptyAtomicView for why a wrapper type is used instead of *session.Session.
+	selectedPTY    *ptyAtomicView
 	attentionCount int // sessions with Status.NeedsAttention() == true
 
 	quitting bool
@@ -415,7 +463,7 @@ func (m *Model) refreshSessions() {
 // shares the same index space as m.cursor. Always call refreshViewData() after
 // any change to session order, filter text, or the visible session set.
 //
-// Note: selectedSnap/selectedSess are updated by updateSelected() → refreshSelectedSnap()
+// Note: selectedSnap/selectedPTY are updated by updateSelected() → refreshSelectedSnap()
 // whenever the selection changes. refreshViewData() intentionally does NOT call
 // refreshSelectedSnap() again to avoid the double-call when coming through
 // refreshSessions() → updateSelected() → refreshSelectedSnap() → refreshViewData().
@@ -438,7 +486,7 @@ func (m *Model) refreshViewData() {
 	m.viewSnaps = snaps
 }
 
-// refreshSelectedSnap updates selectedSnap and selectedSess for the current selectedID.
+// refreshSelectedSnap updates selectedSnap and selectedPTY for the current selectedID.
 // Called from updateSelected() on cursor movement — a fast partial update that avoids
 // re-scanning all sessions (unlike the full refreshViewData).
 func (m *Model) refreshSelectedSnap() {
@@ -446,12 +494,12 @@ func (m *Model) refreshSelectedSnap() {
 		if sess := m.manager.GetSession(m.selectedID); sess != nil {
 			snap := sess.Snapshot()
 			m.selectedSnap = &snap
-			m.selectedSess = sess
+			m.selectedPTY = &ptyAtomicView{sess: sess}
 			return
 		}
 	}
 	m.selectedSnap = nil
-	m.selectedSess = nil
+	m.selectedPTY = nil
 }
 
 // selectedDisplayChannel returns the DisplayChannel for the currently selected session.
@@ -500,7 +548,7 @@ func (m *Model) updateSelected() {
 		m.ptyFollow = true
 		// 選択中のセッションだけ JSONL ストリーミングを開始
 		m.manager.StreamSession(m.selectedID)
-		// 選択変更 → selectedSnap/selectedSess を即座に更新
+		// 選択変更 → selectedSnap/selectedPTY を即座に更新
 		m.refreshSelectedSnap()
 		m.syncLogViewport()
 	}
