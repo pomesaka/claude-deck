@@ -99,6 +99,11 @@ func (m Model) renderMain() string {
 		contentHeight = 3
 	}
 
+	// splitMode: list-only — detail pane は右の tmux ペインが担う
+	if m.backendMode.IsSplit() {
+		return m.renderSessionList(m.width, contentHeight)
+	}
+
 	// リスト非表示時はペイン間スペースが不要なので frameOverhead を引かない。
 	available := m.width
 	if m.layout.IsListVisible() {
@@ -456,10 +461,25 @@ func (m Model) renderDetailPane(width, height int) string {
 		sections = append(sections, m.logViewport.View())
 
 	case session.DisplayNone:
-		// 外部ターミナルがホスト中 → プレースホルダ
-		sections = append(sections, titleStyle.Render(truncate(fmt.Sprintf("📋 %s (%s)", snap.Name, snap.RepoName), innerWidth)))
+		// tmux window is showing live Claude Code output — display metadata only.
+		title := fmt.Sprintf("📋 %s (%s)", snap.Name, snap.RepoName)
+		sections = append(sections, titleStyle.Render(truncate(title, innerWidth)))
+		sections = append(sections, dimStyle.Render(truncate(fmt.Sprintf("   パス: %s", snap.WorkspacePath), innerWidth)))
 		sections = append(sections, "")
-		sections = append(sections, dimStyle.Render("  外部ターミナルで表示中"))
+		sections = append(sections, dimStyle.Render("  tmux ウィンドウで表示中"))
+		sections = append(sections, "")
+		if snap.CurrentTool != "" {
+			sections = append(sections, statusRunningStyle.Render(truncate(fmt.Sprintf("   🔧 %s", snap.CurrentTool), innerWidth)))
+		}
+		if snap.Status.NeedsAttention() {
+			sections = append(sections, statusApproveStyle.Render(truncate("   👆 承認待ち — tmux ウィンドウで操作してください", innerWidth)))
+		}
+		if snap.TokenUsage.TotalTokens() > 0 {
+			tokenInfo := fmt.Sprintf("   トークン: %s  $%.2f",
+				formatTokens(snap.TokenUsage.InputTokens, snap.TokenUsage.OutputTokens),
+				snap.TokenUsage.EstimatedCostUSD)
+			sections = append(sections, dimStyle.Render(truncate(tokenInfo, innerWidth)))
+		}
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, sections...)
@@ -476,6 +496,8 @@ func (m Model) renderFooter() string {
 		helpText = "Enter:確定 Esc:キャンセル"
 	} else if m.filterText != "" {
 		helpText = fmt.Sprintf("フィルタ: %s / Esc:解除 ?:ヘルプ", m.filterText)
+	} else if m.backendMode.IsSplit() {
+		helpText = "j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter:入力 r:再開 f:フォーク t:ターミナル R:再描画 dd:削除 x:終了 C-c:quit"
 	} else {
 		helpText = "h/l:ペイン切替 j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter/i:入力/再開 r:再開 f:フォーク t:ターミナル R:再描画 dd:削除 x:終了 C-e:レイアウト C-c:quit"
 	}

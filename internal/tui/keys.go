@@ -58,7 +58,8 @@ func (m *Model) handleDashboardKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 
 	// TODO: config.toml の keybind 設定に対応する
-	if msg.String() == "ctrl+e" {
+	// split mode ではレイアウトサイクルは不要（常にリスト表示のみ）
+	if msg.String() == "ctrl+e" && !m.backendMode.IsSplit() {
 		m.layout.CycleMode()
 		m.syncLogViewport()
 		return nil
@@ -74,8 +75,9 @@ func (m *Model) handleDashboardKey(msg tea.KeyPressMsg) tea.Cmd {
 				m.viewportGotoTop(display)
 			} else {
 				m.cursor = 0
-				m.updateSelected()
+				cmds := m.updateSelected()
 				m.ensureCursorVisible()
+				return tea.Batch(cmds...)
 			}
 			return nil
 		}
@@ -92,7 +94,8 @@ func (m *Model) handleDashboardKey(msg tea.KeyPressMsg) tea.Cmd {
 		// Not dd or dD — fall through to normal handling
 	}
 
-	if m.layout.IsDetailFocused() {
+	// split mode ではリストが常にフォーカスされる（detail ペインは右の tmux ウィンドウ）
+	if !m.backendMode.IsSplit() && m.layout.IsDetailFocused() {
 		if cmd, handled := m.handleDetailPaneKey(msg, display); handled {
 			return cmd
 		}
@@ -116,11 +119,9 @@ func (m *Model) handleFilterKey(msg tea.KeyPressMsg) tea.Cmd {
 	default:
 		var cmd tea.Cmd
 		m.filterInput, cmd = m.filterInput.Update(msg)
-		m.clampCursorToVisible()
-		return cmd
+		return tea.Batch(append(m.clampCursorToVisible(), cmd)...)
 	}
-	m.clampCursorToVisible()
-	return nil
+	return tea.Batch(m.clampCursorToVisible()...)
 }
 
 // handleDetailPaneKey processes scroll keys when the detail pane is focused.
@@ -154,18 +155,19 @@ func (m *Model) handleDetailPaneKey(msg tea.KeyPressMsg, display session.Display
 // handleListKey processes navigation and command keys in the session list.
 func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChannel) tea.Cmd {
 	key := msg.String()
+	var cmds []tea.Cmd
 	switch key {
 	case "j", "down":
 		if m.cursor < len(m.visibleSessions())-1 {
 			m.cursor++
-			m.updateSelected()
+			cmds = append(cmds, m.updateSelected()...)
 			m.ensureCursorVisible()
 		}
 
 	case "k", "up":
 		if m.cursor > 0 {
 			m.cursor--
-			m.updateSelected()
+			cmds = append(cmds, m.updateSelected()...)
 			m.ensureCursorVisible()
 		}
 
@@ -173,7 +175,7 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 		visible := m.visibleSessions()
 		if len(visible) > 0 {
 			m.cursor = len(visible) - 1
-			m.updateSelected()
+			cmds = append(cmds, m.updateSelected()...)
 			m.ensureCursorVisible()
 		}
 
@@ -184,19 +186,25 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 		m.layout.FocusList()
 
 	case "l", "right":
-		m.layout.FocusDetail()
+		// split mode では l キーは無効（detail ペインは右の tmux ウィンドウ）
+		if !m.backendMode.IsSplit() {
+			m.layout.FocusDetail()
+		}
 
 	case "tab":
 		if !m.layout.IsDetailFocused() {
-			// リストフォーカス時: 次の approve/answer 待ちセッションへジャンプして PTY 入力開始
+			// リストフォーカス時: 次の approve/answer 待ちセッションへジャンプ
 			if idx := m.findNextAttentionSession(); idx >= 0 {
 				m.cursor = idx
-				m.updateSelected()
+				cmds = append(cmds, m.updateSelected()...)
 				m.ensureCursorVisible()
 				m.layout.FocusDetail()
-				m.ptyInputActive = true
+				// tmux mode: interact via tmux client, not PTY input.
+				if !m.backendMode.IsTmuxLike() {
+					m.ptyInputActive = true
+				}
 				m.syncLogViewport()
-				return nil
+				return tea.Batch(cmds...)
 			}
 		}
 		m.layout.ToggleFocus()
@@ -206,7 +214,20 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 
 	case "enter", "i":
 		// 生きた PTY プロセスあり → 詳細ペインに切り替えて PTY 直接入力モード開始
-		debuglog.Printf("[key:%s] selectedID=%q display=%v", key, m.selectedID, display)
+		debuglog.Printf("[key:%s] selectedID=%q display=%v tmuxMode=%v", key, m.selectedID, display, m.backendMode.IsTmuxLike())
+		if m.backendMode.IsTmuxLike() {
+			// tmux mode: focus the window in the tmux client.
+			// Completed sessions pressed with Enter → resume in a new tmux window.
+			if display == session.DisplayNone {
+				// 実行中セッション: tmux ウィンドウを前面に出し、
+				// Ghostty の右ペイン（tmux client）にフォーカスを移す。
+				return m.switchRightPane(m.selectedID, true)
+			}
+			if key == "enter" {
+				return m.resumeSelected()
+			}
+			return nil
+		}
 		if display == session.DisplayPTY {
 			debuglog.Printf("[key:%s] activating PTY input mode", key)
 			m.layout.FocusDetail()
@@ -251,8 +272,7 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 		if m.filterText != "" {
 			m.filterText = ""
 			m.filterInput.SetValue("")
-			m.clampCursorToVisible()
-			return nil
+			return tea.Batch(m.clampCursorToVisible()...)
 		}
 
 	case "?":
@@ -260,18 +280,20 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 		return clearStatusCmd()
 	}
 
-	return nil
+	return tea.Batch(cmds...)
 }
 
 // clampCursorToVisible ensures the cursor index is within the visible session list,
 // then updates the selected session and scroll position.
-func (m *Model) clampCursorToVisible() {
+// Returns any tea.Cmd produced by updateSelected (e.g. switchRightPane in tmux mode).
+func (m *Model) clampCursorToVisible() []tea.Cmd {
 	visible := m.visibleSessions()
 	if m.cursor >= len(visible) {
 		m.cursor = max(0, len(visible)-1)
 	}
-	m.updateSelected()
+	cmds := m.updateSelected()
 	m.ensureCursorVisible()
+	return cmds
 }
 
 // viewportGotoTop scrolls the active viewport to the top.

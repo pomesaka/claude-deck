@@ -13,6 +13,7 @@ type Config struct {
 	Defaults   DefaultConfig             `toml:"defaults"`
 	Discovery  DiscoveryConfig           `toml:"discovery"`
 	Ghostty    GhosttyConfig             `toml:"ghostty"`
+	Tmux       TmuxConfig                `toml:"tmux"`
 	Keybinds   KeybindConfig             `toml:"keybinds"`
 	Theme      ThemeConfig               `toml:"theme"`
 	Commands   CommandsConfig            `toml:"commands"`
@@ -89,7 +90,20 @@ type DefaultConfig struct {
 
 // GhosttyConfig holds Ghostty terminal settings.
 type GhosttyConfig struct {
-	Command string `toml:"command"`
+	Command  string `toml:"command"`
+	// DeckWidth is the pixel width of the left (claude-deck list) pane when
+	// using Ghostty split mode.  The right pane (tmux attach) gets the remainder.
+	DeckWidth int `toml:"deck_width"`
+}
+
+// TmuxConfig holds settings for the tmux process management backend.
+// When Enabled is true, claude-deck launches each Claude Code session as a
+// tmux window instead of an embedded PTY.  Users see live output by attaching
+// to the tmux session (e.g. `tmux attach -t claude-deck`) in a second pane.
+type TmuxConfig struct {
+	Enabled     bool   `toml:"enabled"`
+	Command     string `toml:"command"`       // tmux binary path; defaults to "tmux"
+	SessionName string `toml:"session_name"`  // tmux session name; defaults to "claude-deck"
 }
 
 // KeybindConfig allows overriding default keybindings.
@@ -134,7 +148,8 @@ func Default() *Config {
 			Excludes: []string{"Library", ".cache", "node_modules", ".git"},
 		},
 		Ghostty: GhosttyConfig{
-			Command: "ghostty",
+			Command:   "ghostty",
+			DeckWidth: 400,
 		},
 		Keybinds: KeybindConfig{
 			NewSession: "n",

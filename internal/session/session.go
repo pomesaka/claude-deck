@@ -2,7 +2,9 @@ package session
 
 import (
 	"bytes"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pomesaka/claude-deck/internal/debuglog"
@@ -147,6 +149,28 @@ func (h HostingMode) String() string {
 	}
 }
 
+// RunningProcess is the runtime context for an active process managed by Manager.
+// It exists only while a process is alive; Session.process is nil when no process is running.
+//
+// display == nil → External hosting: an external terminal (tmux, Ghostty, etc.) owns the PTY.
+//
+//	claude-deck tracks metadata only via JSONL and hooks.
+//
+// display != nil → Embedded hosting: claude-deck owns the PTY.
+//
+//	Output is captured, emulated, and displayed in the TUI.
+//
+// PID is stored on Session itself (persisted for restart recovery).
+// RunningProcess carries only transient runtime state.
+type RunningProcess struct {
+	display *PTYDisplay
+}
+
+// IsEmbedded reports whether claude-deck owns the PTY for this process.
+func (rp *RunningProcess) IsEmbedded() bool {
+	return rp.display != nil
+}
+
 // DisplayChannel describes what data source should be used to render a
 // session's detail pane. Derived from the session's current state rather
 // than stored — it's a projection, not persisted data.
@@ -201,6 +225,19 @@ type TokenUsage struct {
 // TotalTokens returns the sum of input and output tokens.
 func (t TokenUsage) TotalTokens() int {
 	return t.InputTokens + t.OutputTokens
+}
+
+// TokenUsageFromStats converts a usage.TokenStats (read from JSONL) to a
+// TokenUsage Value Object. Centralises the field mapping between the two types
+// so callers don't need to know the structural isomorphism.
+func TokenUsageFromStats(s usage.TokenStats) TokenUsage {
+	return TokenUsage{
+		InputTokens:              s.InputTokens,
+		OutputTokens:             s.OutputTokens,
+		CacheCreationInputTokens: s.CacheCreationInputTokens,
+		CacheReadInputTokens:     s.CacheReadInputTokens,
+		EstimatedCostUSD:         s.EstimatedCostUSD,
+	}
 }
 
 // Add returns a new TokenUsage with input and output tokens incremented.
@@ -289,40 +326,51 @@ type Session struct {
 	LastActivity   time.Time  `json:"last_activity,omitzero"`
 	TokenUsage     TokenUsage `json:"token_usage,omitzero"`
 
-	// --- Runtime fields (not persisted, protected by sess.mu) ---
+	// --- Runtime fields (not persisted, protected by sess.mu unless noted) ---
 	CurrentTool  string `json:"-"` // パーサー検出中のツール名
 	ErrorMessage string `json:"-"` // パーサーが検知したエラー行
-	Hosting      HostingMode        // PTY ホスティング戦略（起動時に決定、不変）
-	managed      bool               // Manager が PTY プロセスを管理中かどうか
 
-	// display は PTY エミュレータの表示インフラ。HostEmbedded のみ非 nil。
-	// HostExternal セッションは外部ターミナルが PTY を管理するため nil。
-	display *PTYDisplay
+	// process は非 nil の間だけプロセスが生存中であることを表す。
+	// nil = 停止中（Completed/Error/未起動）
+	// non-nil = プロセス生存中（Backend が StartProcess で attach する）
+	//
+	// AppendRaw などの高頻度書き込みパスが mu なしで読めるよう atomic.Pointer を使う。
+	// （mu を保持したまま display.Write を呼ぶと emuMu との逆順デッドロックが起きるため）
+	// AttachProcess / DetachProcess 以外では直接 Store/Swap しないこと。
+	process atomic.Pointer[RunningProcess]
 }
 
 // displayChannelLocked returns the appropriate display data source for this session.
-// Must be called with mu held (at least for reading), or use Snapshot.DisplayChannel.
+// Must be called with mu held (at least for reading) for Status/Hosting, but reads
+// process via atomic load (safe without mu).
 func (s *Session) displayChannelLocked() DisplayChannel {
-	if s.Hosting == HostExternal {
-		if s.managed {
-			return DisplayNone // external terminal is showing live output
-		}
-		return DisplayJSONL // external session finished, show logs
+	p := s.process.Load()
+	if p == nil {
+		return DisplayJSONL // no active process → show structured logs
 	}
-	// Embedded hosting
-	if s.managed {
-		return DisplayPTY
+	if p.IsEmbedded() {
+		return DisplayPTY // claude-deck owns PTY → live emulator output
 	}
-	return DisplayJSONL
+	return DisplayNone // external terminal owns PTY → user interacts there
 }
 
-// Phase returns the high-level lifecycle phase derived from Status and managed flag.
-// Must be called with mu held (at least for reading), or use Snapshot.Phase.
+// hostingLocked returns the hosting mode derived from the current process state.
+// HostEmbedded when an embedded process is running (display != nil), HostExternal otherwise.
+// Reads process via atomic load; calling with mu held is safe.
+func (s *Session) hostingLocked() HostingMode {
+	if rp := s.process.Load(); rp != nil && rp.IsEmbedded() {
+		return HostEmbedded
+	}
+	return HostExternal
+}
+
+// phaseLocked returns the high-level lifecycle phase derived from Status and process state.
+// Must be called with mu held (at least for reading) for Status.
 func (s *Session) phaseLocked() SessionPhase {
 	if s.Status == StatusUnmanaged {
 		return PhaseExternal
 	}
-	if s.Status.IsTerminal() && !s.managed {
+	if s.Status.IsTerminal() && s.process.Load() == nil {
 		return PhaseArchived
 	}
 	return PhaseActive
@@ -387,38 +435,53 @@ func (s *Session) SetCurrentTool(tool string) {
 	s.CurrentTool = tool
 }
 
-// SetManaged updates whether the session has an active PTY process managed by Manager.
-func (s *Session) SetManaged(v bool) {
+// AttachProcess records that a process has started for this session.
+// display is non-nil for Embedded hosting (claude-deck owns the PTY),
+// or nil for External hosting (external terminal owns the PTY).
+//
+// Callers in the session package (ptyBackend, tmuxBackend) call this directly.
+// Manager does NOT call this — backends own the attachment lifecycle.
+//
+// Must NOT be called with mu held.
+func (s *Session) AttachProcess(pid int, display *PTYDisplay) {
+	rp := &RunningProcess{display: display}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.managed = v
+	if pid != 0 {
+		s.PID = pid
+	}
+	s.mu.Unlock()
+	s.process.Store(rp)
 }
 
-// InitDisplay creates a PTYDisplay for this session with the given dimensions.
-// Called by Manager when starting a new PTY process. maxScrollback of 0 uses the default (2000).
-func (s *Session) InitDisplay(cols, rows, maxScrollback int) {
-	sid := string(s.ID)
-	d := newPTYDisplay(sid, cols, rows, maxScrollback, func(title string) {
-		// Bridge title changes back to Session.TerminalTitle (under mu).
+// SetPID stores the OS process ID after the process has started.
+// Used by ptyBackend: AttachProcess(0, display) before pty.Start (to wire
+// the display before the output goroutine runs), then SetPID after pty.Start.
+func (s *Session) SetPID(pid int) {
+	s.mu.Lock()
+	s.PID = pid
+	s.mu.Unlock()
+}
+
+// DetachProcess clears the running process context.
+// Called by Manager when a process exits.
+func (s *Session) DetachProcess() {
+	s.process.Store(nil)
+}
+
+// NewDisplay creates a PTYDisplay for Embedded hosting, wired to TerminalTitle updates.
+// Manager calls this before attaching a process in Embedded mode.
+func (s *Session) NewDisplay(cols, rows, maxScrollback int) *PTYDisplay {
+	return newPTYDisplay(string(s.ID), cols, rows, maxScrollback, func(title string) {
 		s.mu.Lock()
 		s.TerminalTitle = title
 		s.mu.Unlock()
 	})
-	s.display = d
 }
 
-// ResetDisplay recreates the PTYDisplay emulator for Resume/Fork.
-// Preserves the existing PTYDisplay but resets its internal state.
-func (s *Session) ResetDisplay(cols, rows int) {
-	if s.display != nil {
-		s.display.Reset(cols, rows)
-	}
-}
-
-// ResizeDisplay resizes the PTYDisplay emulator to match new terminal dimensions.
+// ResizeDisplay resizes the embedded PTY display, if any.
 func (s *Session) ResizeDisplay(cols, rows int) {
-	if s.display != nil {
-		s.display.Resize(cols, rows)
+	if rp := s.process.Load(); rp != nil && rp.display != nil {
+		rp.display.Resize(cols, rows)
 	}
 }
 
@@ -459,12 +522,12 @@ func (s *Session) AddTokens(input, output int) {
 // AppendRaw feeds a raw PTY output chunk to the virtual terminal emulator and
 // appends any newline-delimited lines to LogLines.
 //
-// PTYDisplay.Write handles the emulator part (if display is non-nil).
+// PTYDisplay.Write handles the emulator part (Embedded only).
 // LogLines update uses rt.mu independently.
 func (s *Session) AppendRaw(data []byte) {
-	// Step 1: emulator (display infrastructure, independent of rt.mu)
-	if s.display != nil {
-		s.display.Write(data)
+	// Step 1: emulator (atomic load — must not hold mu here due to emuMu→mu lock order)
+	if rp := s.process.Load(); rp != nil && rp.display != nil {
+		rp.display.Write(data)
 	}
 
 	// Step 2: LogLines を更新（rt.mu 保持）
@@ -490,9 +553,9 @@ func (s *Session) AppendRaw(data []byte) {
 // AppendLog adds a single line to the session log and feeds it to the emulator.
 // テスト互換性のため残す。プロダクションコードは AppendRaw を使う。
 func (s *Session) AppendLog(line string) {
-	// Step 1: emulator (display infrastructure)
-	if s.display != nil {
-		s.display.WriteLine(line)
+	// Step 1: emulator (atomic load — must not hold mu here due to emuMu→mu lock order)
+	if rp := s.process.Load(); rp != nil && rp.display != nil {
+		rp.display.WriteLine(line)
 	}
 
 	// Step 2: LogLines を更新（rt.mu 保持）
@@ -564,10 +627,9 @@ type Snapshot struct {
 	// Derived from len(SessionChain) - 1.
 	ClearCount        int
 	Phase             SessionPhase
-	Hosting           HostingMode
+	Hosting           HostingMode // derived from process state: HostEmbedded or HostExternal
 	Display           DisplayChannel
 	Status            Status
-	Managed           bool
 	Prompt            string
 	PermissionMode    string
 	StartedAt    time.Time
@@ -621,10 +683,9 @@ func (s *Session) Snapshot() Snapshot {
 		ClaudeSessionID:   s.CurrentClaudeID(),
 		ClearCount:        max(0, len(s.SessionChain)-1),
 		Phase:             s.phaseLocked(),
-		Hosting:           s.Hosting,
+		Hosting:           s.hostingLocked(),
 		Display:           s.displayChannelLocked(),
 		Status:            s.Status,
-		Managed:           s.managed,
 		Prompt:            s.Prompt,
 		PermissionMode:    s.PermissionMode,
 		StartedAt:    s.StartedAt,
@@ -687,6 +748,20 @@ func (s *Session) getName() string {
 	return s.Name
 }
 
+// MatchesFilter reports whether the session matches the given filter text.
+// Matching is case-insensitive substring search over "repoPath/name".
+// An empty text always matches (no filter applied).
+// Uses a targeted RLock on RepoPath+Name only, avoiding a full Snapshot() call.
+func (s *Session) MatchesFilter(text string) bool {
+	if text == "" {
+		return true
+	}
+	s.mu.RLock()
+	target := strings.ToLower(s.RepoPath + "/" + s.Name)
+	s.mu.RUnlock()
+	return strings.Contains(target, text)
+}
+
 // sortTime returns the best available timestamp for chronological sorting.
 func (s *Session) sortTime() time.Time {
 	s.mu.RLock()
@@ -724,7 +799,8 @@ func (s *Session) sortGroup() int {
 }
 
 // NewSession creates a new session with the given parameters.
-// Hosting defaults to HostEmbedded; callers may set HostExternal before launch.
+// Hosting mode is determined at launch time by AttachProcess:
+// pass a non-nil PTYDisplay for Embedded, nil for External.
 func NewSession(repoPath, repoName string) *Session {
 	s := &Session{
 		ID:            GenerateSessionID(),
@@ -734,28 +810,7 @@ func NewSession(repoPath, repoName string) *Session {
 		TerminalTitle: "New Session",
 		Status:        StatusIdle,
 		StartedAt:     time.Now(),
-		Hosting:       HostEmbedded,
 	}
 	s.rt.LogLines = make([]string, 0, 256)
-	// PTYDisplay is created by Manager when the PTY process starts
-	// with the correct terminal dimensions.
-	return s
-}
-
-// NewExternalSession creates a session for external PTY hosting.
-// No emulator is allocated — the external terminal handles PTY rendering.
-func NewExternalSession(repoPath, repoName string) *Session {
-	s := &Session{
-		ID:            GenerateSessionID(),
-		Name:          GenerateWorkspaceName(),
-		RepoPath:      repoPath,
-		RepoName:      repoName,
-		TerminalTitle: "New Session",
-		Status:        StatusIdle,
-		StartedAt:     time.Now(),
-		Hosting:       HostExternal,
-	}
-	s.rt.LogLines = make([]string, 0, 256)
-	// No PTYDisplay — external terminal handles PTY rendering.
 	return s
 }

@@ -72,13 +72,21 @@ func newPTYDisplay(sessionID string, cols, rows, maxScrollback int, onTitle func
 	}
 
 	em := vt.NewEmulator(cols, rows)
-
-	// Drain DA1/DA2 responses to prevent blocking (unbuffered io.Pipe).
 	go io.Copy(io.Discard, em) //nolint:errcheck
+	applyEmulatorCallbacks(d, em)
+	d.emulator = em
+	return d
+}
 
+// applyEmulatorCallbacks wires the Title, ScrollOut, and CursorVisibility
+// callbacks on em. Called from both newPTYDisplay and Reset so the logic
+// lives in one place — avoiding drift between the two initialisation paths.
+//
+// Must be called before any Write; em must not have received data yet.
+// All three callbacks fire under emuMu (via emulator.Write).
+func applyEmulatorCallbacks(d *PTYDisplay, em *vt.Emulator) {
 	em.SetCallbacks(vt.Callbacks{
 		Title: func(title string) {
-			// Called under emuMu (via emulator.Write).
 			if !utf8.ValidString(title) {
 				debuglog.Printf("[session:%s] OSC title invalid UTF-8, ignoring: %x", d.sessionID, title)
 				return
@@ -91,7 +99,6 @@ func newPTYDisplay(sessionID string, cols, rows, maxScrollback int, onTitle func
 			}
 		},
 		ScrollOut: func(plain, styled string) {
-			// Called under emuMu (via emulator.Write).
 			limit := d.maxScrollback
 			if limit <= 0 {
 				limit = 2000
@@ -110,7 +117,6 @@ func newPTYDisplay(sessionID string, cols, rows, maxScrollback int, onTitle func
 			d.scrollbackLen.Store(int32(len(d.scrollbackStyled)))
 		},
 		CursorVisibility: func(visible bool) {
-			// Called under emuMu (via emulator.Write).
 			if !visible {
 				return
 			}
@@ -121,9 +127,6 @@ func newPTYDisplay(sessionID string, cols, rows, maxScrollback int, onTitle func
 			debuglog.Printf("[session:%s] stableCursor: x=%d screenY=%d", d.sessionID, pos.X, pos.Y)
 		},
 	})
-
-	d.emulator = em
-	return d
 }
 
 // Write feeds raw PTY output to the emulator and updates the display cache.
@@ -172,50 +175,7 @@ func (d *PTYDisplay) Reset(cols, rows int) {
 
 	em := vt.NewEmulator(cols, rows)
 	go io.Copy(io.Discard, em) //nolint:errcheck
-
-	em.SetCallbacks(vt.Callbacks{
-		Title: func(title string) {
-			if !utf8.ValidString(title) {
-				debuglog.Printf("[session:%s] OSC title invalid UTF-8, ignoring: %x", d.sessionID, title)
-				return
-			}
-			clean := stripSpinnerPrefix(title)
-			debuglog.Printf("[session:%s] OSC title raw=%q clean=%q", d.sessionID, title, clean)
-			d.title = clean
-			if d.onTitle != nil {
-				d.onTitle(clean)
-			}
-		},
-		ScrollOut: func(plain, styled string) {
-			limit := d.maxScrollback
-			if limit <= 0 {
-				limit = 2000
-			}
-			d.scrollbackPlain = append(d.scrollbackPlain, plain)
-			d.scrollbackStyled = append(d.scrollbackStyled, styled)
-			if len(d.scrollbackPlain) > limit {
-				drop := len(d.scrollbackPlain) - limit
-				newPlain := make([]string, limit)
-				copy(newPlain, d.scrollbackPlain[drop:])
-				d.scrollbackPlain = newPlain
-				newStyled := make([]string, limit)
-				copy(newStyled, d.scrollbackStyled[drop:])
-				d.scrollbackStyled = newStyled
-			}
-			d.scrollbackLen.Store(int32(len(d.scrollbackStyled)))
-		},
-		CursorVisibility: func(visible bool) {
-			if !visible {
-				return
-			}
-			pos := em.CursorPosition()
-			d.stableCursorX.Store(int32(pos.X))
-			d.stableCursorScreenY.Store(int32(pos.Y))
-			d.stableCursorReady.Store(true)
-			debuglog.Printf("[session:%s] stableCursor: x=%d screenY=%d", d.sessionID, pos.X, pos.Y)
-		},
-	})
-
+	applyEmulatorCallbacks(d, em)
 	d.emulator = em
 
 	// Reset display cache so the TUI detects the screen as changed after Resume/Fork.

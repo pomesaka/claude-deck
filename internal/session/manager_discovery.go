@@ -77,13 +77,7 @@ func newExternalSession(info *usage.SessionInfo) *Session { //nolint:unparam
 		PermissionMode:  info.PermissionMode,
 		StartedAt:       info.StartedAt,
 		LastActivity:    info.LastActivity,
-		TokenUsage: TokenUsage{
-			InputTokens:              info.Tokens.InputTokens,
-			OutputTokens:             info.Tokens.OutputTokens,
-			CacheCreationInputTokens: info.Tokens.CacheCreationInputTokens,
-			CacheReadInputTokens:     info.Tokens.CacheReadInputTokens,
-			EstimatedCostUSD:         info.Tokens.EstimatedCostUSD,
-		},
+		TokenUsage: TokenUsageFromStats(info.Tokens),
 	}
 	sess.rt.LogLines = make([]string, 0)
 	if !info.LastActivity.IsZero() {

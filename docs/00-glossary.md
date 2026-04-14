@@ -53,44 +53,49 @@ Claude Code 側が割り振る UUID。`/clear` のたびに新しい ID が生�
 
 ### SessionPhase
 
-Status + managed フラグから導出される粗粒度のライフサイクル段階。TUI や Manager の条件分岐を単純化するための概念。
+RunningProcess と Status から導出される粗粒度のライフサイクル段階。TUI や Manager の条件分岐を単純化するための概念。
 
 | 値 | 意味 | 導出条件 |
 |----|------|----------|
-| Active | PTY プロセスが生存中 | managed=true |
-| Archived | 完了済み (Completed/Error) | IsTerminal && !managed |
+| Active | プロセスが生存中、または未完了 | Status=Unmanaged 以外 かつ (IsTerminal でない OR RunningProcess あり) |
+| Archived | 完了済み (Completed/Error) でプロセスなし | IsTerminal && RunningProcess == nil |
 | External | JSONL から発見、deck 未起動 | Status=Unmanaged |
 
 **型**: `session.SessionPhase`
 
+### RunningProcess
+
+実行中プロセスへのハンドルを束ねた Value Object。`display` フィールドの nil/non-nil で Embedded/External を区別する。  
+Session は `atomic.Pointer[RunningProcess]` として保持し、プロセス起動時に `AttachProcess(pid, display)` でセット、終了時に `DetachProcess()` でクリアする。
+
+- `display != nil` → **Embedded**: claude-deck が PTY を所有し、エミュレータで出力をキャプチャ
+- `display == nil` → **External**: 外部ターミナルが PTY を所有し、claude-deck はメタデータのみ追跡
+- `RunningProcess == nil` → プロセス未起動 or 終了済み
+
+**型**: `session.RunningProcess`
+
 ### HostingMode
 
-PTY プロセスを誰が管理するかの根本属性。セッション起動時に決定され、一生変わらない。
+detail pane に「誰がターミナルを所有しているか」を伝える導出値。RunningProcess から決まる (永続化しない)。
 
-| 値 | 意味 |
-|----|------|
-| HostEmbedded | claude-deck が PTY を所有。エミュレータで出力をキャプチャし、スピナー検知で Status を遷移させる |
-| HostExternal | 外部ターミナル (Ghostty, tmux 等) が PTY を所有。claude-deck はメタデータのみ追跡 |
+| 値 | 意味 | 導出条件 |
+|----|------|----------|
+| HostEmbedded | claude-deck が PTY を所有 | RunningProcess.display != nil |
+| HostExternal | 外部ターミナルが PTY を所有、またはプロセスなし | RunningProcess == nil or display == nil |
 
 **型**: `session.HostingMode`
 
 ### DisplayChannel
 
-detail pane に何を表示するかの投影。HostingMode と managed フラグから導出される (永続化しない)。
+detail pane に何を表示するかの投影。RunningProcess から導出される (永続化しない)。
 
 | 値 | 条件 | 表示内容 |
 |----|------|----------|
-| DisplayPTY | Embedded + managed | PTYDisplay のリアルタイム画面 |
-| DisplayJSONL | Embedded + !managed、または External + !managed | JSONL 構造化ログ |
-| DisplayNone | External + managed | 「外部ターミナルで表示中」プレースホルダ |
+| DisplayPTY | RunningProcess あり + display あり (Embedded) | PTYDisplay のリアルタイム画面 |
+| DisplayNone | RunningProcess あり + display なし (External) | 「外部ターミナルで表示中」プレースホルダ |
+| DisplayJSONL | RunningProcess なし | JSONL 構造化ログ |
 
 **型**: `session.DisplayChannel`
-
-### managed
-
-Session が PTY プロセスを持っているかを示すランタイムフラグ。Manager が PTY を起動すると true、プロセス終了で false。永続化しない。
-
-**フィールド**: `Session.managed bool` (非公開)
 
 ## データアーキテクチャ
 
@@ -123,8 +128,8 @@ Session のロックフリーな読み取りコピー。TUI レンダリング�
 
 PTY エミュレータの表示インフラをカプセル化した構造体。仮想端末 (vt.Emulator)、displayCache、scrollback、カーソル追跡を管理する。
 
-- HostEmbedded セッションのみ持つ (`Session.display *PTYDisplay`)
-- HostExternal セッションでは nil (型レベルで「表示インフラなし」を保証)
+- RunningProcess.display に格納される。Embedded セッションのみ non-nil
+- External セッションでは RunningProcess.display == nil (型レベルで「表示インフラなし」を保証)
 - `Write(data)` で PTY 出力を受け取り、`Lines()` で表示行を返す
 
 **型**: `session.PTYDisplay`

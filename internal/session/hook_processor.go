@@ -17,25 +17,25 @@ import (
 // シングルゴルーチン前提: Manager の event watcher goroutine のみが呼び出す。
 // mu 不要（pendingEnd は hookProcessor のみが読み書きする）。
 type hookProcessor struct {
-	pendingEnd map[string]*hooks.Event // keyed by ClaudeDeckSessionID
+	pendingEnd map[DeckSessionID]*hooks.Event
 }
 
 func newHookProcessor() *hookProcessor {
 	return &hookProcessor{
-		pendingEnd: make(map[string]*hooks.Event),
+		pendingEnd: make(map[DeckSessionID]*hooks.Event),
 	}
 }
 
 // storePending records a SessionEnd event awaiting its paired SessionStart.
 // 同一 deckSessionID で複数回呼ばれた場合は最新のイベントで上書きする。
-func (h *hookProcessor) storePending(deckSessionID string, ev *hooks.Event) {
+func (h *hookProcessor) storePending(deckSessionID DeckSessionID, ev *hooks.Event) {
 	h.pendingEnd[deckSessionID] = ev
 	debuglog.Printf("[hook-proc] storePending: deck=%s claude=%s reason=%s", deckSessionID, ev.SessionID, ev.Reason)
 }
 
 // consumePending takes and removes the pending SessionEnd for deckSessionID.
 // Returns nil if no pending event exists.
-func (h *hookProcessor) consumePending(deckSessionID string) *hooks.Event {
+func (h *hookProcessor) consumePending(deckSessionID DeckSessionID) *hooks.Event {
 	ev := h.pendingEnd[deckSessionID]
 	delete(h.pendingEnd, deckSessionID)
 	if ev != nil {
@@ -46,7 +46,7 @@ func (h *hookProcessor) consumePending(deckSessionID string) *hooks.Event {
 
 // hasPending reports whether a pending SessionEnd exists for deckSessionID.
 // テスト専用。
-func (h *hookProcessor) hasPending(deckSessionID string) bool {
+func (h *hookProcessor) hasPending(deckSessionID DeckSessionID) bool {
 	_, ok := h.pendingEnd[deckSessionID]
 	return ok
 }

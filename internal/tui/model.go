@@ -13,6 +13,7 @@ import (
 	"github.com/pomesaka/claude-deck/internal/config"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/ghostty"
+	"github.com/pomesaka/claude-deck/internal/preview"
 	"github.com/pomesaka/claude-deck/internal/ratelimits"
 	"github.com/pomesaka/claude-deck/internal/session"
 )
@@ -25,6 +26,31 @@ const (
 	viewDashboard viewMode = iota
 	viewSelectRepo
 )
+
+// TUIBackendMode describes how the TUI interacts with the process hosting environment.
+// It replaces the separate tmuxMode/splitMode boolean pair, capturing the constraint
+// that splitMode implies tmuxMode as a single value.
+type TUIBackendMode int
+
+const (
+	// BackendModeEmbedded is the default: PTY processes are embedded in the TUI.
+	// PTY input mode is available; detail pane shows live PTY output.
+	BackendModeEmbedded TUIBackendMode = iota
+	// BackendModeTmux hosts processes in tmux windows.
+	// PTY input mode is disabled; session switching fires tmux select-window.
+	BackendModeTmux
+	// BackendModeSplit combines tmux hosting with Ghostty split layout:
+	// the detail pane is hidden, the list takes full width, and cursor navigation
+	// drives the right tmux pane (preview window or session window).
+	BackendModeSplit
+)
+
+// IsTmuxLike reports whether the backend uses tmux for process hosting.
+// True for both BackendModeTmux and BackendModeSplit.
+func (m TUIBackendMode) IsTmuxLike() bool { return m != BackendModeEmbedded }
+
+// IsSplit reports whether the TUI is in Ghostty split layout mode.
+func (m TUIBackendMode) IsSplit() bool { return m == BackendModeSplit }
 
 // ptyViewCache tracks which PTY display version was last rendered into the
 // ptyViewport. Used to skip redundant SetContentLines calls, avoiding the
@@ -75,10 +101,11 @@ func (v *ptyAtomicView) GetPTYDisplayLines() []string     { return v.sess.GetPTY
 
 // Model is the Bubble Tea model for the TUI.
 type Model struct {
-	manager *session.Manager
-	config  *config.Config
-	ghostty *ghostty.Launcher
-	ctx     context.Context
+	manager     *session.Manager
+	config      *config.Config
+	ghostty     *ghostty.Launcher
+	ctx         context.Context
+	backendMode TUIBackendMode
 
 	width  int
 	height int
@@ -185,7 +212,19 @@ type ptyInputSentMsg struct {
 }
 
 // NewModel creates the initial TUI model.
-func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context) Model {
+// ModelOptions configures optional behaviour for the main list TUI.
+type ModelOptions struct {
+	// SplitMode puts the TUI into list-only mode: the detail pane is hidden and
+	// cursor navigation drives the right tmux pane instead.
+	// Automatically enabled when tmux mode is active and Ghostty is detected.
+	SplitMode bool
+}
+
+func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context, opts ...ModelOptions) Model {
+	var opt ModelOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(10))
 	vp.SetContent("")
 
@@ -215,25 +254,33 @@ func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context) Mod
 		refreshInterval = 5 * time.Second
 	}
 
-	m := Model{
-		manager:                mgr,
-		config:                 cfg,
-		ghostty:                ghostty.NewLauncher(cfg.Ghostty.Command),
-		ctx:                    ctx,
-		repoList:               rl,
-		logViewport:            vp,
-		ptyViewport:            pvp,
-		filterInput:            fi,
-		logFollow:              true,
-		ptyFollow:              true,
-		refreshInterval:        refreshInterval,
+	var backendMode TUIBackendMode
+	if opt.SplitMode {
+		backendMode = BackendModeSplit
+	} else if mgr.IsTmuxMode() {
+		backendMode = BackendModeTmux
 	}
 
-	m.refreshSessions()
+	m := Model{
+		manager:         mgr,
+		config:          cfg,
+		ghostty:         ghostty.NewLauncher(cfg.Ghostty.Command),
+		ctx:             ctx,
+		repoList:        rl,
+		logViewport:     vp,
+		ptyViewport:     pvp,
+		filterInput:     fi,
+		logFollow:       true,
+		ptyFollow:       true,
+		refreshInterval: refreshInterval,
+		backendMode:     backendMode,
+	}
+
+	m.refreshSessions() // cmds discarded — bubbletea event loop not yet running
 	// カーソル初期位置を最下部（最新セッション）に設定
 	if len(m.sessions) > 0 {
 		m.cursor = len(m.sessions) - 1
-		m.updateSelected()
+		m.updateSelected() // cmds discarded — bubbletea event loop not yet running
 		m.ensureCursorVisible()
 	}
 	return m
@@ -309,7 +356,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case SessionRefreshMsg:
 		debuglog.Printf("[tui] SessionRefreshMsg received changedIDs=%d", len(msg.ChangedIDs))
-		m.refreshSessions()
+		cmds = append(cmds, m.refreshSessions()...)
 		// 選択中のセッションが変更対象に含まれるか、ブロードキャストの場合のみ viewport 更新
 		if len(msg.ChangedIDs) == 0 || msg.ChangedIDs[m.selectedID] {
 			m.syncLogViewport()
@@ -329,9 +376,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusMsg = "新規セッションを作成しました"
 			m.selectedID = msg.sessionID
-			m.refreshSessions()
+			cmds = append(cmds, m.refreshSessions()...)
 			m.layout.FocusDetail()
-			m.ptyInputActive = true
+			if !m.backendMode.IsTmuxLike() {
+				m.ptyInputActive = true
+			} else {
+				// m.selectedID を refreshSessions() 前に設定するため updateSelected() で
+				// idChanged=false になる。switchRightPane で明示的に右ペインを切替する。
+				cmds = append(cmds, m.switchRightPane(msg.sessionID, true))
+			}
 		}
 		cmds = append(cmds, clearStatusCmd())
 
@@ -341,7 +394,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusMsg = "セッションを再開しました"
 			m.layout.FocusDetail()
-			m.ptyInputActive = true
+			if !m.backendMode.IsTmuxLike() {
+				m.ptyInputActive = true
+			} else {
+				// ResumeSession が完了した時点でセッションは managed=true になっており
+				// DisplayNone に遷移済み。switchRightPane が FocusSession + FocusRight を発行する。
+				cmds = append(cmds, m.switchRightPane(m.selectedID, m.backendMode.IsSplit()))
+			}
 		}
 		cmds = append(cmds, clearStatusCmd())
 
@@ -353,7 +412,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedID = msg.sessionID
 			m.refreshSessions()
 			m.layout.FocusDetail()
-			m.ptyInputActive = true
+			if !m.backendMode.IsTmuxLike() {
+				m.ptyInputActive = true
+			} else {
+				// sessionCreatedMsg と同じ理由で明示的に切替する。
+				cmds = append(cmds, m.switchRightPane(msg.sessionID, true))
+			}
 		}
 		cmds = append(cmds, clearStatusCmd())
 
@@ -426,7 +490,7 @@ func clearStatusCmd() tea.Cmd {
 }
 
 
-func (m *Model) refreshSessions() {
+func (m *Model) refreshSessions() []tea.Cmd {
 	m.sessions = m.manager.ListSessions()
 
 	visible := m.visibleSessions()
@@ -447,11 +511,12 @@ func (m *Model) refreshSessions() {
 	if m.cursor >= len(visible) {
 		m.cursor = max(0, len(visible)-1)
 	}
-	m.updateSelected()
+	cmds := m.updateSelected()
 	m.ensureCursorVisible()
 	// refreshViewData は updateSelected 内で選択が変わった場合だけ部分更新される。
 	// ここで全体を更新してセッションリスト・attention count も同期させる。
 	m.refreshViewData()
+	return cmds
 }
 
 // refreshViewData pre-computes all session data that View() needs.
@@ -512,7 +577,7 @@ func (m *Model) selectedDisplayChannel() session.DisplayChannel {
 }
 
 // visibleSessions returns sessions filtered by filterText.
-// filterText が空なら全セッション、非空なら RepoName/Name に対して case-insensitive 部分一致でフィルタ。
+// filterText が空なら全セッション、非空なら RepoPath/Name に対して case-insensitive 部分一致でフィルタ。
 // Note: this is called from refreshViewData() (Update path, locks acceptable).
 // View() uses m.viewSnaps instead and never calls this directly.
 func (m *Model) visibleSessions() []*session.Session {
@@ -526,31 +591,115 @@ func (m *Model) visibleSessions() []*session.Session {
 	lower := strings.ToLower(ft)
 	var result []*session.Session
 	for _, s := range m.sessions {
-		snap := s.Snapshot()
-		target := strings.ToLower(snap.RepoPath + "/" + snap.Name)
-		if strings.Contains(target, lower) {
+		// Session.MatchesFilter takes a targeted RLock on RepoPath+Name only,
+		// avoiding a full Snapshot() call just for filter matching.
+		if s.MatchesFilter(lower) {
 			result = append(result, s)
 		}
 	}
 	return result
 }
 
-func (m *Model) updateSelected() {
+// updateSelected updates m.selectedID based on the current cursor position, triggers
+// JSONL streaming, and returns any tea.Cmd for right-pane switching.
+// The caller must append the returned cmds to its own cmd batch.
+func (m *Model) updateSelected() []tea.Cmd {
 	oldID := m.selectedID
+	oldDisplay := session.DisplayJSONL
+	if m.selectedSnap != nil {
+		oldDisplay = m.selectedSnap.Display
+	}
+
 	visible := m.visibleSessions()
 	if m.cursor >= 0 && m.cursor < len(visible) {
 		m.selectedID = visible[m.cursor].ID
 	} else {
 		m.selectedID = ""
 	}
-	if m.selectedID != oldID {
+
+	idChanged := m.selectedID != oldID
+	if idChanged {
 		m.logFollow = true
 		m.ptyFollow = true
 		// 選択中のセッションだけ JSONL ストリーミングを開始
 		m.manager.StreamSession(m.selectedID)
-		// 選択変更 → selectedSnap/selectedPTY を即座に更新
-		m.refreshSelectedSnap()
+	}
+	// 常に最新 snap を取得する。選択 ID が同じでも display channel が変わる場合
+	// （kill → Completed: DisplayPTY/DisplayNone → DisplayJSONL）があるため。
+	m.refreshSelectedSnap()
+	if idChanged {
 		m.syncLogViewport()
+	}
+
+	if m.selectedID == "" {
+		return nil
+	}
+
+	sid := m.selectedID
+	snap := m.selectedSnap
+
+	newDisplay := session.DisplayJSONL
+	if snap != nil {
+		newDisplay = snap.Display
+	}
+
+	// DisplayJSONL に遷移したとき（同一セッションのまま kill → Completed など）は
+	// StreamSession を再トリガーする。idChanged=true のケースは上で既に呼んでいるので
+	// idChanged=false のケースだけ対象にする。
+	// 理由: idChanged=true のときに StreamSession を呼んでいる段階では selectedSnap が
+	// まだ更新前（refreshSelectedSnap より前）なので、display 遷移は判定できない。
+	// また logFollow を true にして最新ログへ自動スクロールさせる。
+	if !idChanged && newDisplay == session.DisplayJSONL && oldDisplay != session.DisplayJSONL {
+		m.logFollow = true
+		m.manager.StreamSession(sid)
+	}
+
+	// tmux/split mode: カーソル移動(idChanged)またはセッション状態変化(display変化)で
+	// 右ペインを最新の状態に同期する。focusRight=false なのでカーソル移動では
+	// Ghostty のペインフォーカスは移動しない（ユーザーはリストを閲覧中）。
+	if m.backendMode.IsTmuxLike() && (idChanged || (m.backendMode.IsSplit() && newDisplay != oldDisplay)) {
+		return []tea.Cmd{m.switchRightPane(sid, false)}
+	}
+	return nil
+}
+
+// doSwitchRightPane は右ペイン制御のコアロジック。goroutine または tea.Cmd から呼ぶ。
+//
+// セッション状態（DisplayChannel）に基づいて:
+//   - DisplayNone (起動中) → tmux select-window <sessionID>
+//   - それ以外 (停止中)    → preview IPC 書き込み + tmux select-window __preview__
+//                            ※ splitMode のみ。tmuxMode 単体では preview は存在しない。
+//
+// focusRight=true のとき Ghostty の右ペインにフォーカスを移す（明示的ユーザー操作時のみ）。
+func (m *Model) doSwitchRightPane(sid session.DeckSessionID, focusRight bool) {
+	var display session.DisplayChannel
+	if sess := m.manager.GetSession(sid); sess != nil {
+		snap := sess.Snapshot()
+		display = snap.Display
+	}
+	if display == session.DisplayNone {
+		_ = m.manager.FocusSession(sid)
+	} else if m.backendMode.IsSplit() {
+		// preview window は split mode にのみ存在する
+		if err := preview.WriteSelection(m.config.DataDir, sid); err != nil {
+			debuglog.Printf("[switchRightPane] preview IPC: %v", err)
+		}
+		_ = m.manager.FocusPreviewWindow()
+	}
+	if focusRight && m.backendMode.IsSplit() {
+		_ = ghostty.FocusRight()
+	}
+}
+
+// switchRightPane は doSwitchRightPane を tea.Cmd として返す。
+// Update() のメッセージハンドラから発行する明示的なユーザー操作（Enter/n/r/f）に使う。
+func (m *Model) switchRightPane(sid session.DeckSessionID, focusRight bool) tea.Cmd {
+	if !m.backendMode.IsTmuxLike() {
+		return nil
+	}
+	return func() tea.Msg {
+		m.doSwitchRightPane(sid, focusRight)
+		return nil
 	}
 }
 

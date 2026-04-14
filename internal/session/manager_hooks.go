@@ -72,7 +72,7 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 			return
 		}
 		// hookProc は event watcher goroutine のみがアクセスするため mu 不要
-		m.hookProc.storePending(ev.ClaudeDeckSessionID, &ev)
+		m.hookProc.storePending(DeckSessionID(ev.ClaudeDeckSessionID), &ev)
 
 	case hooks.EventSessionStart:
 		debuglog.Printf("[event-watcher] SessionStart: session_id=%s source=%s claude_deck_session_id=%s",
@@ -121,7 +121,7 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 		// ペアリング: hookProc から対応する SessionEnd を取り出す（mu 不要）
 		var pendEnd *hooks.Event
 		if deckID != "" {
-			pendEnd = m.hookProc.consumePending(ev.ClaudeDeckSessionID)
+			pendEnd = m.hookProc.consumePending(deckID)
 		}
 
 		if pendEnd == nil {
@@ -174,20 +174,17 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 
 // findSessionByClaudeID returns the managed session (with an active process)
 // matching the given Claude Code session ID, or nil if not found.
+// The active check is delegated to the backend so this works in both PTY and tmux modes.
+//
+// m.mu を解放してから IsActive を呼ぶ（tmux モードでは外部コマンド実行になるため
+// ロック保持中の長時間ブロックを避ける）。
 func (m *Manager) findSessionByClaudeID(claudeSessionID ClaudeSessionID) *Session {
-	activeIDs := m.Supervisor.ActiveSessionIDs()
-
-	// m.mu と s.mu を同時に保持しない（ABBA 回避）
-	m.mu.RLock()
-	candidates := make([]*Session, 0, len(activeIDs))
-	for _, id := range activeIDs {
-		if s, ok := m.sessions[id]; ok {
-			candidates = append(candidates, s)
-		}
-	}
-	m.mu.RUnlock()
+	candidates := m.copySessionsList()
 
 	for _, s := range candidates {
+		if !m.backend.IsActive(s.ID) {
+			continue
+		}
 		s.mu.RLock()
 		csID := s.CurrentClaudeID()
 		s.mu.RUnlock()

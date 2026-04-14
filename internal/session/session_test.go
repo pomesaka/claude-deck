@@ -162,7 +162,11 @@ func TestSession_Phase(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sess := NewSession("/repo", "repo")
 			sess.Status = tt.status
-			sess.managed = tt.managed
+			if tt.managed {
+				// Simulate a managed session: a running process is attached (nil display = External).
+				// The key invariant is process.Load() != nil ↔ managed.
+				sess.AttachProcess(0, nil)
+			}
 			snap := sess.Snapshot()
 			if snap.Phase != tt.want {
 				t.Errorf("Phase = %v, want %v", snap.Phase, tt.want)
@@ -371,7 +375,7 @@ func TestSession_GetPTYDisplayLines(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sess := NewSession("/repo", "repo")
-			sess.InitDisplay(120, 40, 0)
+			sess.AttachProcess(0, sess.NewDisplay(120, 40, 0))
 			for _, line := range tt.lines {
 				sess.AppendLog(line)
 			}
@@ -637,21 +641,30 @@ func TestDisplayChannel_String(t *testing.T) {
 
 func TestDisplayChannel_Derivation(t *testing.T) {
 	tests := []struct {
-		name    string
-		hosting HostingMode
-		managed bool
-		want    DisplayChannel
+		name     string
+		embedded bool // true → AttachProcess with display; false → nil display or no process
+		external bool // true → AttachProcess with nil display (External); false → no process
+		want     DisplayChannel
 	}{
-		{"embedded+managed", HostEmbedded, true, DisplayPTY},
-		{"embedded+unmanaged", HostEmbedded, false, DisplayJSONL},
-		{"external+managed", HostExternal, true, DisplayNone},
-		{"external+unmanaged", HostExternal, false, DisplayJSONL},
+		// process with display → Embedded → DisplayPTY
+		{"embedded+managed", true, false, DisplayPTY},
+		// no process → DisplayJSONL
+		{"embedded+unmanaged", false, false, DisplayJSONL},
+		// process with nil display → External → DisplayNone
+		{"external+managed", false, true, DisplayNone},
+		// no process → DisplayJSONL
+		{"external+unmanaged", false, false, DisplayJSONL},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := NewSession("/tmp/repo", "repo")
-			s.Hosting = tt.hosting
-			s.managed = tt.managed
+			switch {
+			case tt.embedded:
+				s.AttachProcess(0, s.NewDisplay(80, 24, 0))
+			case tt.external:
+				s.AttachProcess(0, nil)
+			// else: no process → nil → DisplayJSONL
+			}
 			snap := s.Snapshot()
 			if snap.Display != tt.want {
 				t.Errorf("Display = %v, want %v", snap.Display, tt.want)
@@ -660,12 +673,19 @@ func TestDisplayChannel_Derivation(t *testing.T) {
 	}
 }
 
-func TestNewExternalSession(t *testing.T) {
-	s := NewExternalSession("/tmp/repo", "repo")
-	if s.Hosting != HostExternal {
-		t.Errorf("Hosting = %v, want HostExternal", s.Hosting)
+func TestExternalSession_Hosting(t *testing.T) {
+	s := NewSession("/tmp/repo", "repo")
+	// External: process attached with no display (nil display = External hosting).
+	s.AttachProcess(0, nil)
+	snap := s.Snapshot()
+	if snap.Hosting != HostExternal {
+		t.Errorf("Hosting = %v, want HostExternal", snap.Hosting)
 	}
-	if s.display != nil {
+	rp := s.process.Load()
+	if rp == nil {
+		t.Fatal("process should be attached")
+	}
+	if rp.display != nil {
 		t.Error("external session should not have a PTYDisplay")
 	}
 	// AppendRaw should not panic with nil display
@@ -678,17 +698,19 @@ func TestNewExternalSession(t *testing.T) {
 
 func TestNewSession_DefaultHosting(t *testing.T) {
 	s := NewSession("/tmp/repo", "repo")
-	if s.Hosting != HostEmbedded {
-		t.Errorf("Hosting = %v, want HostEmbedded", s.Hosting)
+	// New session has no process attached: defaults to HostExternal (no process → External).
+	if s.process.Load() != nil {
+		t.Error("new session should have no process until AttachProcess is called")
 	}
-	// PTYDisplay is nil until InitDisplay is called by Manager.
-	// This avoids double-creation with wrong dimensions.
-	if s.display != nil {
-		t.Error("new session should not have display until InitDisplay is called")
+	snap := s.Snapshot()
+	if snap.Hosting != HostExternal {
+		t.Errorf("new session default Hosting = %v, want HostExternal", snap.Hosting)
 	}
-	// InitDisplay and verify
-	s.InitDisplay(80, 24, 0)
-	if s.display == nil {
-		t.Error("display should be non-nil after InitDisplay")
+	// After AttachProcess with a display: becomes Embedded.
+	display := s.NewDisplay(80, 24, 0)
+	s.AttachProcess(0, display)
+	snap = s.Snapshot()
+	if snap.Hosting != HostEmbedded {
+		t.Errorf("after AttachProcess with display, Hosting = %v, want HostEmbedded", snap.Hosting)
 	}
 }

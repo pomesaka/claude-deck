@@ -11,7 +11,7 @@ import (
 // 下部クロームのフィルタリングは行わない。
 func TestPTYDisplayIncludesFullScreen(t *testing.T) {
 	s := NewSession("/tmp/test", "test")
-	s.InitDisplay(120, 40, 0)
+	s.AttachProcess(0, s.NewDisplay(120, 40, 0))
 
 	// Ink の再描画フレームをシミュレート（ESC シーケンス付き）
 	tuiLines := []string{
