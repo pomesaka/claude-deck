@@ -3,11 +3,71 @@ package session
 import (
 	"context"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
+
+// streamState guards the active JSONL streaming goroutine.
+// Invariant: at most one session is streamed at a time.
+// Separated from Manager.mu so streaming switches don't contend with
+// high-frequency sessions-map reads.
+// Lock order: acquire streamState.mu independently of Manager.mu (never hold both).
+type streamState struct {
+	mu     sync.Mutex
+	id     DeckSessionID
+	cancel context.CancelFunc
+}
+
+// isCurrent reports whether id is the currently active stream.
+func (ss *streamState) isCurrent(id DeckSessionID) bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.id == id
+}
+
+// stop cancels the current stream and clears state.
+func (ss *streamState) stop() {
+	ss.mu.Lock()
+	if ss.cancel != nil {
+		ss.cancel()
+		ss.cancel = nil
+		ss.id = ""
+	}
+	ss.mu.Unlock()
+}
+
+// stopIfSame cancels the stream only if it matches id.
+func (ss *streamState) stopIfSame(id DeckSessionID) {
+	ss.mu.Lock()
+	if ss.id == id && ss.cancel != nil {
+		ss.cancel()
+		ss.cancel = nil
+		ss.id = ""
+	}
+	ss.mu.Unlock()
+}
+
+// set activates a new stream for id with the given cancel function.
+func (ss *streamState) set(id DeckSessionID, cancel context.CancelFunc) {
+	ss.mu.Lock()
+	ss.id = id
+	ss.cancel = cancel
+	ss.mu.Unlock()
+}
+
+// clearIfCurrent clears stream state if it still matches id.
+// Called by the goroutine on exit to avoid clearing a successor stream.
+func (ss *streamState) clearIfCurrent(id DeckSessionID) {
+	ss.mu.Lock()
+	if ss.id == id {
+		ss.cancel = nil
+		ss.id = ""
+	}
+	ss.mu.Unlock()
+}
 
 // StartFileWatcher creates a MultiWatcher for JSONL files and starts it
 // in a background goroutine. Write events are coalesced (2秒間隔) して
@@ -53,18 +113,11 @@ func (m *Manager) handleFileWrite(ev usage.FileEvent) {
 // 前回のストリーミングがあれば停止し、新しいセッションのストリーミングを開始する。
 // 同じセッションが既にストリーム中なら何もしない。
 func (m *Manager) StreamSession(sessionID DeckSessionID) {
-	m.mu.Lock()
-	if m.activeStreamID == sessionID {
-		m.mu.Unlock()
+	if m.stream.isCurrent(sessionID) {
 		return
 	}
-	// 前のストリームを停止
-	if m.activeStreamCancel != nil {
-		m.activeStreamCancel()
-		m.activeStreamCancel = nil
-		m.activeStreamID = ""
-	}
-	m.mu.Unlock()
+	// 前のストリームを停止（streamState.stop が不変条件「ゼロか一つ」を維持する）
+	m.stream.stop()
 
 	if sessionID == "" {
 		return
@@ -101,20 +154,10 @@ func (m *Manager) StreamSession(sessionID DeckSessionID) {
 	}
 
 	ctx, cancel := context.WithCancel(m.ctx)
-	m.mu.Lock()
-	m.activeStreamID = sessionID
-	m.activeStreamCancel = cancel
-	m.mu.Unlock()
+	m.stream.set(sessionID, cancel)
 
 	go func() {
-		defer func() {
-			m.mu.Lock()
-			if m.activeStreamID == sessionID {
-				m.activeStreamID = ""
-				m.activeStreamCancel = nil
-			}
-			m.mu.Unlock()
-		}()
+		defer m.stream.clearIfCurrent(sessionID)
 
 		// 旧セッションのログエントリを goroutine 内で読み込む。
 		// ReadAll() はディスク I/O を伴うため、TUI メインループのブロックを防ぐために
@@ -179,13 +222,7 @@ func (m *Manager) StreamSession(sessionID DeckSessionID) {
 
 // stopActiveStream cancels the current streaming goroutine if it matches the given session.
 func (m *Manager) stopActiveStream(sessionID DeckSessionID) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.activeStreamID == sessionID && m.activeStreamCancel != nil {
-		m.activeStreamCancel()
-		m.activeStreamCancel = nil
-		m.activeStreamID = ""
-	}
+	m.stream.stopIfSame(sessionID)
 }
 
 // HydrateFromJSONL reads Claude Code JSONL files and populates

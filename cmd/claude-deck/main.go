@@ -223,8 +223,11 @@ func run() error {
 
 // runPreview runs claude-deck in preview-only mode.
 // This mode is used when running inside the tmux __preview__ window:
-// it watches the preview-selection file for session ID changes and
-// renders the JSONL structured log for the selected session.
+// it watches the preview-selection file for PreviewSpec changes (written by main)
+// and renders the JSONL structured log for the described session.
+//
+// Unlike the main process, preview owns no session.Manager — it is a read-only
+// view driven entirely by the IPC payload from the main process.
 func runPreview() error {
 	if err := debuglog.Init(); err != nil {
 		return fmt.Errorf("debuglog init: %w", err)
@@ -244,11 +247,6 @@ func runPreview() error {
 		return fmt.Errorf("creating data dir: %w", err)
 	}
 
-	st, err := store.New(cfg.DataDir)
-	if err != nil {
-		return fmt.Errorf("initializing store: %w", err)
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -259,44 +257,14 @@ func runPreview() error {
 		cancel()
 	}()
 
-	refreshInterval, err := time.ParseDuration(cfg.Session.RefreshInterval)
-	if err != nil {
-		refreshInterval = 5 * time.Second
-	}
-
-	backendMode := session.BackendPTY
-	if cfg.Tmux.Enabled {
-		backendMode = session.BackendTmux
-	}
-
-	mgr := session.NewManager(ctx, st, buildManagerConfig(cfg, backendMode, refreshInterval))
-
-	if err := mgr.LoadExisting(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: load existing sessions: %v\n", err)
-	}
-
-	go func() {
-		mgr.HydrateFromJSONL()
-		mgr.DiscoverExternalSessions()
-	}()
-
-	if err := mgr.StartFileWatcher(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: file watcher: %v\n", err)
-	}
-
-	model := tui.NewPreviewModel(mgr, cfg)
+	model := tui.NewPreviewModel(cfg, ctx)
 	p := tea.NewProgram(model)
 
-	mgr.SetOnChange(func(changed map[session.DeckSessionID]bool) {
-		p.Send(tui.SessionRefreshMsg{ChangedIDs: changed})
-	})
-	mgr.StartNotifyLoop(ctx)
-
-	// Watch the preview-selection file and forward changes to the TUI.
+	// Watch the preview-selection file and forward PreviewSpec changes to the TUI.
 	// The initial selection is read inside PreviewModel.Init() so we don't
 	// need to p.Send() before p.Run() (which is unreliable before start).
-	if err := preview.WatchSelection(ctx, cfg.DataDir, func(sid session.DeckSessionID) {
-		p.Send(tui.PreviewSelectionMsg{SessionID: sid})
+	if err := preview.WatchSpec(ctx, cfg.DataDir, func(spec preview.PreviewSpec) {
+		p.Send(tui.PreviewSpecMsg{Spec: spec})
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: preview selection watcher: %v\n", err)
 	}

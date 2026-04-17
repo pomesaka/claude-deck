@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +28,15 @@ const notifyInterval = 16 * time.Millisecond
 const spinnerIdleTimeout = 3 * time.Second
 
 // BackendMode selects the process hosting backend.
+//
+// The TUI layer has a parallel TUIBackendMode that adds the split-pane concept:
+//
+//	BackendPTY  → TUIBackendMode.BackendModeEmbedded
+//	BackendTmux → TUIBackendMode.BackendModeTmux or BackendModeSplit
+//
+// Split (Ghostty side-by-side pane) is a TUI-only concept; from Manager's
+// perspective both tmux and split are BackendTmux — the distinction only
+// affects how the TUI routes keystrokes and manages the right pane.
 type BackendMode int
 
 const (
@@ -84,9 +94,9 @@ type Manager struct {
 	config   ManagerConfig
 	onChange func(changed map[DeckSessionID]bool)
 
-	// 詳細ペインで選択中のセッションのみストリーミング（最大1つ）
-	activeStreamID     DeckSessionID
-	activeStreamCancel context.CancelFunc
+	// stream guards the active JSONL streaming goroutine.
+	// See streamState in manager_jsonl.go for invariants and lock ordering.
+	stream streamState
 
 	// RefreshFromJSONL の並行実行ガード
 	refreshing atomic.Bool
@@ -268,7 +278,7 @@ func (m *Manager) StartSpinnerIdleLoop(ctx context.Context) {
 				return
 			case <-ticker.C:
 				for _, sess := range m.ListManagedSessions() {
-					if sess.spinnerIdleSince(spinnerIdleTimeout) {
+					if sess.runningSignalExpired(spinnerIdleTimeout) {
 						debuglog.Printf("[spinnerIdle] session %s: spinner timeout, transitioning to Idle", sess.ID)
 						sess.SetStatus(StatusIdle)
 						m.notifyChange(sess.ID)
@@ -451,6 +461,28 @@ func (m *Manager) FocusPreviewWindow() error {
 // Delegates to the backend — only tmuxBackend has an effect.
 func (m *Manager) KillPreviewWindow() error {
 	return m.backend.KillPreview()
+}
+
+// ResolveJSONLPaths returns the current JSONL file path and prior (pre-/clear) paths
+// for a given deck session, in chronological order.
+// Returns ("", nil) if the session is unknown or has no associated JSONL file.
+func (m *Manager) ResolveJSONLPaths(sid DeckSessionID) (current string, prior []string) {
+	sess := m.GetSession(sid)
+	if sess == nil {
+		return "", nil
+	}
+	sess.mu.RLock()
+	csID := sess.CurrentClaudeID()
+	priorIDs := sess.PriorClaudeIDs()
+	sess.mu.RUnlock()
+
+	current = m.usage.ResolveSessionPath(string(csID))
+	for _, id := range priorIDs {
+		if p := m.usage.ResolveSessionPath(string(id)); p != "" {
+			prior = append(prior, p)
+		}
+	}
+	return current, prior
 }
 
 // ReconcileTmux synchronises in-memory session state with the live tmux session.
@@ -730,31 +762,16 @@ func (m *Manager) RemoveSession(sessionID DeckSessionID) error {
 		return fmt.Errorf("cannot remove running session (kill it first)")
 	}
 
-	m.stopActiveStream(sessionID)
-
 	// oldSessionIDs には登録しない。dd は deck メタデータだけ削除し JSONL は残すため、
 	// 次回の DiscoverExternalSessions で外部セッションとして再発見されるのが正しい動作。
-	//
-	// Supervisor は PTY モードでのみ非 nil。tmux モードでは backend がプロセスを
-	// 管理するため Supervisor を持たない。
-	if m.Supervisor != nil {
-		m.Supervisor.Unregister(sessionID)
-	}
-	m.mu.Lock()
-	delete(m.sessions, sessionID)
-	m.mu.Unlock()
-
-	if m.store != nil {
-		_ = m.store.Delete(string(sessionID))
-	}
-
+	m.removeSessionCore(sessionID)
 	m.notifyChange(sessionID)
 	return nil
 }
 
 // DeleteSession removes a session from the manager, store, and Claude Code JSONL.
 // Running sessions must be killed first.
-// Returns a warning message (non-empty if JSONL cleanup had issues) and an error.
+// Returns a warning message (non-empty if any cleanup step had issues) and an error.
 func (m *Manager) DeleteSession(sessionID DeckSessionID) (warning string, err error) {
 	m.mu.RLock()
 	sess, ok := m.sessions[sessionID]
@@ -767,35 +784,31 @@ func (m *Manager) DeleteSession(sessionID DeckSessionID) (warning string, err er
 		return "", fmt.Errorf("cannot delete running session (kill it first)")
 	}
 
-	m.stopActiveStream(sessionID)
-
-	// Claude Code の JSONL ファイルも削除
 	sess.mu.RLock()
 	csID := sess.CurrentClaudeID()
-	sess.mu.RUnlock()
-
-	if csID != "" {
-		if jsonlErr := m.usage.DeleteSessionFiles(string(csID)); jsonlErr != nil {
-			warning = fmt.Sprintf("JSONL削除失敗: %v", jsonlErr)
-		}
-	}
-
-	sess.mu.RLock()
 	wsName := sess.WorkspaceName
 	repoPath := sess.RepoPath
 	sess.mu.RUnlock()
 
-	// jj ワークスペースを forget（削除時のみ。プロセス終了時は再開用に保持する）
-	if wsName != "" && repoPath != "" {
-		if wsErr := m.jj().ForgetWorkspace(repoPath, wsName); wsErr != nil {
-			msg := fmt.Sprintf("workspace forget失敗: %v", wsErr)
-			if warning != "" {
-				warning += "; " + msg
-			} else {
-				warning = msg
-			}
-		}
+	var warnings []string
+	if w := m.cleanupJSONL(csID); w != "" {
+		warnings = append(warnings, w)
 	}
+	if w := m.cleanupWorkspace(repoPath, wsName); w != "" {
+		warnings = append(warnings, w)
+	}
+	warnings = append(warnings, m.removeSessionCore(sessionID)...)
+
+	m.notifyChange(sessionID)
+	return strings.Join(warnings, "; "), nil
+}
+
+// removeSessionCore performs the shared cleanup for both RemoveSession and DeleteSession:
+// stops any active stream, unregisters from Supervisor (PTY mode only), removes from
+// the sessions map, and deletes from the store.
+// Returns any warnings encountered (typically store delete failures).
+func (m *Manager) removeSessionCore(sessionID DeckSessionID) []string {
+	m.stopActiveStream(sessionID)
 
 	// Supervisor は PTY モードでのみ非 nil。tmux モードでは backend がプロセスを
 	// 管理するため Supervisor を持たない。
@@ -808,17 +821,35 @@ func (m *Manager) DeleteSession(sessionID DeckSessionID) (warning string, err er
 
 	if m.store != nil {
 		if storeErr := m.store.Delete(string(sessionID)); storeErr != nil {
-			msg := fmt.Sprintf("ストア削除失敗: %v", storeErr)
-			if warning != "" {
-				warning += "; " + msg
-			} else {
-				warning = msg
-			}
+			return []string{fmt.Sprintf("ストア削除失敗: %v", storeErr)}
 		}
 	}
+	return nil
+}
 
-	m.notifyChange(sessionID)
-	return warning, nil
+// cleanupJSONL deletes Claude Code JSONL files for the given session ID.
+// Returns a warning string if deletion failed, or "" on success/skip.
+func (m *Manager) cleanupJSONL(csID ClaudeSessionID) string {
+	if csID == "" {
+		return ""
+	}
+	if err := m.usage.DeleteSessionFiles(string(csID)); err != nil {
+		return fmt.Sprintf("JSONL削除失敗: %v", err)
+	}
+	return ""
+}
+
+// cleanupWorkspace runs jj workspace forget for the session's workspace.
+// Returns a warning string if the operation failed, or "" on success/skip.
+func (m *Manager) cleanupWorkspace(repoPath, wsName string) string {
+	if wsName == "" || repoPath == "" {
+		return ""
+	}
+	// jj ワークスペースを forget（削除時のみ。プロセス終了時は再開用に保持する）
+	if err := m.jj().ForgetWorkspace(repoPath, wsName); err != nil {
+		return fmt.Sprintf("workspace forget失敗: %v", err)
+	}
+	return ""
 }
 
 // Kill forcefully terminates a session.

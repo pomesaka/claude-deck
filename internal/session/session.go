@@ -272,10 +272,10 @@ func (t TokenUsage) EstimateCost(p PricingPolicy) float64 {
 type runtimeFields struct {
 	mu sync.RWMutex
 
-	LogLines        []string         // PTY ログ行（AppendRaw で追記）
-	JSONLLogEntries []usage.LogEntry // JSONL 由来の構造化ログ（StreamSession で更新）
-	lastSpinnerTime time.Time        // Braille スピナー最終検出時刻
-	maxLogLines     int              // config から設定。0 の場合はデフォルト 1000
+	LogLines              []string         // PTY ログ行（AppendRaw で追記）
+	JSONLLogEntries       []usage.LogEntry // JSONL 由来の構造化ログ（StreamSession で更新）
+	lastRunningObservedAt time.Time        // claude が Running 状態だと最後に観測された時刻（PTY スピナー検知で更新）
+	maxLogLines           int              // config から設定。0 の場合はデフォルト 1000
 }
 
 // Session represents a single Claude Code session.
@@ -301,13 +301,16 @@ type Session struct {
 	rt runtimeFields
 
 	// --- Persisted in store (claude-deck metadata) ---
-	ID            DeckSessionID `json:"id"`
+	// Fields marked "immutable after creation" are set once by CreateSession /
+	// newExternalSession and never mutated thereafter, so callers may read them
+	// without holding mu. See hasManagedSessionAtWorkspaceLocked for an example.
+	ID            DeckSessionID `json:"id"`            // immutable after creation
 	Name          string        `json:"name"`
-	RepoPath      string        `json:"repo_path"`
-	RepoName      string        `json:"repo_name"`
-	WorkspacePath string        `json:"workspace_path"`
-	WorkspaceName string        `json:"workspace_name"`
-	SubProjectDir string        `json:"sub_project_dir,omitempty"` // リポジトリ内サブプロジェクトの相対パス
+	RepoPath      string        `json:"repo_path"`     // immutable after creation
+	RepoName      string        `json:"repo_name"`     // immutable after creation
+	WorkspacePath string        `json:"workspace_path"` // immutable after creation
+	WorkspaceName string        `json:"workspace_name"` // immutable after creation
+	SubProjectDir string        `json:"sub_project_dir,omitempty"` // immutable after creation; relative path to sub-project
 	// SessionChain は Claude Code が割り当てるセッション ID の履歴（古い順）。
 	// /clear や compact のたびに末尾に新 ID が追加される。
 	// 現在の ID は SessionChain[len-1]、旧 ID はそれ以前の要素。
@@ -364,17 +367,6 @@ func (s *Session) hostingLocked() HostingMode {
 	return HostExternal
 }
 
-// phaseLocked returns the high-level lifecycle phase derived from Status and process state.
-// Must be called with mu held (at least for reading) for Status.
-func (s *Session) phaseLocked() SessionPhase {
-	if s.Status == StatusUnmanaged {
-		return PhaseExternal
-	}
-	if s.Status.IsTerminal() && s.process.Load() == nil {
-		return PhaseArchived
-	}
-	return PhaseActive
-}
 
 // Elapsed returns the duration since the session started.
 func (s *Session) Elapsed() time.Duration {
@@ -506,20 +498,20 @@ func (s *Session) ResizeDisplay(cols, rows int) {
 	}
 }
 
-// touchSpinner records the current time as the last Braille spinner detection.
-func (s *Session) touchSpinner() {
+// touchRunningSignal records now as the last time claude was observed to be Running.
+// Called on Braille spinner detection (PTY fallback for Running state).
+func (s *Session) touchRunningSignal() {
 	s.rt.mu.Lock()
-	s.rt.lastSpinnerTime = time.Now()
+	s.rt.lastRunningObservedAt = time.Now()
 	s.rt.mu.Unlock()
 }
 
-// spinnerIdleSince returns true if the session is Running, has previously
-// detected a spinner, and the spinner has not been seen for longer than timeout.
-// This is used as a fallback to transition Running → Idle when hook events
-// don't arrive.
+// runningSignalExpired returns true if the session is Running but the last Running
+// observation is older than timeout. Used as PTY fallback to transition Running → Idle
+// when hook events don't arrive (tmux mode skips this path entirely).
 //
 // rt.mu と sess.mu を同時に保持しない（ロック順序規則）ため、2回に分けて読む。
-func (s *Session) spinnerIdleSince(timeout time.Duration) bool {
+func (s *Session) runningSignalExpired(timeout time.Duration) bool {
 	s.mu.RLock()
 	status := s.Status
 	s.mu.RUnlock()
@@ -527,7 +519,7 @@ func (s *Session) spinnerIdleSince(timeout time.Duration) bool {
 		return false
 	}
 	s.rt.mu.RLock()
-	t := s.rt.lastSpinnerTime
+	t := s.rt.lastRunningObservedAt
 	s.rt.mu.RUnlock()
 	return !t.IsZero() && time.Since(t) > timeout
 }
@@ -601,7 +593,7 @@ func (s *Session) IngestPTYOutput(data []byte) {
 	s.AppendRaw(data)
 
 	if containsBrailleSpinner(string(data)) {
-		s.touchSpinner()
+		s.touchRunningSignal()
 		status := s.GetStatus()
 		if status != StatusRunning && status != StatusCompleted && status != StatusError {
 			s.SetStatus(StatusRunning)
@@ -642,12 +634,23 @@ type Snapshot struct {
 	WorkspacePath   string
 	SubProjectDir   string
 	ClaudeSessionID ClaudeSessionID
+	// PriorClaudeIDs contains all historical Claude Code session IDs except the current one,
+	// in chronological order. Populated from SessionChain[:-1].
+	PriorClaudeIDs []ClaudeSessionID
 	// ClearCount is the number of /clear (or compact) operations performed in
 	// this session. 0 means the original session; 1 means cleared once, etc.
 	// Derived from len(SessionChain) - 1.
-	ClearCount     int
-	Phase          SessionPhase
-	Hosting        HostingMode // derived from process state: HostEmbedded or HostExternal
+	ClearCount int
+	// HasProcess is true while a process is attached to this session (embedded or tmux).
+	// It becomes false when watchProcess detects exit and clears Session.process.
+	// Used by Phase() to distinguish "terminal status but process still running"
+	// (rare race window) from "truly finished".
+	HasProcess bool
+	// Hosting reflects the current process state: HostEmbedded when claude-deck owns
+	// an active PTY, HostExternal otherwise (tmux-hosted, finished, or unmanaged).
+	// This is a dynamic projection — it changes when a process starts or exits,
+	// not a static "how was this session launched" label.
+	Hosting        HostingMode
 	Display        DisplayChannel
 	Status         Status
 	Prompt         string
@@ -661,6 +664,26 @@ type Snapshot struct {
 	TerminalTitle  string
 	BookmarkName   string
 	Elapsed        time.Duration
+}
+
+// Phase returns the high-level lifecycle phase derived from Status and HasProcess.
+// This is always consistent with the snapshot's other fields — no separate Phase
+// field is stored, eliminating the risk of stale derived state.
+//
+//   - StatusUnmanaged           → PhaseExternal  (external/discovered sessions)
+//   - IsTerminal() && !HasProcess → PhaseArchived (finished; no process attached)
+//   - otherwise                 → PhaseActive
+//
+// HasProcess correctly handles the rare race where Status is terminal but watchProcess
+// hasn't detached the process yet — such sessions remain PhaseActive.
+func (s Snapshot) Phase() SessionPhase {
+	if s.Status == StatusUnmanaged {
+		return PhaseExternal
+	}
+	if s.Status.IsTerminal() && !s.HasProcess {
+		return PhaseArchived
+	}
+	return PhaseActive
 }
 
 // WorkDir returns the effective working directory for this session.
@@ -701,8 +724,9 @@ func (s *Session) Snapshot() Snapshot {
 		WorkspacePath:   s.WorkspacePath,
 		SubProjectDir:   s.SubProjectDir,
 		ClaudeSessionID: s.CurrentClaudeID(),
+		PriorClaudeIDs:  s.PriorClaudeIDs(),
 		ClearCount:      max(0, len(s.SessionChain)-1),
-		Phase:           s.phaseLocked(),
+		HasProcess:      s.process.Load() != nil,
 		Hosting:         s.hostingLocked(),
 		Display:         s.displayChannelLocked(),
 		Status:          s.Status,
@@ -728,6 +752,17 @@ func (s *Session) CurrentClaudeID() ClaudeSessionID {
 		return ""
 	}
 	return s.SessionChain[len(s.SessionChain)-1]
+}
+
+// ChainIDs returns a copy of all Claude Code session IDs in this session's chain,
+// from oldest to newest. The last element is the current active ID.
+// Thread-safe; acquires mu for reading.
+func (s *Session) ChainIDs() []ClaudeSessionID {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ids := make([]ClaudeSessionID, len(s.SessionChain))
+	copy(ids, s.SessionChain)
+	return ids
 }
 
 // PriorClaudeIDs returns all historical Claude Code session IDs excluding the current one.

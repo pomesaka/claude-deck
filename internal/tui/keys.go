@@ -199,8 +199,12 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 				cmds = append(cmds, m.updateSelected()...)
 				m.ensureCursorVisible()
 				m.layout.FocusDetail()
-				// tmux mode: interact via tmux client, not PTY input.
-				if !m.backendMode.IsTmuxLike() {
+				if m.backendMode.IsTmuxLike() {
+					// tmux mode: updateSelected が返す switchRightPane(false) は tmux window 選択のみ。
+					// tab はユーザーが介入しに行く意図なので Enter と同様に focusRight=true で
+					// Ghostty の右ペイン（tmux client）にフォーカスを移す。
+					cmds = append(cmds, m.switchRightPane(m.selectedID, true))
+				} else {
 					m.ptyInputActive = true
 				}
 				m.syncLogViewport()

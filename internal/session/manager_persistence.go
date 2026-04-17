@@ -46,14 +46,6 @@ func (m *Manager) LoadExisting() error {
 		return err
 	}
 
-	// legacySession は旧 JSON 形式のフィールドを読み込むための一時構造体。
-	// SessionChain 導入前は claude_session_id / previous_claude_session_id が別フィールドだった。
-	type legacySession struct {
-		ClaudeSessionID         string   `json:"claude_session_id,omitempty"`
-		PreviousClaudeSessionID string   `json:"previous_claude_session_id,omitempty"`
-		SessionChain            []string `json:"session_chain,omitempty"`
-	}
-
 	// 全件パースして sortTime で降順ソート
 	type parsed struct {
 		sess *Session
@@ -66,20 +58,6 @@ func (m *Manager) LoadExisting() error {
 			continue
 		}
 		s.rt.LogLines = make([]string, 0)
-
-		// TODO: 旧形式 (claude_session_id / previous_claude_session_id) からの移行コード。
-		// SessionChain 導入（v0.x）以前のストアデータ用。全セッションが一度でも起動されれば
-		// 自動移行されるため、v1.0 リリース時に削除予定。
-		if len(s.SessionChain) == 0 {
-			var legacy legacySession
-			if err := json.Unmarshal(data, &legacy); err == nil && legacy.ClaudeSessionID != "" {
-				if legacy.PreviousClaudeSessionID != "" {
-					s.SessionChain = []ClaudeSessionID{ClaudeSessionID(legacy.PreviousClaudeSessionID), ClaudeSessionID(legacy.ClaudeSessionID)}
-				} else {
-					s.SessionChain = []ClaudeSessionID{ClaudeSessionID(legacy.ClaudeSessionID)}
-				}
-			}
-		}
 
 		// 前回起動時に実行中だったセッションはプロセスハンドルが失われている。
 		// PID が生存していなければ完了扱いにする。
@@ -108,8 +86,10 @@ func (m *Manager) LoadExisting() error {
 
 	// SessionChain が長い順（より多くの履歴）→ 同じなら新しい順にソートする。
 	// 重複排除でチェーンが長いほうを winner とするため、長い順を先頭にする。
+	// sessions は deserialization 直後でまだ manager.sessions に登録されていないため
+	// ChainIDs() のロックは空振りだが、アクセス方法を一本化するために使う。
 	sort.SliceStable(all, func(i, j int) bool {
-		li, lj := len(all[i].sess.SessionChain), len(all[j].sess.SessionChain)
+		li, lj := len(all[i].sess.ChainIDs()), len(all[j].sess.ChainIDs())
 		if li != lj {
 			return li > lj
 		}
@@ -123,8 +103,9 @@ func (m *Manager) LoadExisting() error {
 	claimedClaudeIDs := make(map[ClaudeSessionID]bool)
 	var deduped []parsed
 	for _, p := range all {
+		chainIDs := p.sess.ChainIDs()
 		isDuplicate := false
-		for _, csID := range p.sess.SessionChain {
+		for _, csID := range chainIDs {
 			if csID != "" && claimedClaudeIDs[csID] {
 				isDuplicate = true
 				break
@@ -135,7 +116,7 @@ func (m *Manager) LoadExisting() error {
 			_ = m.store.Delete(p.id)
 			continue
 		}
-		for _, csID := range p.sess.SessionChain {
+		for _, csID := range chainIDs {
 			if csID != "" {
 				claimedClaudeIDs[csID] = true
 			}

@@ -30,6 +30,14 @@ const (
 // TUIBackendMode describes how the TUI interacts with the process hosting environment.
 // It replaces the separate tmuxMode/splitMode boolean pair, capturing the constraint
 // that splitMode implies tmuxMode as a single value.
+// TUIBackendMode extends session.BackendMode with the TUI-layer concept of
+// Ghostty split layout. From session.Manager's perspective BackendModeTmux and
+// BackendModeSplit are both session.BackendTmux — the split distinction only
+// affects TUI keystroke routing and right-pane management.
+//
+//	session.BackendPTY  → BackendModeEmbedded
+//	session.BackendTmux → BackendModeTmux  (single terminal, tmux window switching)
+//	session.BackendTmux → BackendModeSplit (Ghostty split; detail pane hidden)
 type TUIBackendMode int
 
 const (
@@ -361,6 +369,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(msg.ChangedIDs) == 0 || msg.ChangedIDs[m.selectedID] {
 			m.syncLogViewport()
 		}
+		// split モードで選択中セッションの状態が変わった場合、preview spec を最新化する。
+		// kill 時の DisplayNone → DisplayJSONL 遷移などがリアルタイムに preview に届く。
+		if m.backendMode.IsSplit() && m.selectedID != "" {
+			if len(msg.ChangedIDs) == 0 || msg.ChangedIDs[m.selectedID] {
+				if spec := m.buildPreviewSpec(); spec.Display != "" {
+					if err := preview.WriteSpec(m.config.DataDir, spec); err != nil {
+						debuglog.Printf("[previewSpec] write: %v", err)
+					}
+				}
+			}
+		}
 
 	case metadataTickMsg:
 		debuglog.Printf("[tui] metadataTickMsg (event loop alive)")
@@ -663,6 +682,33 @@ func (m *Model) updateSelected() []tea.Cmd {
 	return nil
 }
 
+// buildPreviewSpec builds a PreviewSpec from the current selection for IPC to the
+// preview subprocess. JSONL path resolution happens here so preview needs no Manager.
+// Returns an empty spec (Display=="") when there is no selection.
+func (m *Model) buildPreviewSpec() preview.PreviewSpec {
+	if m.selectedSnap == nil {
+		return preview.PreviewSpec{}
+	}
+	snap := *m.selectedSnap
+	jsonlPath, priorPaths := m.manager.ResolveJSONLPaths(snap.ID)
+	return preview.PreviewSpec{
+		DeckSessionID:   snap.ID,
+		Name:            snap.Name,
+		RepoName:        snap.RepoName,
+		WorkspacePath:   snap.WorkspacePath,
+		ClaudeSessionID: snap.ClaudeSessionID,
+		PriorClaudeIDs:  snap.PriorClaudeIDs,
+		ClearCount:      snap.ClearCount,
+		Status:          snap.Status.String(),
+		Display:         snap.Display.String(),
+		CurrentTool:     snap.CurrentTool,
+		ErrorMessage:    snap.ErrorMessage,
+		NeedsAttention:  snap.Status.NeedsAttention(),
+		JSONLPath:       jsonlPath,
+		PriorJSONLPaths: priorPaths,
+	}
+}
+
 // doSwitchRightPane は右ペイン制御のコアロジック。goroutine または tea.Cmd から呼ぶ。
 //
 // focusRight の意味でペイン切替先を決定する:
@@ -699,7 +745,7 @@ func (m *Model) doSwitchRightPane(sid session.DeckSessionID, focusRight bool) {
 			return
 		}
 		// 非稼働セッション → JSONL プレビュー（会話履歴をスクロールして見られる）
-		if err := preview.WriteSelection(m.config.DataDir, sid); err != nil {
+		if err := preview.WriteSpec(m.config.DataDir, m.buildPreviewSpec()); err != nil {
 			debuglog.Printf("[switchRightPane] preview IPC: %v", err)
 		}
 		_ = m.manager.FocusPreviewWindow()

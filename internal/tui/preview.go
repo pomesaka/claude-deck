@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"context"
 	"fmt"
+	"sync"
+	"time"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -10,47 +13,197 @@ import (
 	"github.com/pomesaka/claude-deck/internal/config"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/preview"
-	"github.com/pomesaka/claude-deck/internal/session"
+	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
-// PreviewSelectionMsg is sent when the main claude-deck process writes a new
-// session ID to the preview IPC file.  The preview process receives this via
-// its fsnotify watcher and switches its display to the named session.
-type PreviewSelectionMsg struct {
-	SessionID session.DeckSessionID
+// PreviewSpecMsg is sent when the main claude-deck process writes a new PreviewSpec
+// to the IPC file. The preview process receives this via its fsnotify watcher.
+type PreviewSpecMsg struct {
+	Spec preview.PreviewSpec
 }
+
+// previewLogUpdateMsg carries updated log entries from the background JSONL streamer.
+// ch is the streamer's output channel — carrying it in the message enables safe
+// self-looping without a reference back to the streamer (see listenStream).
+type previewLogUpdateMsg struct {
+	entries []usage.LogEntry
+	ch      <-chan []usage.LogEntry
+}
+
+// listenStream returns a tea.Cmd that waits for the next batch of log entries on ch.
+// When ch is closed (stream stopped or restarted), the Cmd returns nil and exits cleanly.
+func listenStream(ch <-chan []usage.LogEntry) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		entries, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return previewLogUpdateMsg{entries: entries, ch: ch}
+	}
+}
+
+// previewStreamer streams JSONL log entries for a given spec in a background goroutine.
+// Each call to Start cancels the previous goroutine and allocates a fresh output channel.
+// The goroutine closes its channel on exit, which unblocks any waiting listenStream Cmd.
+//
+// This is the preview-local equivalent of Manager.StreamSession, with no Manager dependency.
+type previewStreamer struct {
+	mu     sync.Mutex
+	cancel context.CancelFunc
+}
+
+// Start cancels any running stream and launches a new one for spec.
+// Returns the output channel for the new stream, or nil if spec.JSONLPath is empty
+// or spec.Display is "none" (running session — no JSONL needed).
+// The returned channel is closed by the goroutine when it exits.
+func (ps *previewStreamer) Start(rootCtx context.Context, spec preview.PreviewSpec) <-chan []usage.LogEntry {
+	ps.mu.Lock()
+	if ps.cancel != nil {
+		ps.cancel() // signal old goroutine to exit; it will close its channel
+	}
+	if spec.JSONLPath == "" || spec.Display == "" || spec.Display == "none" {
+		ps.cancel = nil
+		ps.mu.Unlock()
+		return nil
+	}
+	ctx, cancel := context.WithCancel(rootCtx)
+	ps.cancel = cancel
+	ps.mu.Unlock()
+
+	out := make(chan []usage.LogEntry, 1)
+	go ps.run(ctx, spec, out)
+	return out
+}
+
+// Stop cancels the running stream without starting a new one.
+func (ps *previewStreamer) Stop() {
+	ps.mu.Lock()
+	if ps.cancel != nil {
+		ps.cancel()
+		ps.cancel = nil
+	}
+	ps.mu.Unlock()
+}
+
+func (ps *previewStreamer) run(ctx context.Context, spec preview.PreviewSpec, out chan []usage.LogEntry) {
+	// Closing out signals any waiting listenStream Cmd to return nil.
+	defer close(out)
+
+	// Attempt a non-blocking send; if the channel is full, replace the stale value.
+	// ctx.Done() is included so we don't block when the context is cancelled.
+	trySend := func(entries []usage.LogEntry) {
+		select {
+		case out <- entries:
+		case <-ctx.Done():
+		default:
+			select { case <-out: default: }
+			select {
+			case out <- entries:
+			case <-ctx.Done():
+			}
+		}
+	}
+
+	// Build prefix entries from /clear history (oldest first).
+	// Uses the same algorithm as Manager.StreamSession.
+	var prefixEntries []usage.LogEntry
+	for i := len(spec.PriorJSONLPaths) - 1; i >= 0; i-- {
+		prev := usage.NewLogStreamer(spec.PriorJSONLPaths[i])
+		prev.ReadAll()
+		prefixEntries = append(prev.Entries(), prefixEntries...)
+		if len(prefixEntries) >= usage.MaxEntries {
+			break
+		}
+	}
+	if len(prefixEntries) > usage.MaxEntries {
+		prefixEntries = prefixEntries[len(prefixEntries)-usage.MaxEntries:]
+	}
+
+	merge := func(current []usage.LogEntry) []usage.LogEntry {
+		if len(prefixEntries) == 0 {
+			return current
+		}
+		merged := make([]usage.LogEntry, 0, len(prefixEntries)+len(current))
+		merged = append(merged, prefixEntries...)
+		merged = append(merged, current...)
+		if len(merged) > usage.MaxEntries {
+			merged = merged[len(merged)-usage.MaxEntries:]
+		}
+		return merged
+	}
+
+	// Phase 1: tail-read the current file for instant display.
+	s := usage.NewLogStreamer(spec.JSONLPath)
+	fileSize := s.ReadTail(512 * 1024) // 512KB
+	if ctx.Err() != nil {
+		return
+	}
+	trySend(merge(s.Entries()))
+
+	// Phase 2: watch for new writes (tail-follow).
+	for {
+		err := s.RunFrom(ctx, fileSize, func(entries []usage.LogEntry) {
+			trySend(merge(entries))
+		})
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			return
+		}
+		// Error — restart from scratch after a brief pause.
+		s = usage.NewLogStreamer(spec.JSONLPath)
+		fileSize = s.ReadTail(512 * 1024)
+		if ctx.Err() != nil {
+			return
+		}
+		trySend(merge(s.Entries()))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// ── PreviewModel ──────────────────────────────────────────────────────────────
 
 // PreviewModel is the Bubble Tea model for the --preview subprocess.
 // It renders a full-screen JSONL log viewer for a single session and
-// switches sessions in response to PreviewSelectionMsg events.
+// switches sessions in response to PreviewSpecMsg events from the main process.
 //
-// Unlike the main Model, PreviewModel has no session list, no PTY viewport,
-// no session creation/deletion keys, and no pane layout management.
+// Unlike the main Model, PreviewModel owns no session.Manager — it renders
+// only what the main process describes in the PreviewSpec IPC payload.
 // Interaction is limited to scrolling and quitting.
 type PreviewModel struct {
-	manager *session.Manager
-	config  *config.Config
+	config *config.Config
+	ctx    context.Context
 
 	width, height int
 
-	selectedID   session.DeckSessionID
-	selectedSnap *session.Snapshot
-	logViewport  viewport.Model
-	logFollow    bool
-	logCache     renderCache
+	spec        preview.PreviewSpec
+	logEntries  []usage.LogEntry
+	logViewport viewport.Model
+	logFollow   bool
+	logCache    renderCache
+	streamer    *previewStreamer
 
 	pendingG bool // vim-style gg sequence
 }
 
-// NewPreviewModel creates a PreviewModel ready to display the given initial session.
-func NewPreviewModel(mgr *session.Manager, cfg *config.Config) PreviewModel {
+// NewPreviewModel creates a PreviewModel ready to display JSONL logs.
+func NewPreviewModel(cfg *config.Config, ctx context.Context) PreviewModel {
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 	vp.SetContent("")
 	return PreviewModel{
-		manager:     mgr,
 		config:      cfg,
+		ctx:         ctx,
 		logViewport: vp,
 		logFollow:   true,
+		streamer:    &previewStreamer{},
 	}
 }
 
@@ -60,36 +213,55 @@ func NewPreviewModel(mgr *session.Manager, cfg *config.Config) PreviewModel {
 func (m PreviewModel) Init() tea.Cmd {
 	dataDir := m.config.DataDir
 	return func() tea.Msg {
-		sid, err := preview.ReadSelection(dataDir)
-		if err != nil || sid == "" {
+		spec, err := preview.ReadSpec(dataDir)
+		if err != nil || spec.Display == "" {
 			return nil
 		}
-		debuglog.Printf("[preview Init] initial selection: %s", sid)
-		return PreviewSelectionMsg{SessionID: sid}
+		debuglog.Printf("[preview Init] initial selection: %s display=%s", spec.DeckSessionID, spec.Display)
+		return PreviewSpecMsg{Spec: spec}
 	}
 }
 
 // Update handles messages for the preview model.
 func (m PreviewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case PreviewSelectionMsg:
-		if msg.SessionID != m.selectedID {
-			debuglog.Printf("[preview] switching to session %s", msg.SessionID)
-			m.selectedID = msg.SessionID
-			m.logFollow = true
-			m.manager.StreamSession(m.selectedID)
-			m.refreshSnap()
+	case PreviewSpecMsg:
+		prevSpec := m.spec
+		m.spec = msg.Spec
+
+		if msg.Spec.Display == "" {
+			// Selection cleared
+			m.streamer.Stop()
+			m.logEntries = nil
+			m.logCache = renderCache{}
 			m.syncViewport()
+			return m, nil
 		}
+
+		// Restart streaming when the session or JSONL path changes.
+		// Status/tool updates with the same path reuse the existing listener.
+		needsRestart := msg.Spec.JSONLPath != prevSpec.JSONLPath ||
+			msg.Spec.DeckSessionID != prevSpec.DeckSessionID
+		if needsRestart {
+			debuglog.Printf("[preview] switching to session %s display=%s", msg.Spec.DeckSessionID, msg.Spec.Display)
+			m.logEntries = nil
+			m.logFollow = true
+			m.logCache = renderCache{}
+			ch := m.streamer.Start(m.ctx, msg.Spec)
+			m.syncViewport()
+			// Old listenStream Cmd sees the old channel close and returns nil.
+			// This new Cmd listens on the fresh channel.
+			return m, listenStream(ch)
+		}
+		// Metadata-only update (Status, CurrentTool, etc.) — keep existing listener.
+		m.syncViewport()
 		return m, nil
 
-	case SessionRefreshMsg:
-		// Refresh if our session changed (token update, status change, etc.)
-		if msg.ChangedIDs == nil || msg.ChangedIDs[m.selectedID] {
-			m.refreshSnap()
-			m.syncViewport()
-		}
-		return m, nil
+	case previewLogUpdateMsg:
+		m.logEntries = msg.entries
+		m.syncViewport()
+		// Re-listen on the same channel for subsequent updates.
+		return m, listenStream(msg.ch)
 
 	case tea.WindowSizeMsg:
 		debuglog.Printf("[preview] WindowSizeMsg: %dx%d", msg.Width, msg.Height)
@@ -175,13 +347,12 @@ func (m PreviewModel) View() tea.View {
 }
 
 func (m PreviewModel) render() string {
-	if m.selectedSnap == nil {
+	if m.spec.Display == "" {
 		return lipgloss.NewStyle().
 			Width(m.width).Height(m.height).
 			Render(dimStyle.Render("セッションを選択してください"))
 	}
 
-	snap := *m.selectedSnap
 	innerWidth := m.width - 2
 	if innerWidth < 10 {
 		innerWidth = 10
@@ -189,22 +360,22 @@ func (m PreviewModel) render() string {
 
 	var sections []string
 
-	switch snap.Display {
-	case session.DisplayNone:
-		// Running session: show metadata only (Claude Code is in tmux window)
-		sections = m.renderHeader(snap, innerWidth)
+	switch m.spec.Display {
+	case "none":
+		// Running session — Claude Code is live in the tmux window.
+		sections = m.renderHeader(innerWidth)
 		sections = append(sections, "")
 		sections = append(sections, dimStyle.Render("  tmux ウィンドウで表示中"))
-		if snap.CurrentTool != "" {
-			sections = append(sections, statusRunningStyle.Render(truncate(fmt.Sprintf("   🔧 %s", snap.CurrentTool), innerWidth)))
+		if m.spec.CurrentTool != "" {
+			sections = append(sections, statusRunningStyle.Render(truncate(fmt.Sprintf("   🔧 %s", m.spec.CurrentTool), innerWidth)))
 		}
-		if snap.Status.NeedsAttention() {
+		if m.spec.NeedsAttention {
 			sections = append(sections, statusApproveStyle.Render(truncate("   👆 承認待ち — tmux ウィンドウで操作してください", innerWidth)))
 		}
 
 	default:
-		// DisplayJSONL (and fallback for any other mode)
-		sections = m.renderHeader(snap, innerWidth)
+		// "jsonl" (and fallback for any other mode)
+		sections = m.renderHeader(innerWidth)
 		sections = append(sections, "")
 		sections = append(sections, m.logViewport.View())
 	}
@@ -215,27 +386,28 @@ func (m PreviewModel) render() string {
 	return lipgloss.JoinVertical(lipgloss.Left, sections...)
 }
 
-func (m PreviewModel) renderHeader(snap session.Snapshot, innerWidth int) []string {
+func (m PreviewModel) renderHeader(innerWidth int) []string {
 	var h []string
 
-	title := fmt.Sprintf("📋 %s (%s)", snap.Name, snap.RepoName)
+	title := fmt.Sprintf("📋 %s (%s)", m.spec.Name, m.spec.RepoName)
 	h = append(h, titleStyle.Render(truncate(title, innerWidth)))
-	h = append(h, dimStyle.Render(truncate(fmt.Sprintf("   パス: %s", snap.WorkspacePath), innerWidth)))
+	h = append(h, dimStyle.Render(truncate(fmt.Sprintf("   パス: %s", m.spec.WorkspacePath), innerWidth)))
 
-	idLine := fmt.Sprintf("   ID: %s  Claude: %s", snap.ID, snap.ClaudeSessionID)
-	if snap.ClearCount > 0 {
-		idLine += fmt.Sprintf("  (/clear×%d)", snap.ClearCount)
+	idLine := fmt.Sprintf("   ID: %s  Claude: %s", m.spec.DeckSessionID, m.spec.ClaudeSessionID)
+	if m.spec.ClearCount > 0 {
+		idLine += fmt.Sprintf("  (/clear×%d)", m.spec.ClearCount)
 	}
 	h = append(h, dimStyle.Render(truncate(idLine, innerWidth)))
 
-	if snap.CurrentTool != "" {
-		h = append(h, statusRunningStyle.Render(truncate(fmt.Sprintf("   🔧 %s", snap.CurrentTool), innerWidth)))
+	if m.spec.CurrentTool != "" {
+		h = append(h, statusRunningStyle.Render(truncate(fmt.Sprintf("   🔧 %s", m.spec.CurrentTool), innerWidth)))
 	}
-	if snap.Status.NeedsAttention() {
+	if m.spec.NeedsAttention {
 		h = append(h, statusApproveStyle.Render(truncate("   👆 承認待ち", innerWidth)))
 	}
-	if snap.Status == session.StatusError && snap.ErrorMessage != "" {
-		h = append(h, statusErrorStyle.Render(truncate("   ✗ "+snap.ErrorMessage, innerWidth)))
+	// StatusError は Status.String() == "エラー"
+	if m.spec.Status == "エラー" && m.spec.ErrorMessage != "" {
+		h = append(h, statusErrorStyle.Render(truncate("   ✗ "+m.spec.ErrorMessage, innerWidth)))
 	}
 
 	return h
@@ -243,33 +415,19 @@ func (m PreviewModel) renderHeader(snap session.Snapshot, innerWidth int) []stri
 
 // ── internal helpers ──────────────────────────────────────────────────────────
 
-func (m *PreviewModel) refreshSnap() {
-	if m.selectedID == "" {
-		m.selectedSnap = nil
-		return
-	}
-	if sess := m.manager.GetSession(m.selectedID); sess != nil {
-		snap := sess.Snapshot()
-		m.selectedSnap = &snap
-		return
-	}
-	m.selectedSnap = nil
-}
-
-// headerLineCount returns how many header lines renderHeader will produce.
+// headerLineCount returns how many lines renderHeader will produce.
 func (m *PreviewModel) headerLineCount() int {
-	if m.selectedSnap == nil {
+	if m.spec.Display == "" {
 		return 0
 	}
-	snap := *m.selectedSnap
 	n := 3 // title + path + id
-	if snap.CurrentTool != "" {
+	if m.spec.CurrentTool != "" {
 		n++
 	}
-	if snap.Status.NeedsAttention() {
+	if m.spec.NeedsAttention {
 		n++
 	}
-	if snap.Status == session.StatusError && snap.ErrorMessage != "" {
+	if m.spec.Status == "エラー" && m.spec.ErrorMessage != "" {
 		n++
 	}
 	return n
@@ -287,19 +445,8 @@ func (m *PreviewModel) resizeViewport() {
 }
 
 func (m *PreviewModel) syncViewport() {
-	if m.selectedID == "" || m.selectedSnap == nil {
+	if m.spec.Display == "" || m.spec.Display == "none" {
 		m.logViewport.SetContent("")
-		return
-	}
-	snap := *m.selectedSnap
-	if snap.Display == session.DisplayNone {
-		m.logViewport.SetContent("")
-		return
-	}
-
-	sess := m.manager.GetSession(m.selectedID)
-	if sess == nil {
-		m.logViewport.SetContent(dimStyle.Render("(セッションが見つかりません)"))
 		return
 	}
 
@@ -308,9 +455,8 @@ func (m *PreviewModel) syncViewport() {
 		innerWidth = 10
 	}
 
-	entries := sess.GetStructuredLogs()
-	if len(entries) > 0 {
-		rendered := RenderLogs(entries, innerWidth, &m.logCache)
+	if len(m.logEntries) > 0 {
+		rendered := RenderLogs(m.logEntries, innerWidth, &m.logCache)
 		m.logViewport.SetContent(rendered)
 	} else {
 		m.logViewport.SetContent(dimStyle.Render("(出力なし)"))

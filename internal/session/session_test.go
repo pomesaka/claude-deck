@@ -168,8 +168,8 @@ func TestSession_Phase(t *testing.T) {
 				sess.AttachProcess(0, nil)
 			}
 			snap := sess.Snapshot()
-			if snap.Phase != tt.want {
-				t.Errorf("Phase = %v, want %v", snap.Phase, tt.want)
+			if snap.Phase() != tt.want {
+				t.Errorf("Phase = %v, want %v", snap.Phase(), tt.want)
 			}
 		})
 	}

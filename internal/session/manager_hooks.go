@@ -205,10 +205,7 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 		m.persist(sess)
 
 		// JSONL ストリーミングを新セッションに切り替え
-		m.mu.RLock()
-		activeID := m.activeStreamID
-		m.mu.RUnlock()
-		if activeID == deckID {
+		if m.stream.isCurrent(deckID) {
 			m.stopActiveStream(deckID)
 			m.StreamSession(deckID)
 		}
