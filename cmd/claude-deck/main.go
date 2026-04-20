@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"regexp"
 	"runtime/debug"
 	"syscall"
 	"time"
@@ -191,7 +192,9 @@ func run() error {
 		fmt.Print(msg)
 		fmt.Fprint(os.Stderr, "Press any key to continue...")
 		b := make([]byte, 1)
-		os.Stdin.Read(b) //nolint:errcheck
+		if _, err := os.Stdin.Read(b); err != nil {
+			return err
+		}
 		fmt.Fprint(os.Stderr, "\033[2K\r") // "Press any key..." 行だけクリア
 	}
 	if err := mgr.StartEventWatcher(ctx); err != nil {
@@ -304,9 +307,15 @@ func buildManagerConfig(cfg *config.Config, backendMode session.BackendMode, ref
 
 // setupGhosttySplit opens the tmux right pane in Ghostty if running inside it.
 // Returns the Ghostty terminal UUID for cleanup on exit (empty string if not split).
+var tmuxSessionNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
 func setupGhosttySplit(cfg *config.Config) string {
 	tmuxSession := cfg.Tmux.SessionName
 	if tmuxSession == "" {
+		tmuxSession = "claude-deck"
+	}
+	if !tmuxSessionNameRE.MatchString(tmuxSession) {
+		fmt.Fprintf(os.Stderr, "warning: tmux session name %q contains invalid characters; falling back to \"claude-deck\"\n", tmuxSession)
 		tmuxSession = "claude-deck"
 	}
 

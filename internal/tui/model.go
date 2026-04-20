@@ -429,7 +429,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusMsg = "セッションをフォークしました"
 			m.selectedID = msg.sessionID
-			m.refreshSessions()
+			cmds = append(cmds, m.refreshSessions()...)
 			m.layout.FocusDetail()
 			if !m.backendMode.IsTmuxLike() {
 				m.ptyInputActive = true
@@ -699,7 +699,7 @@ func (m *Model) buildPreviewSpec() preview.PreviewSpec {
 		ClaudeSessionID: snap.ClaudeSessionID,
 		PriorClaudeIDs:  snap.PriorClaudeIDs,
 		ClearCount:      snap.ClearCount,
-		Status:          snap.Status.String(),
+		Status:          snap.Status.ID(),
 		Display:         snap.Display.String(),
 		CurrentTool:     snap.CurrentTool,
 		ErrorMessage:    snap.ErrorMessage,
@@ -709,66 +709,50 @@ func (m *Model) buildPreviewSpec() preview.PreviewSpec {
 	}
 }
 
-// doSwitchRightPane は右ペイン制御のコアロジック。goroutine または tea.Cmd から呼ぶ。
-//
-// focusRight の意味でペイン切替先を決定する:
-//
-//   - focusRight=false (カーソル移動): 常に __preview__ (JSONL viewer) を表示する。
-//     稼働中・停止中を問わず、マウスホイールで会話履歴をスクロールして見られる。
-//
-//   - focusRight=true (Enter/新規/再開/fork) かつ稼働中 (DisplayNone): ライブ端末を表示し
-//     Ghostty のフォーカスを右ペインに移す（Claude Code と直接対話するため）。
-//
-//   - focusRight=true かつ非稼働: __preview__ を表示（ライブ端末が存在しない）。
-//
-// split でない tmux mode では __preview__ が存在しないため、稼働中セッションのみ
-// tmux select-window を発行する（従来通り）。
-func (m *Model) doSwitchRightPane(sid session.DeckSessionID, focusRight bool) {
-	if !m.backendMode.IsTmuxLike() {
-		return
-	}
-
-	var display session.DisplayChannel
-	if sess := m.manager.GetSession(sid); sess != nil {
-		display = sess.Snapshot().Display
-	}
-
-	if m.backendMode.IsSplit() {
-		if display == session.DisplayNone {
-			// 稼働中セッション: カーソル移動・明示操作いずれも実際の tmux ウィンドウを表示。
-			// __preview__ は DisplayNone の場合にヘッダー数行のみとなり大部分が黒くなるため。
-			// focusRight=true（Enter/新規/再開）のときのみ Ghostty フォーカスを右ペインに移す。
-			_ = m.manager.FocusSession(sid)
-			if focusRight {
-				_ = ghostty.FocusRight()
-			}
-			return
-		}
-		// 非稼働セッション → JSONL プレビュー（会話履歴をスクロールして見られる）
-		if err := preview.WriteSpec(m.config.DataDir, m.buildPreviewSpec()); err != nil {
-			debuglog.Printf("[switchRightPane] preview IPC: %v", err)
-		}
-		_ = m.manager.FocusPreviewWindow()
-		if focusRight {
-			_ = ghostty.FocusRight()
-		}
-		return
-	}
-
-	// split なし tmux mode: 稼働中セッションのウィンドウに切替
-	if display == session.DisplayNone {
-		_ = m.manager.FocusSession(sid)
-	}
-}
-
-// switchRightPane は doSwitchRightPane を tea.Cmd として返す。
+// switchRightPane は右ペイン制御を tea.Cmd として返す。
 // Update() のメッセージハンドラから発行する明示的なユーザー操作（Enter/n/r/f）に使う。
+//
+// display と spec は Update フレーム内（Cmd 生成時）でキャプチャする。
+// bubbletea は Cmd を別 goroutine で実行するため、後からカーソルが移動しても
+// 生成時点のセッションに対する仕様が書き出される（順序性の保証）。
 func (m *Model) switchRightPane(sid session.DeckSessionID, focusRight bool) tea.Cmd {
 	if !m.backendMode.IsTmuxLike() {
 		return nil
 	}
+	// Update フレームで display と spec を確定する。
+	var display session.DisplayChannel
+	if sess := m.manager.GetSession(sid); sess != nil {
+		display = sess.Snapshot().Display
+	}
+	var spec preview.PreviewSpec
+	if m.backendMode.IsSplit() && display != session.DisplayNone {
+		spec = m.buildPreviewSpec()
+	}
+	isSplit := m.backendMode.IsSplit()
+	dataDir := m.config.DataDir
+	mgr := m.manager
 	return func() tea.Msg {
-		m.doSwitchRightPane(sid, focusRight)
+		if isSplit {
+			if display == session.DisplayNone {
+				_ = mgr.FocusSession(sid)
+				if focusRight {
+					_ = ghostty.FocusRight()
+				}
+				return nil
+			}
+			if err := preview.WriteSpec(dataDir, spec); err != nil {
+				debuglog.Printf("[switchRightPane] preview IPC: %v", err)
+			}
+			_ = mgr.FocusPreviewWindow()
+			if focusRight {
+				_ = ghostty.FocusRight()
+			}
+			return nil
+		}
+		// split なし tmux mode: 稼働中セッションのウィンドウに切替
+		if display == session.DisplayNone {
+			_ = mgr.FocusSession(sid)
+		}
 		return nil
 	}
 }

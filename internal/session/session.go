@@ -45,6 +45,29 @@ func (s Status) String() string {
 	}
 }
 
+// ID returns a stable lowercase ASCII identifier for use in IPC and machine-readable output.
+// Unlike String(), this method is not localized and safe to compare programmatically.
+func (s Status) ID() string {
+	switch s {
+	case StatusRunning:
+		return "running"
+	case StatusWaitingApproval:
+		return "waiting_approval"
+	case StatusWaitingAnswer:
+		return "waiting_answer"
+	case StatusCompleted:
+		return "completed"
+	case StatusError:
+		return "error"
+	case StatusIdle:
+		return "idle"
+	case StatusUnmanaged:
+		return "unmanaged"
+	default:
+		return "unknown"
+	}
+}
+
 // NeedsAttention returns true if the session requires user action.
 func (s Status) NeedsAttention() bool {
 	return s == StatusWaitingApproval || s == StatusWaitingAnswer
@@ -192,13 +215,13 @@ const (
 func (d DisplayChannel) String() string {
 	switch d {
 	case DisplayPTY:
-		return "PTY"
+		return "pty"
 	case DisplayJSONL:
-		return "JSONL"
+		return "jsonl"
 	case DisplayNone:
-		return "None"
+		return "none"
 	default:
-		return "Unknown"
+		return "unknown"
 	}
 }
 
@@ -343,10 +366,9 @@ type Session struct {
 	process atomic.Pointer[RunningProcess]
 }
 
-// displayChannelLocked returns the appropriate display data source for this session.
-// Must be called with mu held (at least for reading) for Status/Hosting, but reads
-// process via atomic load (safe without mu).
-func (s *Session) displayChannelLocked() DisplayChannel {
+// displayChannel returns the appropriate display data source for this session.
+// Reads process via atomic load; mu need not be held.
+func (s *Session) displayChannel() DisplayChannel {
 	p := s.process.Load()
 	if p == nil {
 		return DisplayJSONL // no active process → show structured logs
@@ -357,10 +379,10 @@ func (s *Session) displayChannelLocked() DisplayChannel {
 	return DisplayNone // external terminal owns PTY → user interacts there
 }
 
-// hostingLocked returns the hosting mode derived from the current process state.
+// hosting returns the hosting mode derived from the current process state.
 // HostEmbedded when an embedded process is running (display != nil), HostExternal otherwise.
-// Reads process via atomic load; calling with mu held is safe.
-func (s *Session) hostingLocked() HostingMode {
+// Reads process via atomic load; mu need not be held.
+func (s *Session) hosting() HostingMode {
 	if rp := s.process.Load(); rp != nil && rp.IsEmbedded() {
 		return HostEmbedded
 	}
@@ -445,7 +467,7 @@ func (s *Session) AttachProcess(pid int, display *PTYDisplay) {
 	s.process.Store(rp)
 }
 
-// ReconcileStatusFromStore corrects the session status when loaded from the store.
+// reconcileStatusFromStore corrects the session status when loaded from the store.
 // ストア復元直後に呼び出し、保存時に実行中だったセッションが実際には死んでいる場合に
 // StatusCompleted へ補正し FinishedAt を記録する。
 // StatusRunning / WaitingApproval / WaitingAnswer / Idle のいずれかで PID が生存していなければ補正し、
@@ -453,7 +475,11 @@ func (s *Session) AttachProcess(pid int, display *PTYDisplay) {
 //
 // LoadExisting と SyncNewFromStore の両方から呼ばれる共通ロジック。
 // ワーキングディレクトリの存在確認など起動時固有の補正は呼び出し側で行うこと。
-func (s *Session) ReconcileStatusFromStore() bool {
+//
+// 前提: 呼び出し時点で s は他の goroutine に公開されていない（m.sessions への登録前の
+// deserialize 直後のローカル変数）。そのため s.mu を取得せずにフィールドを直書きしている。
+// 登録済みセッションに対して呼ぶのは禁止。
+func (s *Session) reconcileStatusFromStore() bool {
 	switch s.Status {
 	case StatusRunning, StatusWaitingApproval, StatusWaitingAnswer, StatusIdle:
 		if !isProcessAlive(s.PID) {
@@ -727,8 +753,8 @@ func (s *Session) Snapshot() Snapshot {
 		PriorClaudeIDs:  s.PriorClaudeIDs(),
 		ClearCount:      max(0, len(s.SessionChain)-1),
 		HasProcess:      s.process.Load() != nil,
-		Hosting:         s.hostingLocked(),
-		Display:         s.displayChannelLocked(),
+		Hosting:         s.hosting(),
+		Display:         s.displayChannel(),
 		Status:          s.Status,
 		Prompt:          s.Prompt,
 		PermissionMode:  s.PermissionMode,

@@ -236,11 +236,13 @@ func (b *tmuxBackend) Reconcile(sessions []*Session) (ReconcileResult, error) {
 	}
 
 	// Kill orphaned tmux windows (window exists but no deck session owns it).
+	// previewWindowName is managed by EnsurePreview, not by deck sessions — skip it.
 	for _, w := range windows {
-		if !deckIDs[w.Name] {
-			debuglog.Printf("[tmuxBackend.Reconcile] killing orphaned window=%s", w.Name)
-			_ = b.runner.KillWindow(w.Name)
+		if w.Name == previewWindowName || deckIDs[w.Name] {
+			continue
 		}
+		debuglog.Printf("[tmuxBackend.Reconcile] killing orphaned window=%s", w.Name)
+		_ = b.runner.KillWindow(w.Name)
 	}
 
 	// Killing the last window destroys the tmux session itself.

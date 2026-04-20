@@ -60,19 +60,25 @@ type previewStreamer struct {
 // or spec.Display is "none" (running session — no JSONL needed).
 // The returned channel is closed by the goroutine when it exits.
 func (ps *previewStreamer) Start(rootCtx context.Context, spec preview.PreviewSpec) <-chan []usage.LogEntry {
+	// Capture and clear the old cancel before releasing the lock to avoid
+	// calling an arbitrary function (cancel) while holding ps.mu.
 	ps.mu.Lock()
-	if ps.cancel != nil {
-		ps.cancel() // signal old goroutine to exit; it will close its channel
-	}
+	oldCancel := ps.cancel
 	if spec.JSONLPath == "" || spec.Display == "" || spec.Display == "none" {
 		ps.cancel = nil
 		ps.mu.Unlock()
+		if oldCancel != nil {
+			oldCancel()
+		}
 		return nil
 	}
 	ctx, cancel := context.WithCancel(rootCtx)
 	ps.cancel = cancel
 	ps.mu.Unlock()
 
+	if oldCancel != nil {
+		oldCancel() // signal old goroutine to exit; it will close its channel
+	}
 	out := make(chan []usage.LogEntry, 1)
 	go ps.run(ctx, spec, out)
 	return out
@@ -405,8 +411,7 @@ func (m PreviewModel) renderHeader(innerWidth int) []string {
 	if m.spec.NeedsAttention {
 		h = append(h, statusApproveStyle.Render(truncate("   👆 承認待ち", innerWidth)))
 	}
-	// StatusError は Status.String() == "エラー"
-	if m.spec.Status == "エラー" && m.spec.ErrorMessage != "" {
+	if m.spec.Status == "error" && m.spec.ErrorMessage != "" {
 		h = append(h, statusErrorStyle.Render(truncate("   ✗ "+m.spec.ErrorMessage, innerWidth)))
 	}
 
@@ -427,7 +432,7 @@ func (m *PreviewModel) headerLineCount() int {
 	if m.spec.NeedsAttention {
 		n++
 	}
-	if m.spec.Status == "エラー" && m.spec.ErrorMessage != "" {
+	if m.spec.Status == "error" && m.spec.ErrorMessage != "" {
 		n++
 	}
 	return n

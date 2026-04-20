@@ -627,10 +627,10 @@ func TestDisplayChannel_String(t *testing.T) {
 		ch   DisplayChannel
 		want string
 	}{
-		{DisplayPTY, "PTY"},
-		{DisplayJSONL, "JSONL"},
-		{DisplayNone, "None"},
-		{DisplayChannel(99), "Unknown"},
+		{DisplayPTY, "pty"},
+		{DisplayJSONL, "jsonl"},
+		{DisplayNone, "none"},
+		{DisplayChannel(99), "unknown"},
 	}
 	for _, tt := range tests {
 		if got := tt.ch.String(); got != tt.want {

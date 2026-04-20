@@ -794,7 +794,11 @@ func (m *Manager) DeleteSession(sessionID DeckSessionID) (warning string, err er
 	if w := m.cleanupJSONL(csID); w != "" {
 		warnings = append(warnings, w)
 	}
-	if w := m.cleanupWorkspace(repoPath, wsName); w != "" {
+	wsRootPath := ""
+	if wsName != "" && repoPath != "" {
+		wsRootPath = filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
+	}
+	if w := m.cleanupWorkspace(repoPath, wsName, wsRootPath); w != "" {
 		warnings = append(warnings, w)
 	}
 	warnings = append(warnings, m.removeSessionCore(sessionID)...)
@@ -839,17 +843,30 @@ func (m *Manager) cleanupJSONL(csID ClaudeSessionID) string {
 	return ""
 }
 
-// cleanupWorkspace runs jj workspace forget for the session's workspace.
-// Returns a warning string if the operation failed, or "" on success/skip.
-func (m *Manager) cleanupWorkspace(repoPath, wsName string) string {
+// cleanupWorkspace runs jj workspace forget and removes the workspace directory.
+// wsRootPath is the workspace root directory to delete (DataDir/workspace/<encoded>/<name>).
+// It may differ from sess.WorkspacePath, which can point to a subproject subdirectory.
+// Returns a warning string if any operation failed, or "" on success/skip.
+func (m *Manager) cleanupWorkspace(repoPath, wsName, wsRootPath string) string {
 	if wsName == "" || repoPath == "" {
 		return ""
 	}
+	var warnings []string
 	// jj ワークスペースを forget（削除時のみ。プロセス終了時は再開用に保持する）
 	if err := m.jj().ForgetWorkspace(repoPath, wsName); err != nil {
-		return fmt.Sprintf("workspace forget失敗: %v", err)
+		// forget 失敗でもディレクトリ削除は続行する（jj が既に forget 済みの場合など）
+		warnings = append(warnings, fmt.Sprintf("workspace forget失敗: %v", err))
 	}
-	return ""
+	if wsRootPath != "" {
+		// 安全ガード: DataDir/workspace/ 配下のパスのみ削除する
+		base := filepath.Join(m.config.DataDir, "workspace") + string(filepath.Separator)
+		if strings.HasPrefix(wsRootPath, base) {
+			if err := os.RemoveAll(wsRootPath); err != nil {
+				warnings = append(warnings, fmt.Sprintf("workspace ディレクトリ削除失敗: %v", err))
+			}
+		}
+	}
+	return strings.Join(warnings, "; ")
 }
 
 // Kill forcefully terminates a session.
@@ -877,6 +894,7 @@ func (m *Manager) Kill(sessionID DeckSessionID) error {
 	//   - process.Load() != nil のまま → DisplayChannel が DisplayNone/DisplayPTY のまま残る
 	//   - TUI が更新されず detail pane が古い表示のままになる
 	// watchProcess も後から同じ処理をするが、それまでの間 TUI が不整合状態になるのを防ぐ。
+	// 二重実行になるが DetachProcess / SetStatus / persist / notifyChange はすべて冪等なので問題なし。
 	if !m.backend.IsActive(sessionID) && (m.Supervisor == nil || m.Supervisor.Get(sessionID) == nil) {
 		sess.DetachProcess()
 		sess.SetStatus(StatusCompleted)

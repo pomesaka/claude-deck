@@ -61,7 +61,7 @@ func (m *Manager) LoadExisting() error {
 
 		// 前回起動時に実行中だったセッションはプロセスハンドルが失われている。
 		// PID が生存していなければ完了扱いにする。
-		s.ReconcileStatusFromStore()
+		s.reconcileStatusFromStore()
 
 		// 作業ディレクトリが存在しないセッションをエラー状態にする
 		if !isProcessAlive(s.PID) {
@@ -87,9 +87,9 @@ func (m *Manager) LoadExisting() error {
 	// SessionChain が長い順（より多くの履歴）→ 同じなら新しい順にソートする。
 	// 重複排除でチェーンが長いほうを winner とするため、長い順を先頭にする。
 	// sessions は deserialization 直後でまだ manager.sessions に登録されていないため
-	// ChainIDs() のロックは空振りだが、アクセス方法を一本化するために使う。
+	// 単独所有。ChainIDs() 経由の RLock+copy は不要で、直接 len を読んでよい。
 	sort.SliceStable(all, func(i, j int) bool {
-		li, lj := len(all[i].sess.ChainIDs()), len(all[j].sess.ChainIDs())
+		li, lj := len(all[i].sess.SessionChain), len(all[j].sess.SessionChain)
 		if li != lj {
 			return li > lj
 		}
@@ -198,7 +198,8 @@ func (m *Manager) SyncNewFromStore() {
 			// main プロセスが ClaudeSessionID を persist した後に preview プロセスへ伝播する。
 			existing.mu.Lock()
 			if len(existing.SessionChain) == 0 && len(s.SessionChain) > 0 {
-				existing.SessionChain = s.SessionChain
+				// Copy to avoid aliasing the deserialized slice.
+				existing.SessionChain = append([]ClaudeSessionID(nil), s.SessionChain...)
 			}
 			existing.mu.Unlock()
 			continue
@@ -206,7 +207,7 @@ func (m *Manager) SyncNewFromStore() {
 
 		// 新規セッション: プロセスが存在しない実行中状態は Completed に補正する
 		s.rt.LogLines = make([]string, 0)
-		s.ReconcileStatusFromStore()
+		s.reconcileStatusFromStore()
 		m.mu.Lock()
 		if _, exists := m.sessions[deckID]; !exists { // re-check under write lock
 			m.sessions[deckID] = &s

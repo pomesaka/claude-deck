@@ -75,21 +75,50 @@ func (m Model) View() tea.View {
 }
 
 func (m Model) renderHeader() string {
-	title := headerStyle.Render("🎛  claude-deck")
+	// Left: selected session status bar (kept open for future use when nothing is selected).
+	var statusBar string
+	if m.selectedSnap != nil {
+		snap := *m.selectedSnap
+		icon := sessionStatusIcon(snap.Status)
+		name := lipgloss.NewStyle().Foreground(colorText).Bold(true).Render(snap.Name)
+		repo := dimStyle.Render("(" + snap.RepoName + ")")
+		statusBar = lipgloss.JoinHorizontal(lipgloss.Top, icon, " ", name, "  ", repo)
+	}
+	left := lipgloss.NewStyle().Padding(0, 1).Render(statusBar)
 
-	infoStr := fmt.Sprintf("Sessions: %d", len(m.sessions))
-	info := tokenStyle.Render(infoStr)
-
+	// Right: attention badge + rate limits.
 	var badge string
 	if m.attentionCount > 0 {
 		badge = statusApproveStyle.Render(fmt.Sprintf(" [%d asking...]", m.attentionCount))
 	}
-
-	right := lipgloss.JoinHorizontal(lipgloss.Top, info, badge)
+	right := badge
 	if usage := m.renderRateLimits(); usage != "" {
 		right = lipgloss.JoinHorizontal(lipgloss.Top, right, "  ", usage)
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, title, "  ", right)
+	if right == "" {
+		return left
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
+}
+
+// sessionStatusIcon returns a colored "●" for the given status.
+func sessionStatusIcon(s session.Status) string {
+	switch s {
+	case session.StatusRunning:
+		return statusRunningStyle.Render("●")
+	case session.StatusIdle:
+		return statusIdleStyle.Render("●")
+	case session.StatusWaitingApproval, session.StatusWaitingAnswer:
+		return statusApproveStyle.Render("●")
+	case session.StatusCompleted:
+		return statusDoneStyle.Render("●")
+	case session.StatusError:
+		return statusErrorStyle.Render("●")
+	case session.StatusUnmanaged:
+		return unmanagedIconStyle.Render("●")
+	default:
+		return dimStyle.Render("●")
+	}
 }
 
 func (m Model) renderMain() string {
@@ -487,6 +516,11 @@ func (m Model) renderDetailPane(width, height int) string {
 }
 
 func (m Model) renderFooter() string {
+	// When a status message is active, show it exclusively — no help text.
+	if m.statusMsg != "" {
+		return footerStyle.Render(statusApproveStyle.Render(m.statusMsg))
+	}
+
 	var helpText string
 	if m.mode == viewSelectRepo {
 		helpText = "Enter:ワークスペース作成+起動 C-Enter:直接起動 Esc:戻る"
@@ -501,15 +535,7 @@ func (m Model) renderFooter() string {
 	} else {
 		helpText = "h/l:ペイン切替 j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter/i:入力/再開 r:再開 f:フォーク t:ターミナル R:再描画 dd:削除 x:終了 C-e:レイアウト C-c:quit"
 	}
-	left := dimStyle.Render(helpText + m.layout.Indicator())
-
-	var right string
-	if m.statusMsg != "" {
-		right = statusApproveStyle.Render(m.statusMsg)
-	}
-
-	footer := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
-	return footerStyle.Render(footer)
+	return footerStyle.Render(dimStyle.Render(helpText + m.layout.Indicator()))
 }
 
 const usageGaugeWidth = 10

@@ -58,7 +58,7 @@ func WriteSpec(dataDir string, spec PreviewSpec) error {
 	}
 	path := selectionPath(dataDir)
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("preview: write spec: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -90,6 +90,9 @@ func ReadSpec(dataDir string) (PreviewSpec, error) {
 //
 // If the file does not exist yet, the parent directory is watched and monitoring
 // switches to the file once it appears — identical to the ratelimits pattern.
+//
+// Note: watcher errors are logged but not propagated; the goroutine exits silently
+// if the watcher channel closes unexpectedly. Callers cannot detect this condition.
 func WatchSpec(ctx context.Context, dataDir string, onChange func(PreviewSpec)) error {
 	path := selectionPath(dataDir)
 

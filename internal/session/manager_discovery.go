@@ -138,12 +138,15 @@ func (m *Manager) hasManagedSessionAtWorkspaceLocked(workspacePath string) bool 
 		return false
 	}
 	for _, s := range m.sessions {
-		// WorkspacePath は CreateSession 時に固定され変更されないため sess.mu 不要
+		// WorkspacePath は CreateSession 時に固定され変更されないため sess.mu 不要。
 		if s.WorkspacePath != workspacePath {
 			continue
 		}
-		// Status は sess.mu なしで読むが、ここではベストエフォートで十分
-		if s.Status != StatusUnmanaged && !s.Status.IsTerminal() {
+		// s.Status を s.mu なしで直読みする。concurrency.md の鉄則「m.mu 保持中に s.mu を
+		// 取得しない」を守るための措置。Status の書き手は常に s.mu を保持し m.mu は保持しない
+		// ため、読み値がナノ秒単位で古くなる可能性はあるが、この重複フィルタ用途では許容できる。
+		status := s.Status
+		if status != StatusUnmanaged && !status.IsTerminal() {
 			return true
 		}
 	}
@@ -154,22 +157,23 @@ func (m *Manager) hasManagedSessionAtWorkspaceLocked(workspacePath string) bool 
 // already tracked by the manager. This includes all chain entries (current and
 // historical) for every tracked session, so /clear history is never re-imported.
 func (m *Manager) knownClaudeSessionIDs() map[ClaudeSessionID]bool {
-	sessions := m.copySessionsList()
+	sessions := m.copySessionsList() // releases m.mu before returning
 	known := make(map[ClaudeSessionID]bool, len(sessions)*2)
 	for _, s := range sessions {
-		s.mu.RLock()
-		for _, id := range s.SessionChain {
+		for _, id := range s.ChainIDs() { // acquires s.mu internally; m.mu not held here
 			if id != "" {
 				known[id] = true
 			}
 		}
-		s.mu.RUnlock()
 	}
 	return known
 }
 
 // hasClaudeSessionID returns true if any session in the chain contains claudeSessionID.
 // REQUIRES m.mu to be held (at least for reading); accessing m.sessions without it is a data race.
+// SessionChain is read directly (without s.mu) to avoid lock ordering violation (m.mu → s.mu
+// is forbidden per concurrency.md). Writers of SessionChain always hold s.mu, never m.mu,
+// so the concurrent read is a benign race acceptable for this deduplication check.
 func (m *Manager) hasClaudeSessionID(claudeSessionID ClaudeSessionID) bool {
 	for _, existing := range m.sessions {
 		if slices.Contains(existing.SessionChain, claudeSessionID) {

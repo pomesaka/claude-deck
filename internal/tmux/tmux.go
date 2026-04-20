@@ -159,7 +159,8 @@ func (r *Runner) PanePID(windowName string) (int, error) {
 // This is used by WriteInput in tmux mode; for typical workflows the user
 // interacts directly via the tmux client and this method is rarely called.
 func (r *Runner) SendKeys(windowName, keys string) error {
-	_, err := r.run("send-keys", "-t", r.sess()+":"+windowName, keys)
+	// -l sends keys literally, preventing tmux from interpreting special key names.
+	_, err := r.run("send-keys", "-l", "-t", r.sess()+":"+windowName, keys)
 	return err
 }
 

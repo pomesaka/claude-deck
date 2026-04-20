@@ -1,5 +1,8 @@
 # Split Mode: 右ペイン制御 設計ドキュメント
 
+> **注意**: 本文書は split mode 導入時の設計分析メモです。
+> 実装の最終仕様は ADR-004 および `internal/session/session.go:displayChannel()` を参照してください。
+
 ## 概要
 
 Split mode（Ghostty 分割 + tmux backend）では、右ペインは「選択中セッションの状態」を常に反映すべきである。
@@ -18,19 +21,24 @@ Split mode（Ghostty 分割 + tmux backend）では、右ペインは「選択�
 ### DisplayChannel（セッション状態から自動導出）
 
 ```go
-func displayChannelLocked() DisplayChannel {
-    if s.Hosting == HostExternal && s.managed {
-        return DisplayNone    // tmux mode で起動中
+// 現在の実装 (session.go:displayChannel)
+func displayChannel() DisplayChannel {
+    p := s.process.Load()
+    if p == nil {
+        return DisplayJSONL    // プロセスなし → ログ表示
     }
-    return DisplayJSONL       // 停止中（PTY mode も含む）
+    if p.IsEmbedded() {
+        return DisplayPTY      // PTY mode（split mode 外）
+    }
+    return DisplayNone         // tmux mode で稼働中
 }
 ```
 
-| managed | Hosting | DisplayChannel |
-|---------|---------|----------------|
-| true | HostExternal (tmux) | **DisplayNone** — tmux window で稼働中 |
-| false | HostExternal (tmux) | **DisplayJSONL** — 停止、ログを表示 |
-| true | HostEmbedded (PTY) | DisplayPTY — (split mode 外) |
+| RunningProcess | IsEmbedded | DisplayChannel |
+|----------------|------------|----------------|
+| nil | — | **DisplayJSONL** — 停止、ログを表示 |
+| non-nil | false | **DisplayNone** — tmux window で稼働中 |
+| non-nil | true | DisplayPTY — PTY mode（split mode 外） |
 
 ### 右ペイン表示ルール
 
