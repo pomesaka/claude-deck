@@ -53,7 +53,8 @@ internal/
 3. この CLAUDE.md — 開発規約
 4. [docs/architecture.md](docs/architecture.md) — パッケージ構成と初期化フロー
 5. [docs/concurrency.md](docs/concurrency.md) — 並行処理ルール
-6. [docs/adr/](docs/adr/) — 設計判断の記録
+6. [docs/data-lifecycle.md](docs/data-lifecycle.md) — 外部データ（workspace・store・JSONL）のライフサイクル
+7. [docs/adr/](docs/adr/) — 設計判断の記録
 
 ドメイン概念を追加・変更したらコードと同時にドキュメントも更新すること。
 
@@ -125,9 +126,7 @@ Completed / Error      (hook: Stop → Idle)
 | `n` | 新規セッション（Enter: ワークスペース付, C-Enter: 直接起動） |
 | `r` | セッション再開 |
 | `f` | セッションフォーク |
-| `dd` | セッション削除（JSONL 含む完全削除） |
-| `dD` | deck メタデータのみ削除（JSONL 残す、再発見される） |
-| `x` | プロセス終了 |
+| `x` | プロセス終了 + ワークスペース削除（JSONL・メタデータは保持） |
 | `t` | Ghostty ターミナル起動 |
 | `/` | フィルタ |
 | `tab` | 次の要手動介入セッションへジャンプ |

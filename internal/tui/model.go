@@ -145,7 +145,6 @@ type Model struct {
 
 	// Vim-style key sequence state
 	pendingG        bool
-	pendingD        bool
 	logFollow       bool // ログビューポート末尾追従モード
 	ptyFollow       bool // PTY ビューポート末尾追従モード
 	refreshInterval time.Duration

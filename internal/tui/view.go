@@ -531,9 +531,9 @@ func (m Model) renderFooter() string {
 	} else if m.filterText != "" {
 		helpText = fmt.Sprintf("フィルタ: %s / Esc:解除 ?:ヘルプ", m.filterText)
 	} else if m.backendMode.IsSplit() {
-		helpText = "j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter:入力 r:再開 f:フォーク t:ターミナル R:再描画 dd:削除 x:終了 C-c:quit"
+		helpText = "j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter:入力 r:再開 f:フォーク t:ターミナル R:再描画 x:終了 C-c:quit"
 	} else {
-		helpText = "h/l:ペイン切替 j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter/i:入力/再開 r:再開 f:フォーク t:ターミナル R:再描画 dd:削除 x:終了 C-e:レイアウト C-c:quit"
+		helpText = "h/l:ペイン切替 j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter/i:入力/再開 r:再開 f:フォーク t:ターミナル R:再描画 x:終了 C-e:レイアウト C-c:quit"
 	}
 	return footerStyle.Render(dimStyle.Render(helpText + m.layout.Indicator()))
 }

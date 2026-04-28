@@ -41,6 +41,8 @@ main() → run()
 
 ## セッションライフサイクル
 
+外部ファイル（workspace・store・JSONL）の作成・削除タイミングは [data-lifecycle.md](data-lifecycle.md) を参照。
+
 ### 新規作成フロー
 
 ```

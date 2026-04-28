@@ -601,6 +601,8 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID, co
 	csID := sess.CurrentClaudeID()
 	wsPath := sess.WorkspacePath
 	repoPath := sess.RepoPath
+	sessName := sess.Name
+	subProjectDir := sess.SubProjectDir
 	sess.mu.RUnlock()
 	debuglog.Printf("[ResumeSession] csID=%q wsPath=%q repoPath=%q", csID, wsPath, repoPath)
 
@@ -608,7 +610,21 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID, co
 		return fmt.Errorf("no Claude Code session ID available for resume")
 	}
 
-	// Determine work directory: prefer workspace, fall back to repo
+	// ワークスペースがなければ（Kill で削除済み）再作成する。
+	if wsPath == "" && repoPath != "" && sessName != "" {
+		newWsPath, err := m.recreateWorkspace(repoPath, sessName, subProjectDir)
+		if err != nil {
+			debuglog.Printf("[ResumeSession] workspace recreate failed, falling back to repo: %v", err)
+			wsPath = repoPath
+		} else {
+			wsPath = newWsPath
+			sess.mu.Lock()
+			sess.WorkspaceName = sessName
+			sess.WorkspacePath = newWsPath
+			sess.mu.Unlock()
+		}
+	}
+
 	workDir := wsPath
 	if workDir == "" {
 		workDir = repoPath
@@ -869,7 +885,26 @@ func (m *Manager) cleanupWorkspace(repoPath, wsName, wsRootPath string) string {
 	return strings.Join(warnings, "; ")
 }
 
-// Kill forcefully terminates a session.
+// recreateWorkspace creates a new jj workspace for a session whose workspace was deleted.
+// Returns the effective work directory (wsPath/subProjectDir if subProjectDir is set).
+func (m *Manager) recreateWorkspace(repoPath, sessName, subProjectDir string) (string, error) {
+	wsPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), sessName)
+	var extraSymlinks []string
+	if m.config.WorkspaceSymlinksFunc != nil {
+		extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
+	}
+	debuglog.Printf("[recreateWorkspace] repoPath=%q sessName=%q wsPath=%q", repoPath, sessName, wsPath)
+	if err := m.jj().CreateWorkspaceAt(repoPath, sessName, wsPath, extraSymlinks); err != nil {
+		return "", fmt.Errorf("recreating jj workspace: %w", err)
+	}
+	if subProjectDir != "" {
+		return filepath.Join(wsPath, subProjectDir), nil
+	}
+	return wsPath, nil
+}
+
+// Kill forcefully terminates a session and cleans up its workspace directory.
+// Session metadata and Claude Code JSONL are preserved for future --resume.
 func (m *Manager) Kill(sessionID DeckSessionID) error {
 	m.mu.RLock()
 	sess, hasSess := m.sessions[sessionID]
@@ -881,6 +916,8 @@ func (m *Manager) Kill(sessionID DeckSessionID) error {
 
 	sess.mu.RLock()
 	pid := sess.PID
+	wsName := sess.WorkspaceName
+	repoPath := sess.RepoPath
 	sess.mu.RUnlock()
 
 	if err := m.backend.StopProcess(sessionID, pid); err != nil {
@@ -898,9 +935,25 @@ func (m *Manager) Kill(sessionID DeckSessionID) error {
 	if !m.backend.IsActive(sessionID) && (m.Supervisor == nil || m.Supervisor.Get(sessionID) == nil) {
 		sess.DetachProcess()
 		sess.SetStatus(StatusCompleted)
-		m.persist(sess)
-		m.notifyChange(sessionID)
 	}
+
+	// ワークスペースディレクトリを削除して disk を回収する。
+	// node_modules 等の依存ファイルがワークスペースごとに複製されるため、
+	// プロセス終了時に即座にクリーンアップする。
+	// resume 時は recreateWorkspace で新規ワークスペースが作られる。
+	if wsName != "" && repoPath != "" {
+		wsRootPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
+		if w := m.cleanupWorkspace(repoPath, wsName, wsRootPath); w != "" {
+			debuglog.Printf("[Kill] workspace cleanup: %s", w)
+		}
+		sess.mu.Lock()
+		sess.WorkspaceName = ""
+		sess.WorkspacePath = ""
+		sess.mu.Unlock()
+	}
+
+	m.persist(sess)
+	m.notifyChange(sessionID)
 	return nil
 }
 

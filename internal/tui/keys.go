@@ -83,17 +83,6 @@ func (m *Model) handleDashboardKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		// Not gg — fall through to normal handling
 	}
-	if m.pendingD {
-		m.pendingD = false
-		switch msg.String() {
-		case "d":
-			return m.deleteSelected()
-		case "D":
-			return m.removeSelected()
-		}
-		// Not dd or dD — fall through to normal handling
-	}
-
 	// split mode ではリストが常にフォーカスされる（detail ペインは右の tmux ウィンドウ）
 	if !m.backendMode.IsSplit() && m.layout.IsDetailFocused() {
 		if cmd, handled := m.handleDetailPaneKey(msg, display); handled {
@@ -257,9 +246,6 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 
 	case "x":
 		return m.killSelected()
-
-	case "d":
-		m.pendingD = true
 
 	case m.config.Keybinds.OpenTerm:
 		return m.openTerminal()
@@ -570,7 +556,7 @@ func (m *Model) forkSelected() tea.Cmd {
 	}
 }
 
-// killSelected terminates the currently selected session.
+// killSelected terminates the currently selected session and cleans up its workspace.
 func (m *Model) killSelected() tea.Cmd {
 	if m.selectedID == "" {
 		return nil
@@ -578,7 +564,7 @@ func (m *Model) killSelected() tea.Cmd {
 	if err := m.manager.Kill(m.selectedID); err != nil {
 		m.statusMsg = fmt.Sprintf("終了エラー: %v", err)
 	} else {
-		m.statusMsg = "セッションを終了しました"
+		m.statusMsg = "セッションを終了しました (workspace削除済)"
 	}
 	return clearStatusCmd()
 }
@@ -615,39 +601,4 @@ func (m *Model) openTerminal() tea.Cmd {
 	return clearStatusCmd()
 }
 
-// removeSelected removes the deck session metadata only (keeps Claude JSONL).
-func (m *Model) removeSelected() tea.Cmd {
-	if m.selectedID == "" {
-		return nil
-	}
-	if err := m.manager.RemoveSession(m.selectedID); err != nil {
-		m.statusMsg = fmt.Sprintf("削除エラー: %v", err)
-	} else {
-		m.statusMsg = "deckセッションを削除しました"
-		m.refreshSessions()
-	}
-	return clearStatusCmd()
-}
-
-// deleteSelected removes the session including Claude Code JSONL files.
-func (m *Model) deleteSelected() tea.Cmd {
-	if m.selectedID == "" {
-		return nil
-	}
-	warning, err := m.manager.DeleteSession(m.selectedID)
-	if err != nil {
-		m.statusMsg = fmt.Sprintf("削除エラー: %v", err)
-	} else {
-		if warning != "" {
-			m.statusMsg = fmt.Sprintf("完全削除しました (%s)", warning)
-		} else {
-			m.statusMsg = "セッションを完全削除しました (JSONL含む)"
-		}
-		// selectedID を空にすると refreshSessions が末尾にカーソルを飛ばすため、
-		// 削除済み ID をそのまま残す。refreshSessions がリストを再取得し、
-		// 見つからない場合は cursor をクランプして隣のセッションを選択する。
-		m.refreshSessions()
-	}
-	return clearStatusCmd()
-}
 
