@@ -10,7 +10,6 @@ cmd/claude-deck
        └→ config          (設定)
 
 internal/session (Manager)
-  ├→ pty              (PTY プロセス管理)
   ├→ hooks            (Claude Code フックイベント)
   ├→ usage            (JSONL パース・ストリーミング)
   ├→ store            (JSON 永続化)
@@ -36,7 +35,6 @@ main() → run()
      c. manager.StartEventWatcher()     ← フックイベント監視
      d. manager.StartFileWatcher()      ← JSONL ファイル変更監視
      e. manager.StartNotifyLoop()       ← UI 更新通知 (60fps)
-     f. manager.StartSpinnerIdleLoop()  ← スピナータイムアウト検知
 ```
 
 ## セッションライフサイクル
@@ -55,7 +53,7 @@ User 'n' キー
        jj.CreateWorkspaceAt(repo, name, path, extraSymlinks)  // ワークスペース作成
        extraSymlinks は config.toml [projects] で指定された .env 等の symlink リスト
        サブプロジェクト対応: workingDir の相対パスをワークスペース内に対応付け
-    3. pty.Start(ctx, opts, handleOutput)  // claude --agent <name> 起動
+    3. tmux.StartProcess(ctx, opts)  // tmux ウィンドウで claude --agent <name> 起動
        opts.Env = ["CLAUDE_DECK_SESSION_ID=<sessID>"]
     4. sessions[sessID] = sess, processes[sessID] = proc
     5. persist(sess)
@@ -109,10 +107,9 @@ Claude Code --resume 起動
 User 'r' キー or Enter
   → Manager.ResumeSession(ctx, sessionID, cols, rows)
     1. HasActiveProcess チェック (二重起動防止)
-    2. pty.Start(ctx, {ResumeSessionID: csID, Env: [DECK_SESSION_ID]})
+    2. tmux.StartProcess(ctx, {ResumeSessionID: csID, Env: [DECK_SESSION_ID]})
     3. sess.Status = Idle, FinishedAt = nil
-    4. emulator リセット、LogLines クリア
-    5. processes[sessID] = proc
+    4. processes[sessID] = proc
     6. go watchProcess(sess, proc)
 ```
 
@@ -125,20 +122,12 @@ User 'r' キー or Enter
 | viewDashboard | リスト (35%) + 詳細 (65%) | handleDashboardKey |
 | viewSelectRepo | リポジトリ選択 (全画面) | handleRepoSelectKey |
 
-### PTY 入力モード
-
-`ptyInputActive = true` の間:
-- 全キーが PTY stdin に転送される（Ctrl+C 含む）
-- `Ctrl+D` のみ入力モード終了
-- `keyToBytes()` で Bubble Tea のキーイベントを PTY バイト列に変換
-- マルチバイト UTF-8 文字も正しくハンドリング
-
 ### 詳細ペイン表示
 
-| セッション状態 | 上段 | 下段 |
-|--------------|------|------|
-| PTY あり (managed) | JSONL 構造化ログ (logViewport) | PTY 生出力 (ptyViewport) |
-| PTY なし (completed/external) | JSONL 構造化ログ (logViewport) | — |
+| セッション状態 | 内容 |
+|--------------|------|
+| 実行中 (managed) | 「外部ターミナルで表示中」プレースホルダ（tmux がホスト） |
+| 完了・外部 | JSONL 構造化ログ (logViewport) |
 
 ### vim マルチキーシーケンス
 
@@ -199,10 +188,3 @@ StartFileWatcher()
   → 新ファイル検知 → handleNewFile() で外部セッション作成
 ```
 
-## VT100 エミュレータ
-
-- charmbracelet/x/vt ベース（_vt_local/ にローカルコピー）
-- PTY 出力を解釈して画面状態を保持
-- OSC 0/2 シーケンスでターミナルタイトル抽出
-- ScrollUp コールバックでスクロールバック行を蓄積
-- GetPTYDisplayLines() で styled テキストを取得（スクロールバック + 画面）

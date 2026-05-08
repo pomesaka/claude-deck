@@ -1,7 +1,6 @@
 package session
 
 import (
-	"bytes"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -87,10 +86,10 @@ func (s Status) canTransitionTo(next Status) bool {
 	}
 	switch s {
 	case StatusIdle:
-		// Idle → Running (spinner), Completed (process exit), Error (directory missing)
+		// Idle → Running (hook: UserPromptSubmit/PreToolUse), Completed (process exit), Error (directory missing)
 		return next == StatusRunning || next == StatusCompleted || next == StatusError
 	case StatusRunning:
-		// Running → Idle (spinner timeout / hook stop), WaitingApproval, WaitingAnswer,
+		// Running → Idle (hook: Stop/PostToolUseFailure/StopFailure), WaitingApproval, WaitingAnswer,
 		//           Completed (process exit), Error
 		return next == StatusIdle || next == StatusWaitingApproval || next == StatusWaitingAnswer ||
 			next == StatusCompleted || next == StatusError
@@ -143,56 +142,11 @@ func (p SessionPhase) String() string {
 	}
 }
 
-// HostingMode describes who manages the PTY process for a session.
-// This is a fundamental attribute set at launch time and immutable for the
-// session's lifetime. It determines whether claude-deck runs an emulator,
-// captures PTY output, and detects spinners — or delegates all of that
-// to an external terminal.
-type HostingMode int
-
-const (
-	// HostEmbedded means claude-deck owns the PTY process.
-	// The emulator captures output, displayCache is maintained, and spinner
-	// detection drives status transitions.
-	HostEmbedded HostingMode = iota
-	// HostExternal means an external terminal (Ghostty, tmux, etc.) owns the PTY.
-	// claude-deck tracks metadata only via JSONL and hooks.
-	// No emulator, no PTY output capture, no spinner detection.
-	HostExternal
-)
-
-func (h HostingMode) String() string {
-	switch h {
-	case HostEmbedded:
-		return "Embedded"
-	case HostExternal:
-		return "External"
-	default:
-		return "Unknown"
-	}
-}
-
-// RunningProcess is the runtime context for an active process managed by Manager.
-// It exists only while a process is alive; Session.process is nil when no process is running.
-//
-// display == nil → External hosting: an external terminal (tmux, Ghostty, etc.) owns the PTY.
-//
-//	claude-deck tracks metadata only via JSONL and hooks.
-//
-// display != nil → Embedded hosting: claude-deck owns the PTY.
-//
-//	Output is captured, emulated, and displayed in the TUI.
-//
-// PID is stored on Session itself (persisted for restart recovery).
-// RunningProcess carries only transient runtime state.
-type RunningProcess struct {
-	display *PTYDisplay
-}
-
-// IsEmbedded reports whether claude-deck owns the PTY for this process.
-func (rp *RunningProcess) IsEmbedded() bool {
-	return rp.display != nil
-}
+// RunningProcess is the sentinel type for an active session process.
+// Stored as an atomic pointer so nil/non-nil atomically signals whether a process is attached.
+// The empty struct avoids per-session heap allocation while preserving the ability to
+// add fields in the future without changing the atomic-pointer contract.
+type RunningProcess struct{}
 
 // DisplayChannel describes what data source should be used to render a
 // session's detail pane. Derived from the session's current state rather
@@ -200,26 +154,20 @@ func (rp *RunningProcess) IsEmbedded() bool {
 type DisplayChannel int
 
 const (
-	// DisplayPTY renders live PTY output via the emulator's displayCache.
-	// Used when the session has an active embedded process.
-	DisplayPTY DisplayChannel = iota
 	// DisplayJSONL renders structured JSONL log entries.
-	// Used for completed/archived sessions or external sessions.
-	DisplayJSONL
-	// DisplayNone means no detail content is available from claude-deck.
-	// Used for externally-hosted sessions with an active process —
-	// the user interacts via their external terminal instead.
-	DisplayNone
+	// Used for completed/archived sessions.
+	DisplayJSONL DisplayChannel = iota
+	// DisplayTmux means the session's process is owned by tmux.
+	// The user interacts directly in the tmux window; claude-deck shows no detail content.
+	DisplayTmux
 )
 
 func (d DisplayChannel) String() string {
 	switch d {
-	case DisplayPTY:
-		return "pty"
 	case DisplayJSONL:
 		return "jsonl"
-	case DisplayNone:
-		return "none"
+	case DisplayTmux:
+		return "tmux"
 	default:
 		return "unknown"
 	}
@@ -283,22 +231,13 @@ func (t TokenUsage) EstimateCost(p PricingPolicy) float64 {
 	return cost
 }
 
-// runtimeFields holds PTY-related state that changes at high frequency.
-//
-// mu は sess.mu と独立しているため、PTY 出力ゴルーチン（LogLines 書き込み）と
-// TUI スナップショット（sess.mu で ID/Status などを読む）が競合しない。
-//
-// Lock ordering:
-//   - emuMu → rt.mu（AppendRaw: emulator.Write 後に LogLines 更新）
-//   - emuMu → sess.mu（ScrollOut コールバック内で scrollback/TerminalTitle 更新）
-//   - rt.mu と sess.mu は同時に保持しない
+// runtimeFields holds high-frequency state that is updated by the JSONL streaming goroutine.
+// rt.mu は sess.mu と独立しているため、JSONL 書き込みと TUI スナップショットが競合しない。
+// Lock ordering: rt.mu と sess.mu は同時に保持しない。
 type runtimeFields struct {
 	mu sync.RWMutex
 
-	LogLines              []string         // PTY ログ行（AppendRaw で追記）
-	JSONLLogEntries       []usage.LogEntry // JSONL 由来の構造化ログ（StreamSession で更新）
-	lastRunningObservedAt time.Time        // claude が Running 状態だと最後に観測された時刻（PTY スピナー検知で更新）
-	maxLogLines           int              // config から設定。0 の場合はデフォルト 1000
+	JSONLLogEntries []usage.LogEntry // JSONL 由来の構造化ログ（StreamSession で更新）
 }
 
 // Session represents a single Claude Code session.
@@ -307,19 +246,16 @@ type runtimeFields struct {
 //   - Store (persisted as JSON): ID, Name, RepoPath, RepoName, WorkspacePath,
 //     WorkspaceName, SessionChain, Status, FinishedAt, PID
 //   - JSONL (Claude Code primary): Prompt, PermissionMode, StartedAt, TokenUsage
-//   - Runtime only: rt.LogLines, CurrentTool
+//   - Runtime only: rt.JSONLLogEntries, CurrentTool
 //
 // Lock ordering (ABBA デッドロック防止):
-//   - PTYDisplay.emuMu: emulator 読み書き専用（Write / Resize / Reset）
-//   - rt.mu:  PTY ログ・JSONL ログ専用
-//   - mu:     その他全フィールド
-//
-// PTYDisplay.emuMu は mu/rt.mu と独立。PTYDisplay の onTitle コールバックが
-// mu.Lock() を取得するため、mu を保持したまま display.Write() を呼ばないこと。
+//   - rt.mu: JSONL ログ専用
+//   - mu:    その他全フィールド
+//   - rt.mu と sess.mu は同時に保持しない
 type Session struct {
 	mu sync.RWMutex
 
-	// rt は PTY ログなど高頻度更新フィールドをまとめた struct。
+	// rt は JSONL ログなど高頻度更新フィールドをまとめた struct。
 	// 詳細は runtimeFields のコメントを参照。
 	rt runtimeFields
 
@@ -331,9 +267,14 @@ type Session struct {
 	Name          string        `json:"name"`
 	RepoPath      string        `json:"repo_path"`     // immutable after creation
 	RepoName      string        `json:"repo_name"`     // immutable after creation
-	WorkspacePath string        `json:"workspace_path"` // immutable after creation
-	WorkspaceName string        `json:"workspace_name"` // immutable after creation
-	SubProjectDir string        `json:"sub_project_dir,omitempty"` // immutable after creation; relative path to sub-project
+	// WorkspacePath is the actual Claude Code working directory and may include a sub-project
+	// subdirectory (i.e., <wsRoot>/<SubProjectDir>). WorkspaceName is the root jj workspace
+	// name; the root can be reconstructed as DataDir/workspace/<encodedRepo>/<WorkspaceName>.
+	// Kill removes the root via WorkspaceName, not WorkspacePath.
+	// set by CreateSession/ForkSession; cleared by Kill; requires mu except where benign race is documented.
+	WorkspacePath string `json:"workspace_path"`
+	WorkspaceName string `json:"workspace_name"` // set by CreateSession; cleared by Kill; requires mu except where benign race is documented
+	SubProjectDir string `json:"sub_project_dir,omitempty"` // immutable after creation; relative path to sub-project
 	// SessionChain は Claude Code が割り当てるセッション ID の履歴（古い順）。
 	// /clear や compact のたびに末尾に新 ID が追加される。
 	// 現在の ID は SessionChain[len-1]、旧 ID はそれ以前の要素。
@@ -342,7 +283,7 @@ type Session struct {
 	Status        Status            `json:"status"`
 	FinishedAt    *time.Time        `json:"finished_at,omitempty"`
 	PID           int               `json:"pid,omitempty"`
-	TerminalTitle string            `json:"terminal_title,omitempty"` // OSC 0/2 で設定されたターミナルタイトル（PTY表示フィルタ用）
+	TerminalTitle string            `json:"terminal_title,omitempty"` // OSC 0/2 で設定されたターミナルタイトル（セッション一覧表示用）
 	BookmarkName  string            `json:"bookmark_name,omitempty"`  // jj の最近接ブックマーク名（セッション一覧表示用）
 
 	// --- Hydrated from JSONL (JSONL が最新値を上書きするが、ストアにも保存して再起動時に即表示) ---
@@ -359,9 +300,6 @@ type Session struct {
 	// process は非 nil の間だけプロセスが生存中であることを表す。
 	// nil = 停止中（Completed/Error/未起動）
 	// non-nil = プロセス生存中（Backend が StartProcess で attach する）
-	//
-	// AppendRaw などの高頻度書き込みパスが mu なしで読めるよう atomic.Pointer を使う。
-	// （mu を保持したまま display.Write を呼ぶと emuMu との逆順デッドロックが起きるため）
 	// AttachProcess / DetachProcess 以外では直接 Store/Swap しないこと。
 	process atomic.Pointer[RunningProcess]
 }
@@ -369,26 +307,11 @@ type Session struct {
 // displayChannel returns the appropriate display data source for this session.
 // Reads process via atomic load; mu need not be held.
 func (s *Session) displayChannel() DisplayChannel {
-	p := s.process.Load()
-	if p == nil {
+	if s.process.Load() == nil {
 		return DisplayJSONL // no active process → show structured logs
 	}
-	if p.IsEmbedded() {
-		return DisplayPTY // claude-deck owns PTY → live emulator output
-	}
-	return DisplayNone // external terminal owns PTY → user interacts there
+	return DisplayTmux // tmux owns the process → user interacts via external terminal
 }
-
-// hosting returns the hosting mode derived from the current process state.
-// HostEmbedded when an embedded process is running (display != nil), HostExternal otherwise.
-// Reads process via atomic load; mu need not be held.
-func (s *Session) hosting() HostingMode {
-	if rp := s.process.Load(); rp != nil && rp.IsEmbedded() {
-		return HostEmbedded
-	}
-	return HostExternal
-}
-
 
 // Elapsed returns the duration since the session started.
 func (s *Session) Elapsed() time.Duration {
@@ -450,21 +373,18 @@ func (s *Session) SetCurrentTool(tool string) {
 }
 
 // AttachProcess records that a process has started for this session.
-// display is non-nil for Embedded hosting (claude-deck owns the PTY),
-// or nil for External hosting (external terminal owns the PTY).
-//
-// Callers in the session package (ptyBackend, tmuxBackend) call this directly.
-// Manager does NOT call this — backends own the attachment lifecycle.
-//
-// Must NOT be called with mu held.
-func (s *Session) AttachProcess(pid int, display *PTYDisplay) {
-	rp := &RunningProcess{display: display}
+// Called by backends (tmuxBackend) before the exit-watcher goroutine starts.
+// Must NOT be called with mu held — this method acquires mu internally,
+// so calling with mu already held would self-deadlock.
+func (s *Session) AttachProcess(pid int) {
 	s.mu.Lock()
-	if pid != 0 {
+	if pid > 0 {
 		s.PID = pid
 	}
+	// Store process sentinel under mu so PID and process pointer are set atomically.
+	// A concurrent Snapshot() or DetachProcess() cannot observe PID≠0 with process=nil.
+	s.process.Store(&RunningProcess{})
 	s.mu.Unlock()
-	s.process.Store(rp)
 }
 
 // reconcileStatusFromStore corrects the session status when loaded from the store.
@@ -492,151 +412,27 @@ func (s *Session) reconcileStatusFromStore() bool {
 	return false
 }
 
-// SetPID stores the OS process ID after the process has started.
-// Used by ptyBackend: AttachProcess(0, display) before pty.Start (to wire
-// the display before the output goroutine runs), then SetPID after pty.Start.
-func (s *Session) SetPID(pid int) {
-	s.mu.Lock()
-	s.PID = pid
-	s.mu.Unlock()
-}
-
 // DetachProcess clears the running process context.
 // Called by Manager when a process exits.
+// mu is not required: atomic.Pointer.Store provides the necessary atomicity.
+// Unlike AttachProcess (which updates both PID and process under mu for consistency),
+// DetachProcess only clears the process sentinel — PID is intentionally left intact
+// for post-exit identification.
 func (s *Session) DetachProcess() {
 	s.process.Store(nil)
 }
 
-// NewDisplay creates a PTYDisplay for Embedded hosting, wired to TerminalTitle updates.
-// Manager calls this before attaching a process in Embedded mode.
-func (s *Session) NewDisplay(cols, rows, maxScrollback int) *PTYDisplay {
-	return newPTYDisplay(string(s.ID), cols, rows, maxScrollback, func(title string) {
-		s.mu.Lock()
-		s.TerminalTitle = title
-		s.mu.Unlock()
-	})
+// IsProcessAlive reports whether a tmux process is currently attached to this session.
+// Thread-safe: uses atomic load, no lock required.
+func (s *Session) IsProcessAlive() bool {
+	return s.process.Load() != nil
 }
 
-// ResizeDisplay resizes the embedded PTY display, if any.
-func (s *Session) ResizeDisplay(cols, rows int) {
-	if rp := s.process.Load(); rp != nil && rp.display != nil {
-		rp.display.Resize(cols, rows)
-	}
-}
-
-// touchRunningSignal records now as the last time claude was observed to be Running.
-// Called on Braille spinner detection (PTY fallback for Running state).
-func (s *Session) touchRunningSignal() {
-	s.rt.mu.Lock()
-	s.rt.lastRunningObservedAt = time.Now()
-	s.rt.mu.Unlock()
-}
-
-// runningSignalExpired returns true if the session is Running but the last Running
-// observation is older than timeout. Used as PTY fallback to transition Running → Idle
-// when hook events don't arrive (tmux mode skips this path entirely).
-//
-// rt.mu と sess.mu を同時に保持しない（ロック順序規則）ため、2回に分けて読む。
-func (s *Session) runningSignalExpired(timeout time.Duration) bool {
-	s.mu.RLock()
-	status := s.Status
-	s.mu.RUnlock()
-	if status != StatusRunning {
-		return false
-	}
-	s.rt.mu.RLock()
-	t := s.rt.lastRunningObservedAt
-	s.rt.mu.RUnlock()
-	return !t.IsZero() && time.Since(t) > timeout
-}
-
-// AddTokens updates token usage safely (incremental, from pty parser).
+// AddTokens updates token usage safely.
 func (s *Session) AddTokens(input, output int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.TokenUsage = s.TokenUsage.Add(input, output)
-}
-
-// AppendRaw feeds a raw PTY output chunk to the virtual terminal emulator and
-// appends any newline-delimited lines to LogLines.
-//
-// PTYDisplay.Write handles the emulator part (Embedded only).
-// LogLines update uses rt.mu independently.
-func (s *Session) AppendRaw(data []byte) {
-	// Step 1: emulator (atomic load — must not hold mu here due to emuMu→mu lock order)
-	if rp := s.process.Load(); rp != nil && rp.display != nil {
-		rp.display.Write(data)
-	}
-
-	// Step 2: LogLines を更新（rt.mu 保持）
-	s.rt.mu.Lock()
-	limit := s.rt.maxLogLines
-	if limit <= 0 {
-		limit = 1000
-	}
-	for _, part := range bytes.Split(data, []byte{'\n'}) {
-		line := string(bytes.TrimRight(part, "\r"))
-		if line != "" {
-			s.rt.LogLines = append(s.rt.LogLines, line)
-		}
-	}
-	if len(s.rt.LogLines) > limit {
-		newLines := make([]string, limit)
-		copy(newLines, s.rt.LogLines[len(s.rt.LogLines)-limit:])
-		s.rt.LogLines = newLines
-	}
-	s.rt.mu.Unlock()
-}
-
-// AppendLog adds a single line to the session log and feeds it to the emulator.
-// テスト互換性のため残す。プロダクションコードは AppendRaw を使う。
-func (s *Session) AppendLog(line string) {
-	// Step 1: emulator (atomic load — must not hold mu here due to emuMu→mu lock order)
-	if rp := s.process.Load(); rp != nil && rp.display != nil {
-		rp.display.WriteLine(line)
-	}
-
-	// Step 2: LogLines を更新（rt.mu 保持）
-	s.rt.mu.Lock()
-	s.rt.LogLines = append(s.rt.LogLines, line)
-	limit := s.rt.maxLogLines
-	if limit <= 0 {
-		limit = 1000
-	}
-	if len(s.rt.LogLines) > limit {
-		newLines := make([]string, limit)
-		copy(newLines, s.rt.LogLines[len(s.rt.LogLines)-limit:])
-		s.rt.LogLines = newLines
-	}
-	s.rt.mu.Unlock()
-}
-
-// IngestPTYOutput feeds raw PTY output to the session, detects Braille spinners,
-// and transitions to Running when appropriate.
-// This encapsulates the domain logic "PTY output with spinner → session is running"
-// within the Session, rather than spreading it across Manager.
-func (s *Session) IngestPTYOutput(data []byte) {
-	s.AppendRaw(data)
-
-	if containsBrailleSpinner(string(data)) {
-		s.touchRunningSignal()
-		status := s.GetStatus()
-		if status != StatusRunning && status != StatusCompleted && status != StatusError {
-			s.SetStatus(StatusRunning)
-		}
-	}
-}
-
-// GetLogs returns a copy of the PTY log lines (used for running sessions).
-func (s *Session) GetLogs() []string {
-	s.rt.mu.RLock()
-	defer s.rt.mu.RUnlock()
-	if len(s.rt.LogLines) == 0 {
-		return nil
-	}
-	logs := make([]string, len(s.rt.LogLines))
-	copy(logs, s.rt.LogLines)
-	return logs
 }
 
 // GetStructuredLogs returns a copy of the JSONL-derived structured log entries.
@@ -667,17 +463,12 @@ type Snapshot struct {
 	// this session. 0 means the original session; 1 means cleared once, etc.
 	// Derived from len(SessionChain) - 1.
 	ClearCount int
-	// HasProcess is true while a process is attached to this session (embedded or tmux).
+	// HasProcess is true while a process is attached to this session.
 	// It becomes false when watchProcess detects exit and clears Session.process.
 	// Used by Phase() to distinguish "terminal status but process still running"
 	// (rare race window) from "truly finished".
 	HasProcess bool
-	// Hosting reflects the current process state: HostEmbedded when claude-deck owns
-	// an active PTY, HostExternal otherwise (tmux-hosted, finished, or unmanaged).
-	// This is a dynamic projection — it changes when a process starts or exits,
-	// not a static "how was this session launched" label.
-	Hosting        HostingMode
-	Display        DisplayChannel
+	Display    DisplayChannel
 	Status         Status
 	Prompt         string
 	PermissionMode string
@@ -753,7 +544,6 @@ func (s *Session) Snapshot() Snapshot {
 		PriorClaudeIDs:  s.PriorClaudeIDs(),
 		ClearCount:      max(0, len(s.SessionChain)-1),
 		HasProcess:      s.process.Load() != nil,
-		Hosting:         s.hosting(),
 		Display:         s.displayChannel(),
 		Status:          s.Status,
 		Prompt:          s.Prompt,
@@ -792,7 +582,10 @@ func (s *Session) ChainIDs() []ClaudeSessionID {
 }
 
 // PriorClaudeIDs returns all historical Claude Code session IDs excluding the current one.
-// Returns nil if there is no history. Must be called with mu held for reading.
+// Returns nil if there is no history.
+// Must be called with mu held for reading (RLock is sufficient).
+// Calling from within an already-held RLock is safe: sync.RWMutex allows multiple
+// concurrent RLock holders. Snapshot() calls this while holding mu.RLock().
 func (s *Session) PriorClaudeIDs() []ClaudeSessionID {
 	if len(s.SessionChain) <= 1 {
 		return nil
@@ -880,8 +673,6 @@ func (s *Session) sortGroup() int {
 }
 
 // NewSession creates a new session with the given parameters.
-// Hosting mode is determined at launch time by AttachProcess:
-// pass a non-nil PTYDisplay for Embedded, nil for External.
 func NewSession(repoPath, repoName string) *Session {
 	s := &Session{
 		ID:            GenerateSessionID(),
@@ -892,6 +683,5 @@ func NewSession(repoPath, repoName string) *Session {
 		Status:        StatusIdle,
 		StartedAt:     time.Now(),
 	}
-	s.rt.LogLines = make([]string, 0, 256)
 	return s
 }

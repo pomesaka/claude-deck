@@ -2,7 +2,7 @@
 
 ## ステータス
 
-Accepted
+Superseded by ADR-007 (PTY モード全体の削除)
 
 ## コンテキスト
 

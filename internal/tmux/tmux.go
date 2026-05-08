@@ -5,6 +5,7 @@ package tmux
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -185,6 +186,20 @@ func (r *Runner) SetHook(windowName, hookName, hookCmd string) error {
 func (r *Runner) WaitFor(channel string) error {
 	_, err := r.run("wait-for", channel)
 	return err
+}
+
+// WaitForCtx is like WaitFor but respects context cancellation.
+// When ctx is cancelled, the underlying tmux wait-for command is killed and
+// this method returns ctx.Err(). The tmux channel remains valid — a subsequent
+// WaitFor on the same channel will return immediately if the signal was already sent.
+func (r *Runner) WaitForCtx(ctx context.Context, channel string) error {
+	if err := exec.CommandContext(ctx, r.cmd(), "wait-for", channel).Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+	return nil
 }
 
 // WaitForSignal unblocks any WaitFor goroutine waiting on channel.

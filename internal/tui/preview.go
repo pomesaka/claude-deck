@@ -57,14 +57,14 @@ type previewStreamer struct {
 
 // Start cancels any running stream and launches a new one for spec.
 // Returns the output channel for the new stream, or nil if spec.JSONLPath is empty
-// or spec.Display is "none" (running session — no JSONL needed).
+// or spec.Display is "tmux" (running session — Claude Code is live in the tmux window, no JSONL streaming needed).
 // The returned channel is closed by the goroutine when it exits.
 func (ps *previewStreamer) Start(rootCtx context.Context, spec preview.PreviewSpec) <-chan []usage.LogEntry {
 	// Capture and clear the old cancel before releasing the lock to avoid
 	// calling an arbitrary function (cancel) while holding ps.mu.
 	ps.mu.Lock()
 	oldCancel := ps.cancel
-	if spec.JSONLPath == "" || spec.Display == "" || spec.Display == "none" {
+	if spec.JSONLPath == "" || spec.Display == "" || spec.Display == "tmux" {
 		ps.cancel = nil
 		ps.mu.Unlock()
 		if oldCancel != nil {
@@ -367,7 +367,7 @@ func (m PreviewModel) render() string {
 	var sections []string
 
 	switch m.spec.Display {
-	case "none":
+	case "tmux":
 		// Running session — Claude Code is live in the tmux window.
 		sections = m.renderHeader(innerWidth)
 		sections = append(sections, "")
@@ -450,7 +450,7 @@ func (m *PreviewModel) resizeViewport() {
 }
 
 func (m *PreviewModel) syncViewport() {
-	if m.spec.Display == "" || m.spec.Display == "none" {
+	if m.spec.Display == "" || m.spec.Display == "tmux" {
 		m.logViewport.SetContent("")
 		return
 	}

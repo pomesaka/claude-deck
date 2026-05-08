@@ -57,59 +57,24 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 		m.notifyChange(sess.ID)
 
 	case hooks.EventUserPromptSubmit:
-		sess := m.findSessionByClaudeID(ClaudeSessionID(ev.SessionID))
-		if sess == nil {
-			debuglog.Printf("[event-watcher] UserPromptSubmit: no managed session for %s", ev.SessionID)
-			return
-		}
-		sess.SetStatus(StatusRunning)
-		debuglog.Printf("[event-watcher] UserPromptSubmit: session=%s → StatusRunning", ev.SessionID)
-		m.notifyChange(sess.ID)
+		m.handleStatusEvent(ClaudeSessionID(ev.SessionID), "UserPromptSubmit", StatusRunning)
 
 	case hooks.EventPreToolUse:
 		// ツール実行開始 = Claude が処理中。WaitingAnswer/WaitingApproval からの復帰も含む。
 		// ask_followup_question 自体も PreToolUse を発火するが、直後の Notification
 		// (elicitation_dialog) が WaitingAnswer に上書きするため問題ない。
-		sess := m.findSessionByClaudeID(ClaudeSessionID(ev.SessionID))
-		if sess == nil {
-			debuglog.Printf("[event-watcher] PreToolUse: no managed session for %s", ev.SessionID)
-			return
-		}
-		sess.SetStatus(StatusRunning)
-		debuglog.Printf("[event-watcher] PreToolUse: session=%s tool=%s → StatusRunning", ev.SessionID, ev.ToolName)
-		m.notifyChange(sess.ID)
+		m.handleStatusEvent(ClaudeSessionID(ev.SessionID), "PreToolUse", StatusRunning)
 
 	case hooks.EventStop:
-		sess := m.findSessionByClaudeID(ClaudeSessionID(ev.SessionID))
-		if sess == nil {
-			debuglog.Printf("[event-watcher] Stop: no managed session for %s", ev.SessionID)
-			return
-		}
-		sess.SetStatus(StatusIdle)
-		debuglog.Printf("[event-watcher] Stop: session=%s → StatusIdle", ev.SessionID)
-		m.notifyChange(sess.ID)
+		m.handleStatusEvent(ClaudeSessionID(ev.SessionID), "Stop", StatusIdle)
 
 	case hooks.EventPostToolUseFailure:
 		// ユーザーが Esc 等でツール実行を中断した場合。プロセスは生きているので Idle に戻す。
-		sess := m.findSessionByClaudeID(ClaudeSessionID(ev.SessionID))
-		if sess == nil {
-			debuglog.Printf("[event-watcher] PostToolUseFailure: no managed session for %s", ev.SessionID)
-			return
-		}
-		sess.SetStatus(StatusIdle)
-		debuglog.Printf("[event-watcher] PostToolUseFailure: session=%s tool=%s → StatusIdle", ev.SessionID, ev.ToolName)
-		m.notifyChange(sess.ID)
+		m.handleStatusEvent(ClaudeSessionID(ev.SessionID), "PostToolUseFailure", StatusIdle)
 
 	case hooks.EventStopFailure:
 		// API エラーでターンが失敗した場合。プロセスは生きているので Idle に戻す。
-		sess := m.findSessionByClaudeID(ClaudeSessionID(ev.SessionID))
-		if sess == nil {
-			debuglog.Printf("[event-watcher] StopFailure: no managed session for %s", ev.SessionID)
-			return
-		}
-		sess.SetStatus(StatusIdle)
-		debuglog.Printf("[event-watcher] StopFailure: session=%s → StatusIdle", ev.SessionID)
-		m.notifyChange(sess.ID)
+		m.handleStatusEvent(ClaudeSessionID(ev.SessionID), "StopFailure", StatusIdle)
 
 	case hooks.EventSessionEnd:
 		if ev.ClaudeDeckSessionID == "" {
@@ -216,19 +181,17 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 
 // findSessionByClaudeID returns the managed session (with an active process)
 // matching the given Claude Code session ID, or nil if not found.
-// The active check is delegated to the backend so this works in both PTY and tmux modes.
 //
-// m.mu を解放してから IsActive を呼ぶ（tmux モードでは外部コマンド実行になるため
-// ロック保持中の長時間ブロックを避ける）。
-//
-// tmux モードでは IsActive が tmux list-windows を呼ぶため、セッション数 N に対して
-// O(N) の外部プロセス呼び出しになる。セッション上限 30 件では実用上問題ないが、
-// 将来的には ListWindows を一度だけ呼んで結果をキャッシュする最適化が可能。
+// Uses session.process.Load() != nil to determine liveness — the same domain
+// concept used by DisplayChannel derivation. This avoids O(N) tmux list-windows
+// calls (one per session) that backend.IsActive would require.
+// Hook events are only sent by running processes, so any race window between
+// process death and DetachProcess() is the same as before.
 func (m *Manager) findSessionByClaudeID(claudeSessionID ClaudeSessionID) *Session {
 	candidates := m.copySessionsList()
 
 	for _, s := range candidates {
-		if !m.backend.IsActive(s.ID) {
+		if !s.IsProcessAlive() {
 			continue
 		}
 		s.mu.RLock()
@@ -239,4 +202,18 @@ func (m *Manager) findSessionByClaudeID(claudeSessionID ClaudeSessionID) *Sessio
 		}
 	}
 	return nil
+}
+
+// handleStatusEvent is the common handler for hook events that simply transition
+// a session's status. It finds the session by Claude session ID, sets the new
+// status, logs the transition, and fires a change notification.
+func (m *Manager) handleStatusEvent(claudeID ClaudeSessionID, eventName string, status Status) {
+	sess := m.findSessionByClaudeID(claudeID)
+	if sess == nil {
+		debuglog.Printf("[event-watcher] %s: no managed session for %s", eventName, claudeID)
+		return
+	}
+	sess.SetStatus(status)
+	debuglog.Printf("[event-watcher] %s: session=%s → %s", eventName, claudeID, status)
+	m.notifyChange(sess.ID)
 }

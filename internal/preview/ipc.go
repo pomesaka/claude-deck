@@ -11,7 +11,7 @@ package preview
 
 import (
 	"context"
-	"encoding/json"
+	json "encoding/json/v2"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,7 +35,7 @@ type PreviewSpec struct {
 	PriorClaudeIDs  []session.ClaudeSessionID `json:"prior_claude_ids"`
 	ClearCount      int                       `json:"clear_count"`
 	Status          string                    `json:"status"`
-	Display         string                    `json:"display"` // "jsonl" | "none" | "pty" | ""
+	Display         string                    `json:"display"` // "jsonl" | "tmux" | ""
 	CurrentTool     string                    `json:"current_tool"`
 	ErrorMessage    string                    `json:"error_message"`
 	NeedsAttention  bool                      `json:"needs_attention"`

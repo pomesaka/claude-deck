@@ -68,8 +68,6 @@ type CommandsConfig struct {
 // SessionConfig holds session management limits.
 type SessionConfig struct {
 	MaxSessions     int    `toml:"max_sessions"`
-	MaxLogLines     int    `toml:"max_log_lines"`
-	MaxScrollback   int    `toml:"max_scrollback"`
 	MaxJSONLEntries int    `toml:"max_jsonl_entries"`
 	DiscoveryDays   int    `toml:"discovery_days"`
 	RefreshInterval string `toml:"refresh_interval"`
@@ -97,13 +95,17 @@ type GhosttyConfig struct {
 }
 
 // TmuxConfig holds settings for the tmux process management backend.
-// When Enabled is true, claude-deck launches each Claude Code session as a
-// tmux window instead of an embedded PTY.  Users see live output by attaching
-// to the tmux session (e.g. `tmux attach -t claude-deck`) in a second pane.
+// tmux is the only supported backend; the Enabled field is retained for
+// backwards compatibility with existing config files but has no effect.
 type TmuxConfig struct {
-	Enabled     bool   `toml:"enabled"`
-	Command     string `toml:"command"`       // tmux binary path; defaults to "tmux"
-	SessionName string `toml:"session_name"`  // tmux session name; defaults to "claude-deck"
+	// Enabled is a no-op legacy field. tmux is always the backend; this field
+	// is preserved so existing config files with `enabled = false` do not error.
+	// See ADR-007 for why PTY/BackendMode was removed.
+	Enabled bool `toml:"enabled"`
+	// Command is the tmux binary path; defaults to "tmux".
+	Command string `toml:"command"`
+	// SessionName is the tmux session name; defaults to "claude-deck".
+	SessionName string `toml:"session_name"`
 }
 
 // KeybindConfig allows overriding default keybindings.
@@ -186,8 +188,6 @@ func Default() *Config {
 		},
 		Session: SessionConfig{
 			MaxSessions:     30,
-			MaxLogLines:     1000,
-			MaxScrollback:   2000,
 			MaxJSONLEntries: 500,
 			DiscoveryDays:   14,
 			RefreshInterval: "5s",

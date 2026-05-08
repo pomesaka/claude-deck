@@ -57,8 +57,6 @@ func (m *Manager) LoadExisting() error {
 		if err := json.Unmarshal(data, &s); err != nil {
 			continue
 		}
-		s.rt.LogLines = make([]string, 0)
-
 		// 前回起動時に実行中だったセッションはプロセスハンドルが失われている。
 		// PID が生存していなければ完了扱いにする。
 		s.reconcileStatusFromStore()
@@ -166,12 +164,16 @@ func (m *Manager) pruneOldSessions() {
 // SyncNewFromStore loads any sessions from the store that are not yet in m.sessions,
 // and updates SessionChain for sessions that are already in memory but have no chain.
 //
-// LoadExisting とは異なり、既存セッションの in-memory 状態（LogLines・process 等）を
+// LoadExisting とは異なり、既存セッションの in-memory 状態（process 等）を
 // 上書きしない。preview プロセスなど、起動後に main プロセスが作成した新規セッションを
 // 5秒 tick で追従するために使う。
 //
 // 呼び出し元は HydrateFromJSONL より前に呼ぶこと。そうすることで、新規追加セッションの
 // JSONL データが同一 tick 内に読み込まれる。
+//
+// Must NOT be called with m.mu held — it acquires m.mu internally and also calls
+// existing.mu.Lock() for chain updates. Acquiring m.mu before calling would
+// violate the Manager.mu → Session.mu lock ordering rule.
 func (m *Manager) SyncNewFromStore() {
 	if m.store == nil {
 		return
@@ -206,7 +208,6 @@ func (m *Manager) SyncNewFromStore() {
 		}
 
 		// 新規セッション: プロセスが存在しない実行中状態は Completed に補正する
-		s.rt.LogLines = make([]string, 0)
 		s.reconcileStatusFromStore()
 		m.mu.Lock()
 		if _, exists := m.sessions[deckID]; !exists { // re-check under write lock

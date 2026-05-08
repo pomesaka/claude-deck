@@ -15,6 +15,11 @@ import (
 // Separated from Manager.mu so streaming switches don't contend with
 // high-frequency sessions-map reads.
 // Lock order: acquire streamState.mu independently of Manager.mu (never hold both).
+//
+// Callers of StreamSession and stopActiveStream are expected to be the TUI
+// Update goroutine (single-threaded) and the hook-processor goroutine (also
+// single-threaded).  The mutex protects against these two callers racing,
+// not against high-concurrency from many goroutines.
 type streamState struct {
 	mu     sync.Mutex
 	id     DeckSessionID

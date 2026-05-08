@@ -39,38 +39,6 @@ func (m Model) View() tea.View {
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 
-	// PTY 入力モード中はエミュレータのカーソル位置に TUI カーソルを配置する。
-	// これにより Ghostty のカーソルが Claude の入力行に正しく表示される。
-	// selectedPTY.GetPTYCursorPosition() は atomic 読み取りのみでロック不要。
-	if m.ptyInputActive && m.selectedPTY != nil && m.selectedSnap != nil &&
-		m.selectedSnap.Display == session.DisplayPTY && m.mode == viewDashboard {
-		cursorX, cursorDisplayRow := m.selectedPTY.GetPTYCursorPosition()
-		_, _, ptyHeight, _ := m.detailPaneMetrics()
-		cursorViewportRow := cursorDisplayRow - m.ptyViewport.YOffset()
-		if cursorViewportRow >= 0 && cursorViewportRow < ptyHeight {
-			// レイアウト: header(1行) + detail枠top(1行) + viewport行
-			// 列: detailペインの左端オフセット + detail枠left(1) + padding(1) + cursorX
-			var detailLeft int
-			if m.layout.IsListVisible() && !m.layout.IsListRight() {
-				// リストが左側にある場合: list幅 + ペイン間スペース(1)
-				const frameOverhead = 1
-				available := m.width - frameOverhead
-				listWidth := available * 35 / 100
-				if listWidth < 20 {
-					listWidth = 20
-				}
-				detailLeft = listWidth + 1
-			}
-			tuiCol := detailLeft + 2 + cursorX
-			tuiRow := 2 + cursorViewportRow
-			debuglog.Printf("[cursor] cursorX=%d cursorDisplayRow=%d ptyViewportYOffset=%d cursorViewportRow=%d detailLeft=%d → tuiCol=%d tuiRow=%d ptyHeight=%d",
-				cursorX, cursorDisplayRow, m.ptyViewport.YOffset(), cursorViewportRow, detailLeft, tuiCol, tuiRow, ptyHeight)
-			c := tea.NewCursor(tuiCol, tuiRow)
-			c.Shape = tea.CursorBar
-			v.Cursor = c
-		}
-	}
-
 	return v
 }
 
@@ -445,25 +413,6 @@ func (m Model) renderDetailPane(width, height int) string {
 	}
 
 	switch snap.Display {
-	case session.DisplayPTY:
-		// アクティブプロセス → PTY 全画面表示（ヘッダー非表示）
-		sections = append(sections, m.ptyViewport.View())
-
-		// 入力ステータス行
-		separator := dimStyle.Render(strings.Repeat("─", innerWidth))
-		if m.ptyInputActive {
-			inputLine := inputPromptStyle.Render("  PTY 直接入力中 (Ctrl+D で終了)")
-			sections = append(sections, separator, inputLine)
-		} else {
-			var placeholder string
-			if !m.ptyFollow {
-				placeholder = dimStyle.Render("  Enter で入力モード / G で最新に戻る")
-			} else {
-				placeholder = dimStyle.Render("  Enter で入力モード開始")
-			}
-			sections = append(sections, separator, placeholder)
-		}
-
 	case session.DisplayJSONL:
 		// 完了済み / 外部セッション → ヘッダー + JSONL ログ表示
 		sections = append(sections, titleStyle.Render(truncate(fmt.Sprintf("📋 %s (%s)", snap.Name, snap.RepoName), innerWidth)))
@@ -489,7 +438,7 @@ func (m Model) renderDetailPane(width, height int) string {
 		sections = append(sections, "")
 		sections = append(sections, m.logViewport.View())
 
-	case session.DisplayNone:
+	case session.DisplayTmux:
 		// tmux window is showing live Claude Code output — display metadata only.
 		title := fmt.Sprintf("📋 %s (%s)", snap.Name, snap.RepoName)
 		sections = append(sections, titleStyle.Render(truncate(title, innerWidth)))
@@ -524,8 +473,6 @@ func (m Model) renderFooter() string {
 	var helpText string
 	if m.mode == viewSelectRepo {
 		helpText = "Enter:ワークスペース作成+起動 C-Enter:直接起動 Esc:戻る"
-	} else if m.ptyInputActive {
-		helpText = "PTY 直接入力中 / Ctrl+D:終了"
 	} else if m.filterActive {
 		helpText = "Enter:確定 Esc:キャンセル"
 	} else if m.filterText != "" {
@@ -722,10 +669,9 @@ func detailHeaderLines(snap session.Snapshot) int {
 // detailPaneLayout calculates log viewport height and PTY viewport height
 // from the total terminal height. Pure function — no Model dependency.
 //
-//   - DisplayPTY  → PTY 全画面 (ptyHeight = available - 2 for status line)
 //   - DisplayJSONL → ログ表示   (logHeight = available - headerLines)
-//   - DisplayNone  → プレースホルダ (logHeight = available)
-func detailPaneLayout(totalHeight int, display session.DisplayChannel, headerLines int) (logHeight, ptyHeight int) {
+//   - DisplayTmux  → プレースホルダ (logHeight = available)
+func detailPaneLayout(totalHeight int, display session.DisplayChannel, headerLines int) (logHeight int) {
 	contentHeight := totalHeight - 2 // header(1) + footer(1)
 	if contentHeight < 3 {
 		contentHeight = 3
@@ -733,127 +679,65 @@ func detailPaneLayout(totalHeight int, display session.DisplayChannel, headerLin
 	availableLines := contentHeight - 2 // border(top+bottom)
 
 	switch display {
-	case session.DisplayPTY:
-		availableLines -= 2 // separator + input status line
-		ptyHeight = availableLines
 	case session.DisplayJSONL:
 		availableLines -= headerLines
 		logHeight = availableLines
-	case session.DisplayNone:
+	case session.DisplayTmux:
 		logHeight = availableLines
 	}
 
-	if ptyHeight < 0 {
-		ptyHeight = 0
-	}
 	if logHeight < 0 {
 		logHeight = 0
 	}
 	return
 }
 
-// detailPaneMetrics calculates the inner width, log height, and PTY viewport height for the detail pane.
+// detailPaneMetrics calculates the inner width and log height for the detail pane.
 // Convenience method that combines the pure functions above with Model state lookups.
 // Returns the resolved DisplayChannel alongside dimensions.
-func (m *Model) detailPaneMetrics() (innerWidth, logHeight, ptyHeight int, display session.DisplayChannel) {
+func (m *Model) detailPaneMetrics() (innerWidth, logHeight int, display session.DisplayChannel) {
 	innerWidth = m.detailPaneInnerWidth()
 
 	display = session.DisplayJSONL // default for no selection
 	headerLines := 4
 	if m.selectedSnap != nil {
 		display = m.selectedSnap.Display
-		if display != session.DisplayPTY {
-			headerLines = detailHeaderLines(*m.selectedSnap)
-		}
+		headerLines = detailHeaderLines(*m.selectedSnap)
 	}
 
-	logHeight, ptyHeight = detailPaneLayout(m.height, display, headerLines)
+	logHeight = detailPaneLayout(m.height, display, headerLines)
 	return
 }
 
-// syncLogViewport is a convenience method that performs all three viewport sync
-// steps in order: resize viewports, resize PTY, refresh content.
+// syncLogViewport is a convenience method that performs all viewport sync steps.
 func (m *Model) syncLogViewport() {
 	if m.width == 0 {
 		return
 	}
-	debuglog.Printf("[syncLogViewport] selectedID=%q ptyInputActive=%v detailFocused=%v", m.selectedID, m.ptyInputActive, m.layout.IsDetailFocused())
+	debuglog.Printf("[syncLogViewport] selectedID=%q detailFocused=%v", m.selectedID, m.layout.IsDetailFocused())
 
-	innerWidth, logHeight, ptyHeight, display := m.detailPaneMetrics()
-	m.syncViewportSize(innerWidth, logHeight, ptyHeight)
-	m.syncPTYSize(m.selectedID, innerWidth, ptyHeight)
-	m.syncViewportContent(m.selectedID, innerWidth, display)
-}
-
-// syncViewportSize updates the Bubble Tea viewport dimensions.
-// Pure UI concern — no Manager interaction.
-func (m *Model) syncViewportSize(innerWidth, logHeight, ptyHeight int) {
+	innerWidth, logHeight, display := m.detailPaneMetrics()
 	m.logViewport.SetWidth(innerWidth)
 	m.logViewport.SetHeight(logHeight)
-	m.ptyViewport.SetWidth(innerWidth)
-	m.ptyViewport.SetHeight(ptyHeight)
-}
-
-// syncPTYSize resizes the PTY process and emulator to match the viewport.
-// Only fires when dimensions actually change (dedup via lastResize* guard).
-// ResizeSession は emuMu.Lock() を取るため、readLoop の AppendRaw() と競合すると
-// TUI メインゴルーチンがブロックする。goroutine に出して競合を回避する。
-func (m *Model) syncPTYSize(sessionID session.DeckSessionID, cols, rows int) {
-	if rows <= 0 || sessionID == "" {
-		return
-	}
-	if sessionID == m.lastResizeID && cols == m.lastResizeCols && rows == m.lastResizeRows {
-		return
-	}
-	mgr := m.manager
-	sid := sessionID
-	go mgr.ResizeSession(sid, cols, rows)
-	m.lastResizeID = sessionID
-	m.lastResizeCols = cols
-	m.lastResizeRows = rows
+	m.syncViewportContent(m.selectedID, innerWidth, display)
 }
 
 // syncViewportContent populates viewport content from the selected session.
 // DisplayChannel に基づいて表示データを選択する:
-//   - DisplayPTY  → ptyViewport に PTY 全画面表示
 //   - DisplayJSONL → logViewport に JSONL ログ表示
-//   - DisplayNone  → プレースホルダ表示（外部ターミナルがホスト中）
+//   - DisplayTmux  → プレースホルダ表示（tmux がホスト中）
 func (m *Model) syncViewportContent(sessionID session.DeckSessionID, innerWidth int, display session.DisplayChannel) {
 	if sessionID == "" {
 		m.logViewport.SetContent("")
-		m.ptyViewport.SetContent("")
 		return
 	}
 	sess := m.manager.GetSession(sessionID)
 	if sess == nil {
 		m.logViewport.SetContent("")
-		m.ptyViewport.SetContent("")
 		return
 	}
 
 	switch display {
-	case session.DisplayPTY:
-		// Only call SetContentLines when the display version has changed.
-		// viewport.SetContentLines internally computes maxLineWidth over ALL lines
-		// (O(n) ANSI-width scan), so calling it at 60fps with 2000+ scrollback
-		// lines causes significant main-thread blocking and TUI freezes.
-		newVer := sess.GetDisplayVersion()
-		if !m.ptyViewCache.isUpToDate(sessionID, newVer) {
-			debuglog.Printf("[syncViewportContent] DisplayPTY: version changed, updating content (ver=%d)", newVer)
-			lines := sess.GetPTYDisplayLines()
-			debuglog.Printf("[syncViewportContent] GetPTYDisplayLines returned %d lines", len(lines))
-			if len(lines) > 0 {
-				m.ptyViewport.SetContentLines(lines)
-			} else {
-				m.ptyViewport.SetContent(dimStyle.Render("(PTY 出力待ち)"))
-			}
-			m.ptyViewCache.update(sessionID, newVer)
-		}
-		if m.ptyFollow {
-			m.ptyViewport.GotoBottom()
-		}
-		m.logViewport.SetContent("")
-
 	case session.DisplayJSONL:
 		entries := sess.GetStructuredLogs()
 		if len(entries) > 0 {
@@ -865,10 +749,8 @@ func (m *Model) syncViewportContent(sessionID session.DeckSessionID, innerWidth 
 		if m.logFollow {
 			m.logViewport.GotoBottom()
 		}
-		m.ptyViewport.SetContent("")
 
-	case session.DisplayNone:
+	case session.DisplayTmux:
 		m.logViewport.SetContent(dimStyle.Render("(外部ターミナルで表示中)"))
-		m.ptyViewport.SetContent("")
 	}
 }

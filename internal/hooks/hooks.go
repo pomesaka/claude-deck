@@ -69,7 +69,7 @@ func EventsFilePath(dataDir string) string {
 
 // PluginVersion is the current plugin version.
 // marketplace.json の version と一致させること。
-const PluginVersion = "1.0.0"
+const PluginVersion = "1.1.0"
 
 // HookStatus describes the state of hook configuration.
 type HookStatus int

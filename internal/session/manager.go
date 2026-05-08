@@ -19,36 +19,7 @@ import (
 )
 
 // notifyInterval はデバウンス間隔。16ms ≈ 60fps で UI を駆動する。
-// PTY 出力などのバースト時に複数の notifyChange 呼び出しを1回の onChange にまとめる。
 const notifyInterval = 16 * time.Millisecond
-
-// spinnerIdleTimeout はスピナー消失から Idle 遷移までの猶予時間。
-// Claude Code の Braille スピナーは ~80ms 間隔で更新されるため、
-// 3秒あれば一時的な描画の途切れで誤検知しない。
-const spinnerIdleTimeout = 3 * time.Second
-
-// BackendMode selects the process hosting backend.
-//
-// The TUI layer has a parallel TUIBackendMode that adds the split-pane concept:
-//
-//	BackendPTY  → TUIBackendMode.BackendModeEmbedded
-//	BackendTmux → TUIBackendMode.BackendModeTmux or BackendModeSplit
-//
-// Split (Ghostty side-by-side pane) is a TUI-only concept; from Manager's
-// perspective both tmux and split are BackendTmux — the distinction only
-// affects how the TUI routes keystrokes and manages the right pane.
-type BackendMode int
-
-const (
-	// BackendPTY embeds Claude Code in an internal PTY managed by claude-deck
-	// (the default mode). Output is captured, scrollback is maintained, and
-	// spinner detection drives status transitions.
-	BackendPTY BackendMode = iota
-	// BackendTmux hosts Claude Code in a tmux window.  claude-deck manages
-	// session metadata only; users see live output via `tmux attach`.
-	// Near-instant session switching is achieved with tmux select-window.
-	BackendTmux
-)
 
 // ManagerConfig holds configuration values used by Manager for session creation.
 type ManagerConfig struct {
@@ -57,8 +28,6 @@ type ManagerConfig struct {
 	JJ                    *jj.Runner // jj CLI runner (nil uses default "jj")
 	DefaultPermissionMode string
 	MaxSessions           int
-	MaxLogLines           int
-	MaxScrollback         int
 	DiscoveryDays         int
 	RefreshInterval       time.Duration
 	Pricing               PricingPolicy
@@ -66,13 +35,9 @@ type ManagerConfig struct {
 	// AddDirsFunc returns the --add-dir paths for the given repository.
 	AddDirsFunc func(repoPath string) []string
 
-	// BackendMode selects the process hosting backend (PTY vs tmux).
-	BackendMode BackendMode
-	// TmuxCommand is the tmux binary path for BackendTmux mode.
-	// Defaults to "tmux" if empty.
+	// TmuxCommand is the tmux binary path. Defaults to "tmux" if empty.
 	TmuxCommand string
-	// TmuxSession is the tmux session name for BackendTmux mode.
-	// Defaults to "claude-deck" if empty.
+	// TmuxSession is the tmux session name. Defaults to "claude-deck" if empty.
 	TmuxSession string
 }
 
@@ -81,12 +46,7 @@ type ManagerConfig struct {
 type Manager struct {
 	mu       sync.RWMutex
 	sessions map[DeckSessionID]*Session
-	// Supervisor manages PTY process lifecycle (start, stop, I/O, resize).
-	// Extracted from Manager to separate process infrastructure from session domain.
-	// Kept as a public field for test access; production code uses backend instead.
-	Supervisor *ProcessSupervisor
-	// backend abstracts the process hosting mechanism (PTY, tmux, Ghostty split, etc.).
-	// Initialized in NewManager to ptyBackend backed by Supervisor.
+	// backend abstracts the process hosting mechanism (tmux window, etc.).
 	backend  SessionBackend
 	store    *store.Store
 	usage    *usage.Reader
@@ -122,7 +82,6 @@ type Manager struct {
 
 // NewManager creates a new session manager.
 // ctx is used as the parent context for log streaming goroutines.
-// The backend is selected from cfg.BackendMode (default: BackendPTY).
 func NewManager(ctx context.Context, st *store.Store, cfg ManagerConfig) *Manager {
 	m := &Manager{
 		sessions:       make(map[DeckSessionID]*Session),
@@ -135,30 +94,20 @@ func NewManager(ctx context.Context, st *store.Store, cfg ManagerConfig) *Manage
 		hookProc:       newHookProcessor(),
 	}
 
-	switch cfg.BackendMode {
-	case BackendTmux:
-		runner := &tmuxrunner.Runner{
-			Command:     cfg.TmuxCommand,
-			SessionName: cfg.TmuxSession,
-		}
-		// Auto-create the tmux session if it doesn't exist yet.
-		// Status bar is hidden so the tmux client shows only Claude Code output.
-		if !runner.HasSession() {
-			if err := runner.NewSession(); err != nil {
-				debuglog.Printf("[NewManager] tmux new-session failed: %v", err)
-			} else {
-				runner.ApplyDefaultOptions() // マウスホイールでターミナル履歴を遡れるようにする
-			}
-		}
-		m.backend = newTmuxBackend(runner, m.watchProcess)
-
-	default: // BackendPTY
-		sup := NewProcessSupervisor()
-		m.Supervisor = sup
-		// Wire ptyBackend with the exit callback. watchProcess handles all post-exit
-		// domain logic; the backend only needs to fire it after <-proc.Done().
-		m.backend = newPTYBackend(sup, m.watchProcess)
+	runner := &tmuxrunner.Runner{
+		Command:     cfg.TmuxCommand,
+		SessionName: cfg.TmuxSession,
 	}
+	// Auto-create the tmux session if it doesn't exist yet.
+	// Status bar is hidden so the tmux client shows only Claude Code output.
+	if !runner.HasSession() {
+		if err := runner.NewSession(); err != nil {
+			debuglog.Printf("[NewManager] tmux new-session failed: %v", err)
+		} else {
+			runner.ApplyDefaultOptions() // マウスホイールでターミナル履歴を遡れるようにする
+		}
+	}
+	m.backend = newTmuxBackend(m.ctx, runner, m.watchProcess)
 
 	return m
 }
@@ -173,10 +122,14 @@ func (m *Manager) jj() *jj.Runner {
 }
 
 // buildStartArgs pre-assembles the CLI arg list for a Claude Code process start.
-// It mirrors the arg construction that pty.Start performs from its StartOptions fields,
-// allowing the SessionBackend interface to accept a plain []string instead of a
-// PTY-specific typed struct. This keeps backend implementations decoupled from
-// claude CLI flag semantics.
+// Assembles the CLI args for `claude` from semantic parameters, keeping backend
+// implementations decoupled from claude CLI flag semantics.
+//
+// The four launch modes map to:
+//   - resumeID != "" && forkSession  → --resume <id> --fork-session  (fork of an existing session)
+//   - resumeID != "" && !forkSession → --resume <id>                 (resume an existing session)
+//   - resumeID == "" && prompt != "" → -p <prompt>                   (new session with prompt)
+//   - resumeID == "" && prompt == "" → (no extra flags)              (new interactive session)
 func buildStartArgs(resumeID string, forkSession bool, prompt, permMode string, additionalArgs []string) []string {
 	var args []string
 	if resumeID != "" {
@@ -265,29 +218,6 @@ func (m *Manager) StartNotifyLoop(ctx context.Context) {
 	}()
 }
 
-// StartSpinnerIdleLoop periodically checks managed sessions for spinner timeout.
-// Braille スピナーが spinnerIdleTimeout 以上検出されていない Running セッションを
-// 自動的に Idle に遷移させる。フックイベントが届かない場合のフォールバック。
-func (m *Manager) StartSpinnerIdleLoop(ctx context.Context) {
-	go func() {
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				for _, sess := range m.ListManagedSessions() {
-					if sess.runningSignalExpired(spinnerIdleTimeout) {
-						debuglog.Printf("[spinnerIdle] session %s: spinner timeout, transitioning to Idle", sess.ID)
-						sess.SetStatus(StatusIdle)
-						m.notifyChange(sess.ID)
-					}
-				}
-			}
-		}
-	}()
-}
 
 // Launch starts a session based on the given LaunchIntent.
 // This is the unified entry point for all session launch operations (New, Resume, Fork).
@@ -295,14 +225,14 @@ func (m *Manager) StartSpinnerIdleLoop(ctx context.Context) {
 func (m *Manager) Launch(ctx context.Context, intent LaunchIntent) (*Session, error) {
 	switch intent.Kind {
 	case LaunchNew:
-		return m.CreateSession(ctx, intent.RepoPath, intent.WorkingDir, intent.WithWorkspace, intent.Cols, intent.Rows)
+		return m.CreateSession(ctx, intent.RepoPath, intent.WorkingDir, intent.WithWorkspace)
 	case LaunchResume:
-		if err := m.ResumeSession(ctx, intent.SessionID, intent.Cols, intent.Rows); err != nil {
+		if err := m.ResumeSession(ctx, intent.SessionID); err != nil {
 			return nil, err
 		}
 		return m.GetSession(intent.SessionID), nil
 	case LaunchFork:
-		return m.ForkSession(ctx, intent.SessionID, intent.Cols, intent.Rows)
+		return m.ForkSession(ctx, intent.SessionID)
 	default:
 		return nil, fmt.Errorf("unknown launch kind: %v", intent.Kind)
 	}
@@ -320,9 +250,10 @@ func computeActualWorkDir(wsPath, subProjectDir string) string {
 // finalizeNewSession は新規セッション（CreateSession / ForkSession）の共通後処理。
 // jj ブックマークをセッション名として設定し、sessions マップへ登録、永続化、通知を行う。
 //
-// sessions マップへの登録は StartProcess 前にも行われているが（SessionStart フック競合対策）、
-// ここでも冪等に上書きすることで bookmark 等の後処理フィールドを確実に反映する。
-// ResumeSession は既存セッションを対象とするためこのパターンは不要。
+// 冪等性: 呼び出し元は hook 競合防止のため StartProcess 前に sess を m.sessions に登録する
+// （SessionStart フックが先に発火する場合がある）。この呼び出しはブックマーク取得後に
+// 同じキーで上書きするため問題ない。
+// ResumeSession は既存セッションを対象とするため、このパターンを使用しない。
 func (m *Manager) finalizeNewSession(sess *Session, workDir string) {
 	if bookmark, err := m.jj().GetNearestBookmark(workDir); err == nil && bookmark != "" {
 		sess.mu.Lock()
@@ -340,11 +271,10 @@ func (m *Manager) finalizeNewSession(sess *Session, workDir string) {
 // CreateSession creates and starts a new Claude Code session.
 // repoPath は .jj のあるリポジトリルート、workingDir は claude を起動するディレクトリ（サブプロジェクト対応）。
 // withWorkspace が true なら jj workspace を作成して隔離環境で起動する。
-func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir string, withWorkspace bool, cols, rows int) (*Session, error) {
-	debuglog.Printf("[CreateSession] repoPath=%q workingDir=%q withWorkspace=%v cols=%d rows=%d", repoPath, workingDir, withWorkspace, cols, rows)
+func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir string, withWorkspace bool) (*Session, error) {
+	debuglog.Printf("[CreateSession] repoPath=%q workingDir=%q withWorkspace=%v", repoPath, workingDir, withWorkspace)
 	repoName := filepath.Base(repoPath)
 	sess := NewSession(repoPath, repoName)
-	sess.rt.maxLogLines = m.config.MaxLogLines
 
 	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("リポジトリが見つかりません: %s", repoPath)
@@ -396,18 +326,13 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	m.sessions[sess.ID] = sess
 	m.mu.Unlock()
 
-	// Backend handles AttachProcess internally (display creation, PID storage).
+	// Backend handles AttachProcess internally (PID storage, exit watcher).
 	if err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
-		Command:       m.config.ClaudeCommand,
-		WorkDir:       actualWorkDir,
-		Args:          buildStartArgs("", false, "", m.config.DefaultPermissionMode, additionalArgs),
-		Env:           []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
-		Cols:          uint16(cols),
-		Rows:          uint16(rows),
-		MaxScrollback: m.config.MaxScrollback,
-	}, func(data []byte) {
-		m.handleOutput(sess, data)
-	}); err != nil {
+		Command: m.config.ClaudeCommand,
+		WorkDir: actualWorkDir,
+		Args:    buildStartArgs("", false, "", m.config.DefaultPermissionMode, additionalArgs),
+		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
+	}, nil); err != nil {
 		debuglog.Printf("[CreateSession] StartProcess failed: %v", err)
 		m.mu.Lock()
 		delete(m.sessions, sess.ID)
@@ -426,21 +351,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	return sess, nil
 }
 
-// handleOutput processes a raw PTY output chunk from a session.
-// Domain logic (spinner detection → Running transition) is delegated to Session.IngestPTYOutput.
-func (m *Manager) handleOutput(sess *Session, data []byte) {
-	sess.IngestPTYOutput(data)
-	m.notifyChange(sess.ID)
-}
-
-// IsTmuxMode returns true when the manager uses the tmux process backend.
-// The TUI uses this to skip PTY viewport updates and adjust key bindings.
-func (m *Manager) IsTmuxMode() bool {
-	return m.config.BackendMode == BackendTmux
-}
-
-// FocusSession makes the session's terminal visible in the hosting environment.
-// In tmux mode this calls tmux select-window (~0ms); in PTY mode it is a no-op.
+// FocusSession makes the session's terminal visible in the tmux window.
 func (m *Manager) FocusSession(sessionID DeckSessionID) error {
 	return m.backend.Focus(sessionID)
 }
@@ -488,15 +399,11 @@ func (m *Manager) ResolveJSONLPaths(sid DeckSessionID) (current string, prior []
 // ReconcileTmux synchronises in-memory session state with the live tmux session.
 // Call this after LoadExisting() on startup in tmux mode.
 //
-// Three cases handled by the backend:
-//  1. tmux window exists, deck session exists → backend re-attaches exit watcher
-//  2. tmux window exists, deck session missing → backend kills orphaned window
-//  3. deck session exists, tmux window missing → Manager marks session Completed
+// Cases:
+//  1. tmux window exists, deck session exists → backend re-attaches exit watcher (backend.Reconcile)
+//  2. tmux window exists, deck session missing → backend kills orphaned window (backend.Reconcile)
+//  3. deck session exists, tmux window missing → Manager marks session Completed (this function)
 func (m *Manager) ReconcileTmux() {
-	if m.config.BackendMode != BackendTmux {
-		return
-	}
-
 	sessions := m.copySessionsList()
 	result, err := m.backend.Reconcile(sessions)
 	if err != nil {
@@ -507,8 +414,8 @@ func (m *Manager) ReconcileTmux() {
 	// Apply backend result to session state.
 	for _, sess := range sessions {
 		if panePID, alive := result.LivePIDs[sess.ID]; alive {
-			// Case 1: window is live — attach as External (tmux owns the PTY).
-			sess.AttachProcess(panePID, nil)
+			// Case 1: window is live — attach process sentinel.
+			sess.AttachProcess(panePID)
 			// LoadExisting marks sessions Completed when the stored PID is stale
 			// (old pane PID from the previous run no longer exists). If the tmux
 			// window is actually alive, reset to Idle so the session shows as
@@ -525,8 +432,9 @@ func (m *Manager) ReconcileTmux() {
 			status := sess.GetStatus()
 			if status != StatusCompleted && status != StatusError && status != StatusUnmanaged {
 				debuglog.Printf("[ReconcileTmux] window gone, marking Completed session=%s", sess.ID)
-				sess.DetachProcess()
+				// SetStatus before DetachProcess — see watchProcess comment for ordering rationale.
 				sess.SetStatus(StatusCompleted)
+				sess.DetachProcess()
 				m.persist(sess)
 			}
 		}
@@ -543,12 +451,14 @@ func (m *Manager) ReconcileTmux() {
 func (m *Manager) watchProcess(sess *Session) {
 	debuglog.Printf("[watchProcess] process exited session=%s", sess.ID)
 
-	sess.DetachProcess()
-
+	// SetStatus before DetachProcess so that the brief race window observed by
+	// Snapshot() is always "terminal status, process still attached" (PhaseActive,
+	// the documented case in Phase()) rather than "non-terminal, process gone".
 	status := sess.GetStatus()
 	if status != StatusCompleted && status != StatusError {
 		sess.SetStatus(StatusCompleted)
 	}
+	sess.DetachProcess()
 
 	// /clear 後にメッセージを送らず終了した場合、新 ID の JSONL は空。
 	// resume 不可能なので chain の末尾をポップして旧 ID にフォールバックする。
@@ -582,8 +492,8 @@ func (m *Manager) watchProcess(sess *Session) {
 }
 
 // ResumeSession resumes a completed Claude Code session using --resume.
-func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID, cols, rows int) error {
-	debuglog.Printf("[ResumeSession] sessionID=%s cols=%d rows=%d", sessionID, cols, rows)
+func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) error {
+	debuglog.Printf("[ResumeSession] sessionID=%s", sessionID)
 	if m.HasActiveProcess(sessionID) {
 		debuglog.Printf("[ResumeSession] already has active process")
 		return fmt.Errorf("session %s already has an active process", sessionID)
@@ -641,35 +551,18 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID, co
 		return fmt.Errorf("作業ディレクトリが見つかりません: %s", workDir)
 	}
 
-	// JSONL ストリーミングは継続する。PTY は入力・プロセス管理用で、
-	// 表示は JSONL 構造化ログを優先するため。
-
-	// rt.maxLogLines と rt.LogLines は rt.mu で保護する。
-	// sess.mu との同時保持は禁止（ロック順序規則）。
-	sess.rt.mu.Lock()
-	sess.rt.maxLogLines = m.config.MaxLogLines
-	sess.rt.LogLines = make([]string, 0, 256)
-	sess.rt.mu.Unlock()
-
 	sess.mu.Lock()
 	sess.setStatusLocked(StatusIdle)
 	sess.FinishedAt = nil // resume なので終了時刻をクリア
 	sess.mu.Unlock()
 
-	// Backend handles display creation and AttachProcess internally.
-	// For ptyBackend: display is attached before the output goroutine starts.
 	debuglog.Printf("[ResumeSession] calling backend.StartProcess")
 	if err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
-		Command:       m.config.ClaudeCommand,
-		WorkDir:       workDir,
-		Args:          buildStartArgs(string(csID), false, "", "", m.buildAddDirArgs(sess.RepoPath)),
-		Env:           []string{"CLAUDE_DECK_SESSION_ID=" + string(sessionID)},
-		Cols:          uint16(cols),
-		Rows:          uint16(rows),
-		MaxScrollback: m.config.MaxScrollback,
-	}, func(data []byte) {
-		m.handleOutput(sess, data)
-	}); err != nil {
+		Command: m.config.ClaudeCommand,
+		WorkDir: workDir,
+		Args:    buildStartArgs(string(csID), false, "", m.config.DefaultPermissionMode, m.buildAddDirArgs(sess.RepoPath)),
+		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sessionID)},
+	}, nil); err != nil {
 		debuglog.Printf("[ResumeSession] StartProcess failed: %v", err)
 		return fmt.Errorf("resuming claude code: %w", err)
 	}
@@ -686,7 +579,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID, co
 // ForkSession creates a new session that forks from an existing session's conversation.
 // Uses claude --resume <sourceClaudeSessionID> --fork-session to inherit conversation
 // history while creating a new Claude Code session ID and JSONL file.
-func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID, cols, rows int) (*Session, error) {
+func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID) (*Session, error) {
 	m.mu.RLock()
 	srcSess, ok := m.sessions[sourceSessionID]
 	m.mu.RUnlock()
@@ -714,7 +607,6 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 
 	repoName := filepath.Base(repoPath)
 	sess := NewSession(repoPath, repoName)
-	sess.rt.maxLogLines = m.config.MaxLogLines
 
 	wsName := sess.Name
 	wsPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
@@ -740,16 +632,11 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 
 	// Backend handles AttachProcess internally.
 	if err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
-		Command:       m.config.ClaudeCommand,
-		WorkDir:       actualWorkDir,
-		Args:          buildStartArgs(string(srcClaudeID), true, "", "", m.buildAddDirArgs(repoPath)),
-		Env:           []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
-		Cols:          uint16(cols),
-		Rows:          uint16(rows),
-		MaxScrollback: m.config.MaxScrollback,
-	}, func(data []byte) {
-		m.handleOutput(sess, data)
-	}); err != nil {
+		Command: m.config.ClaudeCommand,
+		WorkDir: actualWorkDir,
+		Args:    buildStartArgs(string(srcClaudeID), true, "", m.config.DefaultPermissionMode, m.buildAddDirArgs(repoPath)),
+		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
+	}, nil); err != nil {
 		m.mu.Lock()
 		delete(m.sessions, sess.ID)
 		m.mu.Unlock()
@@ -780,7 +667,9 @@ func (m *Manager) RemoveSession(sessionID DeckSessionID) error {
 
 	// oldSessionIDs には登録しない。dd は deck メタデータだけ削除し JSONL は残すため、
 	// 次回の DiscoverExternalSessions で外部セッションとして再発見されるのが正しい動作。
-	m.removeSessionCore(sessionID)
+	if warnings := m.removeSessionCore(sessionID); len(warnings) > 0 {
+		debuglog.Printf("[RemoveSession] cleanup warnings: %s", strings.Join(warnings, "; "))
+	}
 	m.notifyChange(sessionID)
 	return nil
 }
@@ -824,17 +713,11 @@ func (m *Manager) DeleteSession(sessionID DeckSessionID) (warning string, err er
 }
 
 // removeSessionCore performs the shared cleanup for both RemoveSession and DeleteSession:
-// stops any active stream, unregisters from Supervisor (PTY mode only), removes from
-// the sessions map, and deletes from the store.
+// stops any active stream, removes from the sessions map, and deletes from the store.
 // Returns any warnings encountered (typically store delete failures).
 func (m *Manager) removeSessionCore(sessionID DeckSessionID) []string {
 	m.stopActiveStream(sessionID)
 
-	// Supervisor は PTY モードでのみ非 nil。tmux モードでは backend がプロセスを
-	// 管理するため Supervisor を持たない。
-	if m.Supervisor != nil {
-		m.Supervisor.Unregister(sessionID)
-	}
 	m.mu.Lock()
 	delete(m.sessions, sessionID)
 	m.mu.Unlock()
@@ -868,7 +751,8 @@ func (m *Manager) cleanupWorkspace(repoPath, wsName, wsRootPath string) string {
 		return ""
 	}
 	var warnings []string
-	// jj ワークスペースを forget（削除時のみ。プロセス終了時は再開用に保持する）
+	// jj ワークスペースを forget してディレクトリを削除する。
+	// Kill 時にも呼ばれる（resume 時は recreateWorkspace で再作成される）。
 	if err := m.jj().ForgetWorkspace(repoPath, wsName); err != nil {
 		// forget 失敗でもディレクトリ削除は続行する（jj が既に forget 済みの場合など）
 		warnings = append(warnings, fmt.Sprintf("workspace forget失敗: %v", err))
@@ -928,13 +812,14 @@ func (m *Manager) Kill(sessionID DeckSessionID) error {
 	// プロセスハンドルがない（PID フォールバック）場合は手動で遷移させる。
 	//
 	// DetachProcess と notifyChange も呼ぶ。呼ばないと:
-	//   - process.Load() != nil のまま → DisplayChannel が DisplayNone/DisplayPTY のまま残る
+	//   - process.Load() != nil のまま → DisplayChannel が DisplayTmux のまま残る
 	//   - TUI が更新されず detail pane が古い表示のままになる
 	// watchProcess も後から同じ処理をするが、それまでの間 TUI が不整合状態になるのを防ぐ。
 	// 二重実行になるが DetachProcess / SetStatus / persist / notifyChange はすべて冪等なので問題なし。
-	if !m.backend.IsActive(sessionID) && (m.Supervisor == nil || m.Supervisor.Get(sessionID) == nil) {
-		sess.DetachProcess()
+	if !m.backend.IsActive(sessionID) {
+		// SetStatus before DetachProcess — see watchProcess comment for ordering rationale.
 		sess.SetStatus(StatusCompleted)
+		sess.DetachProcess()
 	}
 
 	// ワークスペースディレクトリを削除して disk を回収する。
@@ -957,27 +842,9 @@ func (m *Manager) Kill(sessionID DeckSessionID) error {
 	return nil
 }
 
-// WriteToSession sends data to the PTY process of a running session.
-// raw PTY 入力モードでは keyToBytes が1キー分のバイト列を返すため、
-// 一括で書き込む。マルチバイト UTF-8 文字の分断を防ぐ。
-func (m *Manager) WriteToSession(sessionID DeckSessionID, data []byte) error {
-	return m.backend.WriteInput(sessionID, data)
-}
-
-// HasActiveProcess returns true if the session has a live PTY process.
+// HasActiveProcess returns true if the session has a live process.
 func (m *Manager) HasActiveProcess(sessionID DeckSessionID) bool {
 	return m.backend.IsActive(sessionID)
-}
-
-// ResizeSession updates the PTY process and virtual terminal emulator dimensions.
-// Claude Code re-renders its Ink UI for the new size.
-func (m *Manager) ResizeSession(sessionID DeckSessionID, cols, rows int) {
-	debuglog.Printf("[resize] session=%s cols=%d rows=%d", sessionID, cols, rows)
-	m.backend.Resize(sessionID, uint16(cols), uint16(rows))
-
-	if sess := m.GetSession(sessionID); sess != nil {
-		sess.ResizeDisplay(cols, rows)
-	}
 }
 
 // GetSession returns a session by ID.
@@ -1027,30 +894,6 @@ func (m *Manager) ListSessions() []*Session {
 	for i, item := range items {
 		list[i] = item.session
 	}
-
-	return list
-}
-
-// ListManagedSessions returns sessions that currently have an active process.
-// The check is delegated to the backend so this works for both PTY and tmux modes.
-// m.mu を解放してから IsActive を呼ぶ（tmux モードでは外部コマンド実行になるため
-// ロック保持中の長時間ブロックを避ける）。
-func (m *Manager) ListManagedSessions() []*Session {
-	candidates := m.copySessionsList()
-	list := make([]*Session, 0, len(candidates))
-	for _, s := range candidates {
-		if m.backend.IsActive(s.ID) {
-			list = append(list, s)
-		}
-	}
-
-	sort.Slice(list, func(i, j int) bool {
-		ti, tj := list[i].sortTime(), list[j].sortTime()
-		if ti.Equal(tj) {
-			return list[i].getName() < list[j].getName()
-		}
-		return ti.Before(tj)
-	})
 
 	return list
 }

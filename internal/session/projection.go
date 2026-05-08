@@ -15,7 +15,6 @@ import (
 //	         SubProjectDir, SessionChain, Status, FinishedAt, PID, BookmarkName
 //	JSONL  → Prompt, PermissionMode, StartedAt, LastActivity, TokenUsage
 //	Hook   → Status (transitions), SessionChain (append on /clear)
-//	PTY    → LogLines, CurrentTool, Status (Running via spinner detection)
 //
 // The Apply* methods below encapsulate these projection rules so that callers
 // (Manager, file watchers, hook processors) don't need to know which fields
@@ -26,7 +25,6 @@ const (
 	SourceStore DataSource = iota
 	SourceJSONL
 	SourceHook
-	SourcePTY
 )
 
 func (d DataSource) String() string {
@@ -37,8 +35,6 @@ func (d DataSource) String() string {
 		return "JSONL"
 	case SourceHook:
 		return "Hook"
-	case SourcePTY:
-		return "PTY"
 	default:
 		return "Unknown"
 	}

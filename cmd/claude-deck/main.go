@@ -105,25 +105,17 @@ func run() error {
 		refreshInterval = 5 * time.Second
 	}
 
-	// Resolve backend mode from config.
-	backendMode := session.BackendPTY
-	if cfg.Tmux.Enabled {
-		backendMode = session.BackendTmux
-	}
-
 	// Create session manager
-	mgr := session.NewManager(ctx, st, buildManagerConfig(cfg, backendMode, refreshInterval))
+	mgr := session.NewManager(ctx, st, buildManagerConfig(cfg, refreshInterval))
 
 	// Load session metadata from store (fast: local JSON files only)
 	if err := mgr.LoadExisting(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to load existing sessions: %v\n", err)
 	}
 
-	// tmux mode: reconcile in-memory state with live tmux windows.
+	// Reconcile in-memory state with live tmux windows.
 	// Must run after LoadExisting so deck sessions are populated.
-	if mgr.IsTmuxMode() {
-		mgr.ReconcileTmux()
-	}
+	mgr.ReconcileTmux()
 
 	// Heavy JSONL reads はバックグラウンドで実行し TUI を即座に表示する。
 	// 初回は offset=0 で最初の30件だけ discover して即表示。
@@ -141,18 +133,18 @@ func run() error {
 		cancel()
 	}()
 
-	// tmux mode: ensure __preview__ window exists (for split mode).
-	// The preview window runs "claude-deck --preview" and shows JSONL logs for
-	// the session selected in the list TUI via file-based IPC.
+	// Ensure __preview__ window exists and enter split mode if successful.
+	// splitMode=true means the preview window is available; the TUI shows list-only
+	// layout with cursor navigation driving the right tmux pane.
+	// Actual Ghostty pane splitting (splitTermUUID != "") is best-effort and only
+	// happens when claude-deck is running inside Ghostty — splitMode stays true
+	// regardless so the list-only layout is active even without a live Ghostty split.
 	var splitMode bool
 	var splitTermUUID string // Ghostty terminal UUID for cleanup on exit
-	if mgr.IsTmuxMode() {
-		if err := mgr.EnsurePreviewWindow(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: preview window setup: %v\n", err)
-		} else {
-			splitMode = true
-		}
-
+	if err := mgr.EnsurePreviewWindow(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: preview window setup: %v\n", err)
+	} else {
+		splitMode = true
 		splitTermUUID = setupGhosttySplit(cfg)
 	}
 
@@ -173,11 +165,6 @@ func run() error {
 		p.Send(tui.SessionRefreshMsg{ChangedIDs: changed})
 	})
 	mgr.StartNotifyLoop(ctx)
-	// Spinner idle loop is only needed for PTY mode, where braille spinner
-	// detection drives status transitions.  In tmux mode, hooks handle this.
-	if !mgr.IsTmuxMode() {
-		mgr.StartSpinnerIdleLoop(ctx)
-	}
 
 	// fsnotify で JSONL ファイルを監視し、LastActivity を即時更新する。
 	// 失敗しても 5 秒 tick が動くので非致命的。
@@ -279,16 +266,13 @@ func runPreview() error {
 }
 
 // buildManagerConfig constructs the ManagerConfig from app config and derived values.
-// Centralised here so run() and runPreview() stay in sync.
-func buildManagerConfig(cfg *config.Config, backendMode session.BackendMode, refreshInterval time.Duration) session.ManagerConfig {
+func buildManagerConfig(cfg *config.Config, refreshInterval time.Duration) session.ManagerConfig {
 	return session.ManagerConfig{
 		DataDir:               cfg.DataDir,
 		ClaudeCommand:         cfg.Commands.Claude,
 		JJ:                    &jj.Runner{Command: cfg.Commands.JJ},
 		DefaultPermissionMode: cfg.Defaults.PermissionMode,
 		MaxSessions:           cfg.Session.MaxSessions,
-		MaxLogLines:           cfg.Session.MaxLogLines,
-		MaxScrollback:         cfg.Session.MaxScrollback,
 		DiscoveryDays:         cfg.Session.DiscoveryDays,
 		RefreshInterval:       refreshInterval,
 		Pricing: session.PricingPolicy{
@@ -299,7 +283,6 @@ func buildManagerConfig(cfg *config.Config, backendMode session.BackendMode, ref
 		},
 		WorkspaceSymlinksFunc: cfg.WorkspaceSymlinks,
 		AddDirsFunc:           cfg.ResolvedAddDirs,
-		BackendMode:           backendMode,
 		TmuxCommand:           cfg.Tmux.Command,
 		TmuxSession:           cfg.Tmux.SessionName,
 	}
@@ -307,9 +290,8 @@ func buildManagerConfig(cfg *config.Config, backendMode session.BackendMode, ref
 
 // setupGhosttySplit opens the tmux right pane in Ghostty if running inside it.
 // Returns the Ghostty terminal UUID for cleanup on exit (empty string if not split).
-var tmuxSessionNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
-
 func setupGhosttySplit(cfg *config.Config) string {
+	tmuxSessionNameRE := regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 	tmuxSession := cfg.Tmux.SessionName
 	if tmuxSession == "" {
 		tmuxSession = "claude-deck"

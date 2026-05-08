@@ -29,8 +29,7 @@ func (k LaunchKind) String() string {
 // Instead of three separate methods with overlapping logic (CreateSession,
 // ResumeSession, ForkSession), callers construct a LaunchIntent and pass it
 // to Manager.Launch. The Manager uses Kind to dispatch to the appropriate
-// internal workflow while sharing common setup (PTY start, watchProcess,
-// persist, notify).
+// internal workflow while sharing common setup (watchProcess, persist, notify).
 type LaunchIntent struct {
 	Kind LaunchKind
 
@@ -44,8 +43,4 @@ type LaunchIntent struct {
 
 	// SessionID is the deck session ID to resume. Required for Resume and Fork.
 	SessionID DeckSessionID
-
-	// Cols and Rows are the terminal dimensions for the PTY.
-	Cols int
-	Rows int
 }

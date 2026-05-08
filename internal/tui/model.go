@@ -27,85 +27,23 @@ const (
 	viewSelectRepo
 )
 
-// TUIBackendMode describes how the TUI interacts with the process hosting environment.
-// It replaces the separate tmuxMode/splitMode boolean pair, capturing the constraint
-// that splitMode implies tmuxMode as a single value.
-// TUIBackendMode extends session.BackendMode with the TUI-layer concept of
-// Ghostty split layout. From session.Manager's perspective BackendModeTmux and
-// BackendModeSplit are both session.BackendTmux — the split distinction only
-// affects TUI keystroke routing and right-pane management.
-//
-//	session.BackendPTY  → BackendModeEmbedded
-//	session.BackendTmux → BackendModeTmux  (single terminal, tmux window switching)
-//	session.BackendTmux → BackendModeSplit (Ghostty split; detail pane hidden)
+// TUIBackendMode describes the TUI layout mode.
+// Both BackendModeTmux and BackendModeSplit use tmux for process hosting;
+// the distinction only affects keystroke routing and right-pane management.
 type TUIBackendMode int
 
 const (
-	// BackendModeEmbedded is the default: PTY processes are embedded in the TUI.
-	// PTY input mode is available; detail pane shows live PTY output.
-	BackendModeEmbedded TUIBackendMode = iota
 	// BackendModeTmux hosts processes in tmux windows.
-	// PTY input mode is disabled; session switching fires tmux select-window.
-	BackendModeTmux
+	// Session switching fires tmux select-window.
+	BackendModeTmux TUIBackendMode = iota
 	// BackendModeSplit combines tmux hosting with Ghostty split layout:
 	// the detail pane is hidden, the list takes full width, and cursor navigation
 	// drives the right tmux pane (preview window or session window).
 	BackendModeSplit
 )
 
-// IsTmuxLike reports whether the backend uses tmux for process hosting.
-// True for both BackendModeTmux and BackendModeSplit.
-func (m TUIBackendMode) IsTmuxLike() bool { return m != BackendModeEmbedded }
-
 // IsSplit reports whether the TUI is in Ghostty split layout mode.
 func (m TUIBackendMode) IsSplit() bool { return m == BackendModeSplit }
-
-// ptyViewCache tracks which PTY display version was last rendered into the
-// ptyViewport. Used to skip redundant SetContentLines calls, avoiding the
-// expensive O(n) maxLineWidth scan over all scrollback lines.
-// sessionID and version must always be updated atomically (via update) to
-// prevent partial-update bugs — mirroring the renderCache key+result invariant.
-//
-// Placed in model.go (not logrender.go) because it is a PTY viewport tracking
-// concern, independent of JSONL log rendering.
-type ptyViewCache struct {
-	sessionID session.DeckSessionID
-	version   uint64
-}
-
-// isUpToDate returns true when the cached session and version match, meaning
-// the ptyViewport content is already current and SetContentLines can be skipped.
-//
-// Edge case: a brand-new session starts with displayVersion==0 before its first
-// paint. A stale cache entry for the same sessionID would also have version==0
-// (from a prior session that was deleted before ever painting). This is harmless
-// because ptyViewCache.sessionID changes when the selected session changes, so
-// isUpToDate returns false on every session switch regardless of version.
-func (c ptyViewCache) isUpToDate(sid session.DeckSessionID, ver uint64) bool {
-	return c.sessionID == sid && c.version == ver
-}
-
-// update records the session and version after SetContentLines has been called.
-func (c *ptyViewCache) update(sid session.DeckSessionID, ver uint64) {
-	c.sessionID = sid
-	c.version = ver
-}
-
-// ptyAtomicView is the read-only PTY handle exposed to View() for the currently
-// selected session. It wraps *session.Session but exposes only lock-free atomic
-// accessors — methods that acquire session.mu, session.rt.mu, or display.emuMu
-// must NOT appear here.
-//
-// This structural constraint prevents callers from accidentally reaching locked
-// Session methods through the View() path, which would reintroduce the convoy
-// effect that causes TUI freezes during rapid mouse scroll.
-type ptyAtomicView struct {
-	sess *session.Session
-}
-
-func (v *ptyAtomicView) GetPTYCursorPosition() (int, int) { return v.sess.GetPTYCursorPosition() }
-func (v *ptyAtomicView) GetDisplayVersion() uint64        { return v.sess.GetDisplayVersion() }
-func (v *ptyAtomicView) GetPTYDisplayLines() []string     { return v.sess.GetPTYDisplayLines() }
 
 // Model is the Bubble Tea model for the TUI.
 type Model struct {
@@ -125,12 +63,10 @@ type Model struct {
 	selectedID  session.DeckSessionID
 	layout      Layout
 	logViewport viewport.Model
-	ptyViewport  viewport.Model // PTY リアルタイム出力用
 
 	// View state
-	mode           viewMode
-	repoList       list.Model
-	ptyInputActive bool // PTY 直接入力モード中（キーイベントを PTY に転送）
+	mode     viewMode
+	repoList list.Model
 
 	// Session filter
 	filterInput  textinput.Model
@@ -140,45 +76,31 @@ type Model struct {
 	// Status bar
 	statusMsg string
 
-	// Quit confirmation
+	// Quit state
 	confirmQuit bool
+	quitting    bool
+
+	// In-flight async operation flags — prevent duplicate key presses from
+	// launching concurrent operations while a background Cmd is running.
+	killing bool // true while sessionKilledMsg is in flight
 
 	// Vim-style key sequence state
 	pendingG        bool
 	logFollow       bool // ログビューポート末尾追従モード
-	ptyFollow       bool // PTY ビューポート末尾追従モード
 	refreshInterval time.Duration
-	lastResizeCols  int // 前回 ResizeSession に渡した幅
-	lastResizeRows  int // 前回 ResizeSession に渡した高さ
-	lastResizeID    session.DeckSessionID // 前回 ResizeSession に渡したセッション ID
 
 	// Log rendering cache (JSONL structured logs)
 	logCache renderCache
 
-	// PTY viewport content tracking — skips SetContentLines when display
-	// version has not changed since the last call, avoiding expensive
-	// maxLineWidth O(n) computation over all scrollback lines.
-	ptyViewCache ptyViewCache
-
 	// Pre-computed view data — populated in Update(), read-only in View().
 	// Eliminates all Snapshot() / GetSession() calls from the View() path,
-	// making View() lock-free. Without this, View() acquires ~40-60 RLocks per
-	// frame, contending with PTY writer goroutines that hold write locks for
-	// OSC title updates (~12 Hz) and causing the convoy effect that freezes
-	// the TUI during rapid mouse scroll.
+	// making View() lock-free.
 	// viewSnaps[i] is a snapshot of visibleSessions()[i] and shares the same
 	// index space as m.cursor. Sorting or filtering changes must always be
 	// followed by refreshViewData() to keep this invariant.
 	viewSnaps    []session.Snapshot
 	selectedSnap *session.Snapshot // snapshot for the selected session (nil = no selection)
-	// selectedPTY provides lock-free PTY atomic access for View() rendering.
-	// It exposes only atomic accessors (GetPTYCursorPosition, GetDisplayVersion,
-	// GetPTYDisplayLines) — methods that acquire any lock must NOT be called through it.
-	// See ptyAtomicView for why a wrapper type is used instead of *session.Session.
-	selectedPTY    *ptyAtomicView
 	attentionCount int // sessions with Status.NeedsAttention() == true
-
-	quitting bool
 
 	// rate limits data from Claude Code statusline (Pro/Max subscribers only)
 	rateLimitsStatus ratelimits.Status
@@ -213,8 +135,9 @@ type sessionForkedMsg struct {
 	err       error
 }
 
-// ptyInputSentMsg is sent when PTY input write completes.
-type ptyInputSentMsg struct {
+// sessionKilledMsg is sent when an async session kill completes.
+// No sessionID field needed: kill does not create a new session.
+type sessionKilledMsg struct {
 	err error
 }
 
@@ -227,16 +150,9 @@ type ModelOptions struct {
 	SplitMode bool
 }
 
-func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context, opts ...ModelOptions) Model {
-	var opt ModelOptions
-	if len(opts) > 0 {
-		opt = opts[0]
-	}
+func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context, opt ModelOptions) Model {
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(10))
 	vp.SetContent("")
-
-	pvp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(3))
-	pvp.SetContent("")
 
 	delegate := newRepoDelegate()
 	rl := list.New(nil, delegate, 80, 24)
@@ -261,11 +177,9 @@ func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context, opt
 		refreshInterval = 5 * time.Second
 	}
 
-	var backendMode TUIBackendMode
+	backendMode := BackendModeTmux
 	if opt.SplitMode {
 		backendMode = BackendModeSplit
-	} else if mgr.IsTmuxMode() {
-		backendMode = BackendModeTmux
 	}
 
 	m := Model{
@@ -275,10 +189,8 @@ func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context, opt
 		ctx:             ctx,
 		repoList:        rl,
 		logViewport:     vp,
-		ptyViewport:     pvp,
 		filterInput:     fi,
 		logFollow:       true,
-		ptyFollow:       true,
 		refreshInterval: refreshInterval,
 		backendMode:     backendMode,
 	}
@@ -327,27 +239,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
-	case tea.PasteMsg:
-		if m.ptyInputActive && msg.Content != "" {
-			data := []byte(msg.Content)
-			mgr := m.manager
-			sid := m.selectedID
-			cmds = append(cmds, func() tea.Msg {
-				err := mgr.WriteToSession(sid, data)
-				return ptyInputSentMsg{err: err}
-			})
-		}
-
 	case tea.MouseWheelMsg:
 		if m.layout.IsDetailFocused() && m.mode == viewDashboard {
 			var cmd tea.Cmd
-			if m.selectedDisplayChannel() == session.DisplayPTY {
-				m.ptyViewport, cmd = m.ptyViewport.Update(msg)
-				m.ptyFollow = m.ptyViewport.AtBottom()
-			} else {
-				m.logViewport, cmd = m.logViewport.Update(msg)
-				m.logFollow = m.logViewport.AtBottom()
-			}
+			m.logViewport, cmd = m.logViewport.Update(msg)
+			m.logFollow = m.logViewport.AtBottom()
 			if cmd != nil {
 				cmds = append(cmds, cmd)
 			}
@@ -369,7 +265,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncLogViewport()
 		}
 		// split モードで選択中セッションの状態が変わった場合、preview spec を最新化する。
-		// kill 時の DisplayNone → DisplayJSONL 遷移などがリアルタイムに preview に届く。
+		// kill 時の DisplayTmux → DisplayJSONL 遷移などがリアルタイムに preview に届く。
 		if m.backendMode.IsSplit() && m.selectedID != "" {
 			if len(msg.ChangedIDs) == 0 || msg.ChangedIDs[m.selectedID] {
 				if spec := m.buildPreviewSpec(); spec.Display != "" {
@@ -396,13 +292,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedID = msg.sessionID
 			cmds = append(cmds, m.refreshSessions()...)
 			m.layout.FocusDetail()
-			if !m.backendMode.IsTmuxLike() {
-				m.ptyInputActive = true
-			} else {
-				// m.selectedID を refreshSessions() 前に設定するため updateSelected() で
-				// idChanged=false になる。switchRightPane で明示的に右ペインを切替する。
-				cmds = append(cmds, m.switchRightPane(msg.sessionID, true))
-			}
+			// m.selectedID を refreshSessions() 前に設定するため updateSelected() で
+			// idChanged=false になる。switchRightPane で明示的に右ペインを切替する。
+			cmds = append(cmds, m.switchRightPane(msg.sessionID, true))
 		}
 		cmds = append(cmds, clearStatusCmd())
 
@@ -412,13 +304,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusMsg = "セッションを再開しました"
 			m.layout.FocusDetail()
-			if !m.backendMode.IsTmuxLike() {
-				m.ptyInputActive = true
-			} else {
-				// ResumeSession が完了した時点でセッションは managed=true になっており
-				// DisplayNone に遷移済み。switchRightPane が FocusSession + FocusRight を発行する。
-				cmds = append(cmds, m.switchRightPane(m.selectedID, m.backendMode.IsSplit()))
-			}
+			// ResumeSession が完了した時点でセッションは managed=true になっており
+			// DisplayTmux に遷移済み。switchRightPane が FocusSession + FocusRight を発行する。
+			cmds = append(cmds, m.switchRightPane(m.selectedID, m.backendMode.IsSplit()))
 		}
 		cmds = append(cmds, clearStatusCmd())
 
@@ -430,21 +318,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedID = msg.sessionID
 			cmds = append(cmds, m.refreshSessions()...)
 			m.layout.FocusDetail()
-			if !m.backendMode.IsTmuxLike() {
-				m.ptyInputActive = true
-			} else {
-				// sessionCreatedMsg と同じ理由で明示的に切替する。
-				cmds = append(cmds, m.switchRightPane(msg.sessionID, true))
-			}
+			// sessionCreatedMsg と同じ理由で明示的に切替する。
+			cmds = append(cmds, m.switchRightPane(msg.sessionID, true))
 		}
 		cmds = append(cmds, clearStatusCmd())
 
-	case ptyInputSentMsg:
-		debuglog.Printf("[tui] ptyInputSentMsg err=%v", msg.err)
+	case sessionKilledMsg:
+		m.killing = false
 		if msg.err != nil {
-			m.statusMsg = "PTY送信エラー: " + msg.err.Error()
-			cmds = append(cmds, clearStatusCmd())
+			// Kill() が StopProcess エラーで早期 return した場合、notifyChange は呼ばれず
+			// SessionRefreshMsg も届かない。セッション状態は変化していないため refreshSessions は不要。
+			m.statusMsg = "終了エラー: " + msg.err.Error()
+		} else {
+			m.statusMsg = "セッションを終了しました (workspace削除済)"
+			// Kill() 末尾の notifyChange がデバウンスループ経由で SessionRefreshMsg を発行するため
+			// refreshSessions の明示呼び出しは不要。
 		}
+		cmds = append(cmds, clearStatusCmd())
 
 	case repoListMsg:
 		if msg.err != nil {
@@ -488,7 +378,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.(type) {
 		case tea.KeyPressMsg,
 			metadataTickMsg, SessionRefreshMsg, statusClearMsg,
-			sessionCreatedMsg, sessionResumedMsg, sessionForkedMsg, ptyInputSentMsg, repoListMsg,
+			sessionCreatedMsg, sessionResumedMsg, sessionForkedMsg, sessionKilledMsg, repoListMsg,
 			RateLimitsUpdatedMsg:
 			// skip: 処理済み or repoList に無関係
 		default:
@@ -506,7 +396,6 @@ func clearStatusCmd() tea.Cmd {
 		return statusClearMsg{}
 	})
 }
-
 
 func (m *Model) refreshSessions() []tea.Cmd {
 	m.sessions = m.manager.ListSessions()
@@ -546,15 +435,18 @@ func (m *Model) refreshSessions() []tea.Cmd {
 // shares the same index space as m.cursor. Always call refreshViewData() after
 // any change to session order, filter text, or the visible session set.
 //
-// Note: selectedSnap/selectedPTY are updated by updateSelected() → refreshSelectedSnap()
-// whenever the selection changes. refreshViewData() intentionally does NOT call
-// refreshSelectedSnap() again to avoid the double-call when coming through
-// refreshSessions() → updateSelected() → refreshSelectedSnap() → refreshViewData().
+// Call order: must be called AFTER updateSelected() so that m.cursor and
+// m.selectedID are already final — viewSnaps is indexed by m.cursor.
+//
+// selectedSnap is maintained separately by updateSelected() → refreshSelectedSnap().
+// refreshViewData() does NOT update selectedSnap to avoid a redundant Snapshot()
+// call in the refreshSessions() → updateSelected() → refreshSelectedSnap() → refreshViewData() path.
 func (m *Model) refreshViewData() {
-	// attention count — iterate all sessions
+	// attention count — scans all sessions (not just visible) so the indicator
+	// reflects the global state even when a filter is active.
 	count := 0
 	for _, s := range m.sessions {
-		if s.Snapshot().Status.NeedsAttention() {
+		if s.GetStatus().NeedsAttention() {
 			count++
 		}
 	}
@@ -569,7 +461,7 @@ func (m *Model) refreshViewData() {
 	m.viewSnaps = snaps
 }
 
-// refreshSelectedSnap updates selectedSnap and selectedPTY for the current selectedID.
+// refreshSelectedSnap updates selectedSnap for the current selectedID.
 // Called from updateSelected() on cursor movement — a fast partial update that avoids
 // re-scanning all sessions (unlike the full refreshViewData).
 func (m *Model) refreshSelectedSnap() {
@@ -577,12 +469,10 @@ func (m *Model) refreshSelectedSnap() {
 		if sess := m.manager.GetSession(m.selectedID); sess != nil {
 			snap := sess.Snapshot()
 			m.selectedSnap = &snap
-			m.selectedPTY = &ptyAtomicView{sess: sess}
 			return
 		}
 	}
 	m.selectedSnap = nil
-	m.selectedPTY = nil
 }
 
 // selectedDisplayChannel returns the DisplayChannel for the currently selected session.
@@ -638,12 +528,11 @@ func (m *Model) updateSelected() []tea.Cmd {
 	idChanged := m.selectedID != oldID
 	if idChanged {
 		m.logFollow = true
-		m.ptyFollow = true
 		// 選択中のセッションだけ JSONL ストリーミングを開始
 		m.manager.StreamSession(m.selectedID)
 	}
 	// 常に最新 snap を取得する。選択 ID が同じでも display channel が変わる場合
-	// （kill → Completed: DisplayPTY/DisplayNone → DisplayJSONL）があるため。
+	// （kill → Completed: DisplayTmux → DisplayJSONL）があるため。
 	m.refreshSelectedSnap()
 	if idChanged {
 		m.syncLogViewport()
@@ -675,20 +564,24 @@ func (m *Model) updateSelected() []tea.Cmd {
 	// tmux/split mode: カーソル移動(idChanged)またはセッション状態変化(display変化)で
 	// 右ペインを最新の状態に同期する。focusRight=false なのでカーソル移動では
 	// Ghostty のペインフォーカスは移動しない（ユーザーはリストを閲覧中）。
-	if m.backendMode.IsTmuxLike() && (idChanged || (m.backendMode.IsSplit() && newDisplay != oldDisplay)) {
+	if idChanged || (m.backendMode.IsSplit() && newDisplay != oldDisplay) {
 		return []tea.Cmd{m.switchRightPane(sid, false)}
 	}
 	return nil
 }
 
 // buildPreviewSpec builds a PreviewSpec from the current selection for IPC to the
-// preview subprocess. JSONL path resolution happens here so preview needs no Manager.
-// Returns an empty spec (Display=="") when there is no selection.
+// preview subprocess. Returns an empty spec (Display=="") when there is no selection.
 func (m *Model) buildPreviewSpec() preview.PreviewSpec {
 	if m.selectedSnap == nil {
 		return preview.PreviewSpec{}
 	}
-	snap := *m.selectedSnap
+	return m.buildPreviewSpecFromSnap(*m.selectedSnap)
+}
+
+// buildPreviewSpecFromSnap builds a PreviewSpec from the given snapshot.
+// JSONL path resolution happens here so the preview subprocess needs no Manager.
+func (m *Model) buildPreviewSpecFromSnap(snap session.Snapshot) preview.PreviewSpec {
 	jsonlPath, priorPaths := m.manager.ResolveJSONLPaths(snap.ID)
 	return preview.PreviewSpec{
 		DeckSessionID:   snap.ID,
@@ -711,28 +604,34 @@ func (m *Model) buildPreviewSpec() preview.PreviewSpec {
 // switchRightPane は右ペイン制御を tea.Cmd として返す。
 // Update() のメッセージハンドラから発行する明示的なユーザー操作（Enter/n/r/f）に使う。
 //
+// 副作用: split モードかつ DisplayJSONL の場合、preview.WriteSpec でプレビュープロセスへ
+// IPC 書き込みを行う（選択セッションの PreviewSpec をファイルに書き出す）。
+//
 // display と spec は Update フレーム内（Cmd 生成時）でキャプチャする。
 // bubbletea は Cmd を別 goroutine で実行するため、後からカーソルが移動しても
 // 生成時点のセッションに対する仕様が書き出される（順序性の保証）。
+//
+// sid は selectedID とは限らない（sessionCreatedMsg/sessionForkedMsg は新規セッションの ID を渡す）。
+// そのため selectedSnap ではなく GetSession(sid) で直接取得する。
 func (m *Model) switchRightPane(sid session.DeckSessionID, focusRight bool) tea.Cmd {
-	if !m.backendMode.IsTmuxLike() {
-		return nil
-	}
-	// Update フレームで display と spec を確定する。
+	// Update フレーム内で display と spec を確定する。
+	// GetSession(sid) から直接 Snapshot を取得することで sid と selectedID が異なる場合
+	// （sessionCreatedMsg / sessionForkedMsg など）でも正しいセッションの spec が書き出される。
 	var display session.DisplayChannel
-	if sess := m.manager.GetSession(sid); sess != nil {
-		display = sess.Snapshot().Display
-	}
 	var spec preview.PreviewSpec
-	if m.backendMode.IsSplit() && display != session.DisplayNone {
-		spec = m.buildPreviewSpec()
+	if sess := m.manager.GetSession(sid); sess != nil {
+		snap := sess.Snapshot()
+		display = snap.Display
+		if m.backendMode.IsSplit() && display != session.DisplayTmux {
+			spec = m.buildPreviewSpecFromSnap(snap)
+		}
 	}
 	isSplit := m.backendMode.IsSplit()
 	dataDir := m.config.DataDir
 	mgr := m.manager
 	return func() tea.Msg {
 		if isSplit {
-			if display == session.DisplayNone {
+			if display == session.DisplayTmux {
 				_ = mgr.FocusSession(sid)
 				if focusRight {
 					_ = ghostty.FocusRight()
@@ -749,7 +648,7 @@ func (m *Model) switchRightPane(sid session.DeckSessionID, focusRight bool) tea.
 			return nil
 		}
 		// split なし tmux mode: 稼働中セッションのウィンドウに切替
-		if display == session.DisplayNone {
+		if display == session.DisplayTmux {
 			_ = mgr.FocusSession(sid)
 		}
 		return nil

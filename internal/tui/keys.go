@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"os"
-	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -13,12 +12,6 @@ import (
 
 // handleKey processes keyboard input and dispatches to the appropriate handler.
 func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
-	// PTY 入力モード中は Ctrl+C を含む全キーを PTY に転送する。
-	// claude-deck の終了は入力モード外での Ctrl+C で行う。
-	if m.ptyInputActive {
-		return m.handlePTYInputKey(msg)
-	}
-
 	key := msg.String()
 	switch key {
 	case "ctrl+c":
@@ -67,7 +60,7 @@ func (m *Model) handleDashboardKey(msg tea.KeyPressMsg) tea.Cmd {
 
 	display := m.selectedDisplayChannel()
 
-	// Vim-style multi-key sequences: gg, dd
+	// Vim-style multi-key sequences: gg
 	if m.pendingG {
 		m.pendingG = false
 		if msg.String() == "g" {
@@ -137,7 +130,7 @@ func (m *Model) handleDetailPaneKey(msg tea.KeyPressMsg, display session.Display
 	case "j", "down", "k", "up", "pgup", "pgdown", "f", "b", "u":
 		return m.viewportUpdate(msg, display), true
 	}
-	// Other keys (n, enter, r, x, dd, tab, ?) fall through to list handling
+	// Other keys (n, enter, r, x, tab, ?) fall through to list handling
 	return nil, false
 }
 
@@ -188,14 +181,9 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 				cmds = append(cmds, m.updateSelected()...)
 				m.ensureCursorVisible()
 				m.layout.FocusDetail()
-				if m.backendMode.IsTmuxLike() {
-					// tmux mode: updateSelected が返す switchRightPane(false) は tmux window 選択のみ。
-					// tab はユーザーが介入しに行く意図なので Enter と同様に focusRight=true で
-					// Ghostty の右ペイン（tmux client）にフォーカスを移す。
-					cmds = append(cmds, m.switchRightPane(m.selectedID, true))
-				} else {
-					m.ptyInputActive = true
-				}
+				// tab はユーザーが介入しに行く意図なので focusRight=true で
+				// Ghostty の右ペイン（tmux client）にフォーカスを移す。
+				cmds = append(cmds, m.switchRightPane(m.selectedID, true))
 				m.syncLogViewport()
 				return tea.Batch(cmds...)
 			}
@@ -205,34 +193,16 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 	case "n":
 		return m.startNewSession()
 
-	case "enter", "i":
-		// 生きた PTY プロセスあり → 詳細ペインに切り替えて PTY 直接入力モード開始
-		debuglog.Printf("[key:%s] selectedID=%q display=%v tmuxMode=%v", key, m.selectedID, display, m.backendMode.IsTmuxLike())
-		if m.backendMode.IsTmuxLike() {
-			// tmux mode: focus the window in the tmux client.
-			// Completed sessions pressed with Enter → resume in a new tmux window.
-			if display == session.DisplayNone {
-				// 実行中セッション: tmux ウィンドウを前面に出し、
-				// Ghostty の右ペイン（tmux client）にフォーカスを移す。
-				return m.switchRightPane(m.selectedID, true)
-			}
-			if key == "enter" {
-				return m.resumeSelected()
-			}
-			return nil
+	case "enter":
+		debuglog.Printf("[key:enter] selectedID=%q display=%v", m.selectedID, display)
+		// tmux mode: focus the window in the tmux client.
+		// Completed sessions pressed with Enter → resume in a new tmux window.
+		if display == session.DisplayTmux {
+			// 実行中セッション: tmux ウィンドウを前面に出し、
+			// Ghostty の右ペイン（tmux client）にフォーカスを移す。
+			return m.switchRightPane(m.selectedID, true)
 		}
-		if display == session.DisplayPTY {
-			debuglog.Printf("[key:%s] activating PTY input mode", key)
-			m.layout.FocusDetail()
-			m.ptyInputActive = true
-			m.syncLogViewport()
-			debuglog.Printf("[key:%s] PTY input mode activated", key)
-			return nil
-		}
-		if key == "enter" {
-			debuglog.Printf("[key:enter] no active process, calling resumeSelected")
-			return m.resumeSelected()
-		}
+		return m.resumeSelected()
 
 	case "r":
 		return m.resumeSelected()
@@ -266,7 +236,7 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 		}
 
 	case "?":
-		m.statusMsg = "h/l:ペイン切替 j/k:移動 gg/G:先頭/末尾 /:フィルタ C-b/C-u:半頁 n:新規 Enter/i:入力/再開 r:再開 f:フォーク t:ターミナル R:再描画 dd:削除 dD:deckのみ削除 x:終了 C-c:quit"
+		m.statusMsg = "h/l:ペイン切替 j/k:移動 gg/G:先頭/末尾 /:フィルタ tab:要注意 C-b/C-u:半頁 n:新規 Enter/r:再開 f:フォーク t:ターミナル x:終了 R:再描画 C-c:quit"
 		return clearStatusCmd()
 	}
 
@@ -286,60 +256,35 @@ func (m *Model) clampCursorToVisible() []tea.Cmd {
 	return cmds
 }
 
-// viewportGotoTop scrolls the active viewport to the top.
-func (m *Model) viewportGotoTop(display session.DisplayChannel) {
-	if display == session.DisplayPTY {
-		m.ptyViewport.GotoTop()
-		m.ptyFollow = false
-	} else {
-		m.logViewport.GotoTop()
-		m.logFollow = false
-	}
+// viewportGotoTop scrolls the log viewport to the top.
+func (m *Model) viewportGotoTop(_ session.DisplayChannel) {
+	m.logViewport.GotoTop()
+	m.logFollow = false
 }
 
-// viewportGotoBottom scrolls the active viewport to the bottom and enables follow mode.
-func (m *Model) viewportGotoBottom(display session.DisplayChannel) {
-	if display == session.DisplayPTY {
-		m.ptyFollow = true
-		m.ptyViewport.GotoBottom()
-	} else {
-		m.logFollow = true
-		m.logViewport.GotoBottom()
-	}
+// viewportGotoBottom scrolls the log viewport to the bottom and enables follow mode.
+func (m *Model) viewportGotoBottom(_ session.DisplayChannel) {
+	m.logFollow = true
+	m.logViewport.GotoBottom()
 }
 
-// viewportHalfPageUp scrolls the active viewport half a page up.
-func (m *Model) viewportHalfPageUp(display session.DisplayChannel) {
-	if display == session.DisplayPTY {
-		m.ptyViewport.HalfPageUp()
-		m.ptyFollow = false
-	} else {
-		m.logViewport.HalfPageUp()
-		m.logFollow = false
-	}
+// viewportHalfPageUp scrolls the log viewport half a page up.
+func (m *Model) viewportHalfPageUp(_ session.DisplayChannel) {
+	m.logViewport.HalfPageUp()
+	m.logFollow = false
 }
 
-// viewportHalfPageDown scrolls the active viewport half a page down.
-func (m *Model) viewportHalfPageDown(display session.DisplayChannel) {
-	if display == session.DisplayPTY {
-		m.ptyViewport.HalfPageDown()
-		m.ptyFollow = m.ptyViewport.AtBottom()
-	} else {
-		m.logViewport.HalfPageDown()
-		m.logFollow = m.logViewport.AtBottom()
-	}
+// viewportHalfPageDown scrolls the log viewport half a page down.
+func (m *Model) viewportHalfPageDown(_ session.DisplayChannel) {
+	m.logViewport.HalfPageDown()
+	m.logFollow = m.logViewport.AtBottom()
 }
 
-// viewportUpdate forwards a scroll key to the active viewport and updates follow state.
-func (m *Model) viewportUpdate(msg tea.KeyPressMsg, display session.DisplayChannel) tea.Cmd {
+// viewportUpdate forwards a scroll key to the log viewport and updates follow state.
+func (m *Model) viewportUpdate(msg tea.KeyPressMsg, _ session.DisplayChannel) tea.Cmd {
 	var cmd tea.Cmd
-	if display == session.DisplayPTY {
-		m.ptyViewport, cmd = m.ptyViewport.Update(msg)
-		m.ptyFollow = m.ptyViewport.AtBottom()
-	} else {
-		m.logViewport, cmd = m.logViewport.Update(msg)
-		m.logFollow = m.logViewport.AtBottom()
-	}
+	m.logViewport, cmd = m.logViewport.Update(msg)
+	m.logFollow = m.logViewport.AtBottom()
 	return cmd
 }
 
@@ -359,105 +304,6 @@ func (m *Model) findNextAttentionSession() int {
 		}
 	}
 	return -1
-}
-
-// handlePTYInputKey processes keys when PTY input mode is active.
-// キーイベントを直接 PTY stdin に転送し、Claude Code の Ink UI をそのまま操作する。
-// Ctrl+D で入力モード終了。Ctrl+C は PTY に転送（プロセス中断用）。
-func (m *Model) handlePTYInputKey(msg tea.KeyPressMsg) tea.Cmd {
-	key := msg.String()
-
-	if key == "ctrl+d" {
-		m.deactivatePTYInput()
-		return nil
-	}
-
-	data := keyToBytes(msg)
-	if len(data) == 0 {
-		debuglog.Printf("[pty-input] key=%q → no bytes (skipped)", key)
-		return nil
-	}
-	debuglog.Printf("[pty-input] key=%q → %x (%d bytes)", key, data, len(data))
-
-	mgr := m.manager
-	sid := m.selectedID
-	return func() tea.Msg {
-		err := mgr.WriteToSession(sid, data)
-		return ptyInputSentMsg{err: err}
-	}
-}
-
-func (m *Model) deactivatePTYInput() {
-	m.ptyInputActive = false
-	m.layout.FocusList()
-	m.syncLogViewport()
-}
-
-// keyToBytes converts a bubbletea KeyPressMsg to the corresponding byte sequence
-// that should be sent to a PTY.
-// bubbletea v2 の KeyPressMsg.String() は修飾キーを正しく反映するが、
-// tea.Key(msg) への変換で Mod ビットが落ちるケースがあるため、
-// 修飾キー付きの特殊キーは String() ベースで判定する。
-func keyToBytes(msg tea.KeyPressMsg) []byte {
-	k := tea.Key(msg)
-	s := msg.String()
-
-	// 修飾キー付き特殊キー（String() ベースで判定）
-	switch s {
-	case "shift+tab":
-		return []byte{0x1b, '[', 'Z'}
-	}
-
-	// Ctrl+A..Z → \x01..\x1a
-	if k.Mod&tea.ModCtrl != 0 && k.Code >= 'a' && k.Code <= 'z' {
-		return []byte{byte(k.Code - 'a' + 1)}
-	}
-
-	// Special keys
-	switch k.Code {
-	case tea.KeyEnter:
-		return []byte{'\r'}
-	case tea.KeyTab:
-		return []byte{'\t'}
-	case tea.KeyBackspace:
-		return []byte{0x7f}
-	case tea.KeyEscape:
-		return []byte{0x1b}
-	case tea.KeySpace:
-		return []byte{0x20}
-	case tea.KeyUp:
-		return []byte{0x1b, '[', 'A'}
-	case tea.KeyDown:
-		return []byte{0x1b, '[', 'B'}
-	case tea.KeyRight:
-		return []byte{0x1b, '[', 'C'}
-	case tea.KeyLeft:
-		return []byte{0x1b, '[', 'D'}
-	case tea.KeyHome:
-		return []byte{0x1b, '[', 'H'}
-	case tea.KeyEnd:
-		return []byte{0x1b, '[', 'F'}
-	case tea.KeyDelete:
-		return []byte{0x1b, '[', '3', '~'}
-	case tea.KeyPgUp:
-		return []byte{0x1b, '[', '5', '~'}
-	case tea.KeyPgDown:
-		return []byte{0x1b, '[', '6', '~'}
-	}
-
-	// Printable characters (including multibyte UTF-8)
-	if k.Text != "" {
-		return []byte(k.Text)
-	}
-
-	// Single rune fallback (e.g. plain letter keys without Text)
-	if k.Code > 0 {
-		var buf [utf8.UTFMax]byte
-		n := utf8.EncodeRune(buf[:], k.Code)
-		return buf[:n]
-	}
-
-	return nil
 }
 
 // handleRepoSelectKey processes keys in repo selector mode.
@@ -518,9 +364,8 @@ func (m *Model) resumeSelected() tea.Cmd {
 	mgr := m.manager
 	ctx := m.ctx
 	id := m.selectedID
-	cols, _, rows, _ := m.detailPaneMetrics()
 	return func() tea.Msg {
-		err := mgr.ResumeSession(ctx, id, cols, rows)
+		err := mgr.ResumeSession(ctx, id)
 		return sessionResumedMsg{err: err}
 	}
 }
@@ -545,9 +390,8 @@ func (m *Model) forkSelected() tea.Cmd {
 	mgr := m.manager
 	ctx := m.ctx
 	id := m.selectedID
-	cols, _, rows, _ := m.detailPaneMetrics()
 	return func() tea.Msg {
-		newSess, err := mgr.ForkSession(ctx, id, cols, rows)
+		newSess, err := mgr.ForkSession(ctx, id)
 		var newID session.DeckSessionID
 		if newSess != nil {
 			newID = newSess.ID
@@ -557,18 +401,23 @@ func (m *Model) forkSelected() tea.Cmd {
 }
 
 // killSelected terminates the currently selected session and cleans up its workspace.
+// Runs asynchronously via tea.Cmd so large workspace deletions (e.g. node_modules) do not block the UI.
+//
+// Unlike resumeSelected/forkSelected (which complete quickly and are guarded at the Manager
+// layer by status checks), cleanupWorkspace can take many seconds on large directories.
+// m.killing prevents concurrent workspace deletions while one is already in flight.
 func (m *Model) killSelected() tea.Cmd {
-	if m.selectedID == "" {
+	if m.selectedID == "" || m.killing {
 		return nil
 	}
-	if err := m.manager.Kill(m.selectedID); err != nil {
-		m.statusMsg = fmt.Sprintf("終了エラー: %v", err)
-	} else {
-		m.statusMsg = "セッションを終了しました (workspace削除済)"
+	sid := m.selectedID
+	mgr := m.manager
+	m.killing = true
+	m.statusMsg = "セッション終了中..."
+	return func() tea.Msg {
+		return sessionKilledMsg{err: mgr.Kill(sid)}
 	}
-	return clearStatusCmd()
 }
-
 
 // openTerminal opens a new Ghostty terminal in the selected session's working directory.
 func (m *Model) openTerminal() tea.Cmd {

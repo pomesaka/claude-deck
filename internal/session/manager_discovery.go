@@ -79,7 +79,6 @@ func newExternalSession(info *usage.SessionInfo) *Session { //nolint:unparam
 		LastActivity:    info.LastActivity,
 		TokenUsage: TokenUsageFromStats(info.Tokens),
 	}
-	sess.rt.LogLines = make([]string, 0)
 	// FinishedAt は「プロセスが終了した時刻」であり、「最後に JSONL が更新された時刻」ではない。
 	// 外部セッションはプロセスが終了したかどうか不明（JSONL が止まっているだけかもしれない）。
 	return sess
@@ -138,13 +137,14 @@ func (m *Manager) hasManagedSessionAtWorkspaceLocked(workspacePath string) bool 
 		return false
 	}
 	for _, s := range m.sessions {
-		// WorkspacePath は CreateSession 時に固定され変更されないため sess.mu 不要。
+		// WorkspacePath / Status を s.mu なしで直読みする。concurrency.md の鉄則
+		// 「m.mu 保持中に s.mu を取得しない」を守るための措置。
+		// WorkspacePath は Kill が "" に変更する可能性があるが、読み値がナノ秒単位で
+		// 古くなるだけで誤検知（重複セッション作成）にはならないため benign race として許容する。
+		// Status の書き手は常に s.mu を保持し m.mu は保持しないため、同様に許容できる。
 		if s.WorkspacePath != workspacePath {
 			continue
 		}
-		// s.Status を s.mu なしで直読みする。concurrency.md の鉄則「m.mu 保持中に s.mu を
-		// 取得しない」を守るための措置。Status の書き手は常に s.mu を保持し m.mu は保持しない
-		// ため、読み値がナノ秒単位で古くなる可能性はあるが、この重複フィルタ用途では許容できる。
 		status := s.Status
 		if status != StatusUnmanaged && !status.IsTerminal() {
 			return true

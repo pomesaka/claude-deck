@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/tmux"
@@ -28,23 +29,29 @@ var _ SessionBackend = (*tmuxBackend)(nil)
 // Claude Code runs natively in tmux — no PTY emulation, no output capture.
 // Metadata updates (status, tokens, etc.) come entirely from JSONL and hook events.
 //
+// ctx is the application-lifetime context. Exit-watcher goroutines use it so they
+// can terminate cleanly when the application shuts down.
+//
 // The tmux session is persistent: it survives claude-deck restarts and users
 // can detach/reattach freely via `tmux attach -t <session>`.
 type tmuxBackend struct {
+	ctx    context.Context
 	runner *tmux.Runner
 	onExit func(sess *Session)
 }
 
 // newTmuxBackend creates a tmuxBackend using the given runner.
+// ctx should be the application-lifetime context so exit-watcher goroutines shut
+// down cleanly when the application exits.
 // onExit is called in a dedicated goroutine after the window's pane exits.
-func newTmuxBackend(runner *tmux.Runner, onExit func(sess *Session)) *tmuxBackend {
-	return &tmuxBackend{runner: runner, onExit: onExit}
+func newTmuxBackend(ctx context.Context, runner *tmux.Runner, onExit func(sess *Session)) *tmuxBackend {
+	return &tmuxBackend{ctx: ctx, runner: runner, onExit: onExit}
 }
 
 // StartProcess creates a tmux window for the session and starts Claude Code in it.
-// onOutput is intentionally ignored — External sessions have no PTY output to capture.
-// AttachProcess(pid, nil) is called before the exit-watcher goroutine starts so that
-// Session.process is non-nil and IsEmbedded()==false for the window's lifetime.
+// onOutput is intentionally ignored — no PTY output is captured; users interact directly.
+// AttachProcess(pid) is called before the exit-watcher goroutine starts so that
+// Session.process is non-nil for the window's lifetime.
 //
 // Exit detection relies on tmux's pane-exited hook wired to a wait-for channel.
 // A race-guard in the exit-watcher goroutine handles the case where the pane
@@ -78,28 +85,53 @@ func (b *tmuxBackend) StartProcess(ctx context.Context, sess *Session, opts Proc
 	// Wire the pane-exited hook so we know when Claude Code finishes.
 	// The hook fires a wait-for signal that unblocks the exit-watcher goroutine below.
 	// channel は ExitChannel(windowName) で生成され、windowName は DeckSessionID（hex 文字列）由来。
-	// hex 文字列はシェルメタ文字を含まないため shell-escape 不要。
+	// tmux の wait-for はチャネル名にスペースや特殊文字を許容しないが、hex 文字列はそれらを含まないため安全。
+	// （これは tmux コマンド構文の安全性であり、shell エスケープとは別の話。）
 	hookCmd := "wait-for -S " + channel
+	hookOK := true
 	if err := b.runner.SetHook(windowName, "pane-exited", hookCmd); err != nil {
-		// Non-fatal: log and fall back to polling if needed.
-		debuglog.Printf("[tmuxBackend] SetHook failed session=%s: %v", sess.ID, err)
+		debuglog.Printf("[tmuxBackend] SetHook failed session=%s: %v — falling back to polling", sess.ID, err)
+		hookOK = false
 	}
 
-	// Read the pane PID and attach as External (nil display) before the exit-watcher
-	// goroutine starts — session.process is non-nil for the window's lifetime.
+	// Read the pane PID and attach before the exit-watcher goroutine starts —
+	// session.process is non-nil for the window's lifetime.
 	pid, _ := b.runner.PanePID(windowName)
-	sess.AttachProcess(pid, nil)
+	sess.AttachProcess(pid)
 
-	// Exit-watcher goroutine: blocks on the wait-for channel, then fires onExit.
+	// Exit-watcher goroutine: blocks until the pane exits, then fires onExit.
 	// Race guard: check HasWindow before WaitFor — if the pane already exited
 	// (process completed before SetHook could register the hook), fire immediately.
+	// When SetHook failed, fall back to polling HasWindow so the goroutine never leaks.
+	// b.ctx cancellation (app shutdown) exits both paths cleanly.
+	appCtx := b.ctx
 	go func() {
 		if !b.runner.HasWindow(windowName) {
 			debuglog.Printf("[tmuxBackend] pane already gone before wait-for session=%s", sess.ID)
+		} else if hookOK {
+			// Blocks until the pane-exited hook calls "wait-for -S <channel>", or appCtx is cancelled.
+			if err := b.runner.WaitForCtx(appCtx, channel); err != nil {
+				debuglog.Printf("[tmuxBackend] wait-for ended session=%s: %v", sess.ID, err)
+				if appCtx.Err() != nil {
+					return
+				}
+			} else {
+				debuglog.Printf("[tmuxBackend] pane exited session=%s", sess.ID)
+			}
 		} else {
-			// Blocks until the pane-exited hook calls "wait-for -S <channel>".
-			_ = b.runner.WaitFor(channel)
-			debuglog.Printf("[tmuxBackend] pane exited session=%s", sess.ID)
+			// SetHook failed: poll until the window disappears or appCtx is cancelled.
+			// time.NewTimer instead of time.After to avoid per-iteration timer leaks.
+			timer := time.NewTimer(2 * time.Second)
+			defer timer.Stop()
+			for b.runner.HasWindow(windowName) {
+				select {
+				case <-appCtx.Done():
+					return
+				case <-timer.C:
+					timer.Reset(2 * time.Second)
+				}
+			}
+			debuglog.Printf("[tmuxBackend] pane exited (polled) session=%s", sess.ID)
 		}
 		if b.onExit != nil {
 			b.onExit(sess)
@@ -135,17 +167,6 @@ func (b *tmuxBackend) StopProcess(sessionID DeckSessionID, fallbackPID int) erro
 func (b *tmuxBackend) IsActive(sessionID DeckSessionID) bool {
 	return b.runner.HasWindow(string(sessionID))
 }
-
-// WriteInput sends raw bytes to the window's active pane via tmux send-keys.
-// In normal tmux mode, users interact directly via the tmux client; this method
-// exists for programmatic input (e.g., forwarding keystrokes from the TUI).
-func (b *tmuxBackend) WriteInput(sessionID DeckSessionID, data []byte) error {
-	return b.runner.SendKeys(string(sessionID), string(data))
-}
-
-// Resize is a no-op for tmuxBackend — the tmux client handles terminal sizing
-// automatically when the terminal window is resized.
-func (b *tmuxBackend) Resize(_ DeckSessionID, _, _ uint16) {}
 
 // Focus selects the session's window in the tmux session, making it visible
 // in any attached tmux client.  This is called on session list navigation for
@@ -226,12 +247,24 @@ func (b *tmuxBackend) Reconcile(sessions []*Session) (ReconcileResult, error) {
 			debuglog.Printf("[tmuxBackend.Reconcile] re-attaching exit watcher session=%s pid=%d", sess.ID, panePID)
 			livePIDs[sess.ID] = panePID
 			channel := tmux.ExitChannel(windowName)
-			go func(s *Session, ch string) {
-				_ = b.runner.WaitFor(ch)
+			wn := windowName
+			rctx := b.ctx
+			go func(s *Session, ch, wname string) {
+				// Race guard: check HasWindow before blocking on WaitFor.
+				// If the pane already exited while we were building the livePIDs map,
+				// the pane-exited hook may have fired the channel signal before WaitFor
+				// starts, causing WaitFor to block forever. Fire onExit immediately instead.
+				if !b.runner.HasWindow(wname) {
+					debuglog.Printf("[tmuxBackend.Reconcile] pane already gone session=%s", s.ID)
+				} else if err := b.runner.WaitForCtx(rctx, ch); err != nil {
+					if rctx.Err() != nil {
+						return
+					}
+				}
 				if b.onExit != nil {
 					b.onExit(s)
 				}
-			}(sess, channel)
+			}(sess, channel, wn)
 		}
 	}
 

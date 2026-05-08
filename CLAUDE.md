@@ -25,7 +25,6 @@ cmd/claude-deck/main.go   エントリポイント
 internal/
   session/       セッションライフサイクル管理（Manager が中心）
   tui/           Bubble Tea TUI（Model, View, Keys）
-  pty/           PTY プロセス管理（claude CLI のラッパー）
   hooks/         Claude Code フックイベント連携
   usage/         JSONL パース・ストリーミング・トークン集計
   config/        TOML 設定ファイル
@@ -76,9 +75,6 @@ internal/
 
 Manager.mu → Session.mu の順で取得すること。逆順は ABBA デッドロックを起こす。
 パターン: Manager.mu で候補リストをコピー → mu 解放 → Session.mu で個別アクセス。
-
-PTYDisplay.emuMu は Session.mu / rt.mu と独立。ただし onTitle コールバックが
-Session.mu を取るため、Session.mu 保持中に display.Write() を呼ばないこと。
 詳細は [docs/concurrency.md](docs/concurrency.md) を参照。
 
 ### セッション ID の関係
@@ -101,18 +97,16 @@ Idle ←→ Running ←→ WaitingApproval / WaitingAnswer
 Completed / Error      (hook: Stop → Idle)
 ```
 
-- Running: PTY 出力の Braille スピナー検知
-- WaitingApproval/Answer: Hook Notification イベント
-- Idle: Hook Stop イベント or スピナータイムアウト (3s)
+- Running/WaitingApproval/Answer: Hook イベントで遷移
+- Idle: Hook Stop イベント
 - Completed: プロセス終了
 
 ### データソース優先度（→ [用語集: Projection](docs/00-glossary.md#projection-投影)）
 
 - **JSONL** (Claude Code 一次データ): Prompt, TokenUsage, StartedAt, LastActivity
 - **Hook** (リアルタイム通知): Status 遷移, SessionChain 更新
-- **PTY** (フォールバック): スピナー検知による Running 検出
 - **Store** (deck メタデータ): ID, Name, RepoPath, WorkspacePath, Status, PID
-- **Runtime** (メモリのみ): LogLines, JSONLLogEntries, CurrentTool, PTYDisplay
+- **Runtime** (メモリのみ): JSONLLogEntries, CurrentTool
 
 ### キーバインド
 
@@ -121,8 +115,7 @@ Completed / Error      (hook: Stop → Idle)
 | `j/k` | カーソル移動 |
 | `h/l` | ペイン切替 |
 | `gg/G` | 先頭/末尾 |
-| `Enter/i` | PTY 入力モード / 再開 |
-| `Ctrl+D` | PTY 入力モード終了 |
+| `Enter` | tmux ウィンドウにフォーカス / 再開 |
 | `n` | 新規セッション（Enter: ワークスペース付, C-Enter: 直接起動） |
 | `r` | セッション再開 |
 | `f` | セッションフォーク |
@@ -203,10 +196,7 @@ add_dirs = ["../shared-lib", "/absolute/path/to/docs"]
 ### 上限値（デフォルト値、config.toml の `[session]` で変更可）
 
 - セッション数: 30（LRU で古いものを prune）
-- LogLines: 1000 行/セッション
-- スクロールバック: 2000 行
 - JSONL LogEntries: 500 件
 - ディスカバリ対象: 過去 14 日間
 - メタデータ更新間隔: 5 秒
-- スピナー Idle タイムアウト: 3 秒（固定）
 - UI 更新レート: 60fps / 16ms debounce（固定）

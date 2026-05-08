@@ -38,12 +38,6 @@ func TestDefault(t *testing.T) {
 	if cfg.Session.MaxSessions != 30 {
 		t.Errorf("Session.MaxSessions = %d, want 30", cfg.Session.MaxSessions)
 	}
-	if cfg.Session.MaxLogLines != 1000 {
-		t.Errorf("Session.MaxLogLines = %d, want 1000", cfg.Session.MaxLogLines)
-	}
-	if cfg.Session.MaxScrollback != 2000 {
-		t.Errorf("Session.MaxScrollback = %d, want 2000", cfg.Session.MaxScrollback)
-	}
 	if cfg.Session.MaxJSONLEntries != 500 {
 		t.Errorf("Session.MaxJSONLEntries = %d, want 500", cfg.Session.MaxJSONLEntries)
 	}
@@ -152,9 +146,6 @@ output_per_mtok = 50.0
 	if cfg.Session.MaxSessions != 50 {
 		t.Errorf("Session.MaxSessions = %d, want 50", cfg.Session.MaxSessions)
 	}
-	if cfg.Session.MaxLogLines != 2000 {
-		t.Errorf("Session.MaxLogLines = %d, want 2000", cfg.Session.MaxLogLines)
-	}
 	if cfg.Session.DiscoveryDays != 7 {
 		t.Errorf("Session.DiscoveryDays = %d, want 7", cfg.Session.DiscoveryDays)
 	}
@@ -162,9 +153,6 @@ output_per_mtok = 50.0
 		t.Errorf("Session.RefreshInterval = %q, want '10s'", cfg.Session.RefreshInterval)
 	}
 	// Unset session fields should keep defaults
-	if cfg.Session.MaxScrollback != 2000 {
-		t.Errorf("Session.MaxScrollback = %d, want default 2000", cfg.Session.MaxScrollback)
-	}
 	if cfg.Session.MaxJSONLEntries != 500 {
 		t.Errorf("Session.MaxJSONLEntries = %d, want default 500", cfg.Session.MaxJSONLEntries)
 	}

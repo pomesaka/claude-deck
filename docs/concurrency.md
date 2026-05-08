@@ -2,19 +2,17 @@
 
 ## ロック階層
 
-Session には3つのロックがあり、それぞれ独立したリソースを保護する:
+Session には2つのロックがあり、それぞれ独立したリソースを保護する:
 
 ```
 Manager.mu (外側)  →  Session.mu (内側)
 
-PTYDisplay.emuMu     独立 (エミュレータ専用)
-Session.rt.mu        独立 (PTY ログ・JSONL ログ専用)
+Session.rt.mu        独立 (JSONL ログ専用)
 Session.mu           その他全フィールド
 ```
 
 **鉄則**:
 - Manager.mu を持ったまま Session.mu を取得しない (コピー→解放→個別ロック)
-- PTYDisplay.emuMu は Session.mu/rt.mu と独立。ただし `onTitle` コールバックが Session.mu を取得するため、Session.mu を保持したまま `display.Write()` を呼ばない
 - rt.mu と Session.mu は同時に保持しない
 
 ## 安全なアクセスパターン
@@ -106,44 +104,11 @@ sess.mu.Unlock()
 | goroutine | 起動元 | 終了条件 | 役割 |
 |-----------|--------|----------|------|
 | watchProcess | CreateSession / ResumeSession | proc.Done() | プロセス終了監視 |
-| readLoop (pty) | pty.Start | ptmx EOF or ctx cancel | PTY 出力読み取り |
 | StartNotifyLoop | main | ctx.Done() | dirty flag → onChange (60fps) |
-| StartSpinnerIdleLoop | main | ctx.Done() | Running → Idle 自動遷移 |
 | StartEventWatcher | main | ctx.Done() | フックイベント監視 |
 | MultiWatcher.Run | main | ctx.Done() | JSONL ファイル変更監視 |
 | StreamSession | updateSelected | cancel() | JSONL リアルタイム読み込み |
 | HydrateFromJSONL | main (init) | 完了 | 起動時トークン補完 |
-
-## PTY の concurrent access 保護
-
-```go
-type Process struct {
-    ptmxMu     sync.Mutex  // ptmx への concurrent access をガード
-    ptmxClosed bool
-}
-
-func (p *Process) Write(data []byte) (int, error) {
-    p.ptmxMu.Lock()
-    defer p.ptmxMu.Unlock()
-    if p.ptmxClosed {
-        return 0, fmt.Errorf("pty closed")
-    }
-    return p.ptmx.Write(data)
-}
-
-func (p *Process) closePty() {
-    p.ptmxMu.Lock()
-    defer p.ptmxMu.Unlock()
-    if p.ptmxClosed {
-        return
-    }
-    p.ptmxClosed = true
-    _ = p.ptmx.Close()
-}
-```
-
-Write/Resize/closePty が同じ mutex を共有。
-プロセス終了後の Write エラーは呼び出し元で無視される。
 
 ## Context キャンセレーション
 
@@ -152,11 +117,9 @@ main の ctx (signal: SIGINT/SIGTERM)
   ├→ Manager.ctx (全 goroutine の親)
   │    ├→ WatchEvents goroutine
   │    ├→ MultiWatcher.Run goroutine
-  │    ├→ NotifyLoop goroutine
-  │    └→ SpinnerIdleLoop goroutine
+  │    └→ NotifyLoop goroutine
   │
   └→ 個別セッションの ctx
-       ├→ pty.Start (readLoop)
        └→ StreamSession (activeStreamCancel)
 ```
 

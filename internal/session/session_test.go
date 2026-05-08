@@ -163,9 +163,9 @@ func TestSession_Phase(t *testing.T) {
 			sess := NewSession("/repo", "repo")
 			sess.Status = tt.status
 			if tt.managed {
-				// Simulate a managed session: a running process is attached (nil display = External).
+				// Simulate a managed session: a running process is attached.
 				// The key invariant is process.Load() != nil ↔ managed.
-				sess.AttachProcess(0, nil)
+				sess.AttachProcess(0)
 			}
 			snap := sess.Snapshot()
 			if snap.Phase() != tt.want {
@@ -294,104 +294,6 @@ func TestSession_AddTokens(t *testing.T) {
 	}
 }
 
-func TestSession_AppendLog(t *testing.T) {
-	sess := NewSession("/repo", "repo")
-	sess.AppendLog("line1")
-	sess.AppendLog("line2")
-
-	logs := sess.GetLogs()
-	if len(logs) != 2 {
-		t.Fatalf("expected 2 log lines, got %d", len(logs))
-	}
-	if logs[0] != "line1" || logs[1] != "line2" {
-		t.Errorf("logs = %v, want [line1, line2]", logs)
-	}
-}
-
-func TestSession_AppendLog_Truncation(t *testing.T) {
-	sess := NewSession("/repo", "repo")
-	for i := range 1100 {
-		sess.AppendLog(strings.Repeat("x", i%10))
-	}
-	logs := sess.GetLogs()
-	if len(logs) != 1000 {
-		t.Errorf("expected 1000 log lines after truncation, got %d", len(logs))
-	}
-}
-
-func TestSession_GetPTYDisplayLines(t *testing.T) {
-	tests := []struct {
-		name  string
-		lines []string
-		want  []string
-	}{
-		{
-			name:  "plain lines with \\r\\n endings",
-			lines: []string{"hello\r", "world\r"},
-			want:  []string{"hello", "world"},
-		},
-		{
-			name:  "carriage return overwrites line",
-			lines: []string{"old text\rnew text"},
-			want:  []string{"new text"},
-		},
-		{
-			name:  "ANSI sequences preserved via Render",
-			lines: []string{"\x1b[32mgreen\x1b[0m\r", "\x1b[?25lhidden cursor\r"},
-			want:  []string{"\x1b[32mgreen\x1b[m", "hidden cursor"},
-		},
-		{
-			name:  "progress bar overwrite",
-			lines: []string{"Downloading 50%\rDownloading 100%\r"},
-			want:  []string{"Downloading 100%"},
-		},
-		{
-			name:  "cursor movement stripped but colors preserved",
-			lines: []string{"\x1b[H\x1b[2Jscreen content\r"},
-			want:  []string{"screen content"},
-		},
-		{
-			name:  "empty input",
-			lines: nil,
-			want:  nil,
-		},
-		{
-			name:  "cursor positioning preserves spacing",
-			lines: []string{"\x1b[1;1HDo you want to proceed?\r"},
-			want:  []string{"Do you want to proceed?"},
-		},
-		{
-			name:  "cursor save and restore",
-			lines: []string{"header\r", "\x1b7\x1b[3;1Hinserted line\x1b8continued\r"},
-			want:  []string{"header", "continued", "inserted line"},
-		},
-		{
-			name:  "cursor column positioning",
-			lines: []string{"A\x1b[10GB\r"},
-			want:  []string{"A        B"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sess := NewSession("/repo", "repo")
-			sess.AttachProcess(0, sess.NewDisplay(120, 40, 0))
-			for _, line := range tt.lines {
-				sess.AppendLog(line)
-			}
-			got := sess.GetPTYDisplayLines()
-			if len(got) != len(tt.want) {
-				t.Fatalf("got %d lines %v, want %d lines %v", len(got), got, len(tt.want), tt.want)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("line[%d] = %q, want %q", i, got[i], tt.want[i])
-				}
-			}
-		})
-	}
-}
-
 func TestSession_Elapsed_Running(t *testing.T) {
 	sess := NewSession("/repo", "repo")
 	sess.StartedAt = time.Now().Add(-5 * time.Second)
@@ -447,7 +349,6 @@ func TestSession_ConcurrentAccess(t *testing.T) {
 		for range 100 {
 			sess.AddTokens(1, 1)
 			sess.SetCurrentTool("bash")
-			sess.AppendLog("line")
 		}
 	}()
 
@@ -464,7 +365,6 @@ func TestSession_ConcurrentAccess(t *testing.T) {
 		defer wg.Done()
 		for range 100 {
 			_ = sess.GetStatus()
-			_ = sess.GetLogs()
 			_ = sess.Elapsed()
 		}
 	}()
@@ -496,24 +396,6 @@ func TestSession_SetStatus_FromHook(t *testing.T) {
 		t.Error("FinishedAt should be set after StatusCompleted")
 	}
 	sess.mu.RUnlock()
-}
-
-func TestContainsBrailleSpinner(t *testing.T) {
-	tests := []struct {
-		line string
-		want bool
-	}{
-		{"⠐ thinking...", true},
-		{"  \x1b[33m⠹\x1b[0m go test ./...", true},
-		{"normal text", false},
-		{"", false},
-		{"✳ Claude Code", false}, // Dingbat, not Braille
-	}
-	for _, tt := range tests {
-		if got := containsBrailleSpinner(tt.line); got != tt.want {
-			t.Errorf("containsBrailleSpinner(%q) = %v, want %v", tt.line, got, tt.want)
-		}
-	}
 }
 
 func TestEncodePathForDir(t *testing.T) {
@@ -606,30 +488,13 @@ func TestLoadExisting_DeletedDirectory(t *testing.T) {
 	}
 }
 
-func TestHostingMode_String(t *testing.T) {
-	tests := []struct {
-		mode HostingMode
-		want string
-	}{
-		{HostEmbedded, "Embedded"},
-		{HostExternal, "External"},
-		{HostingMode(99), "Unknown"},
-	}
-	for _, tt := range tests {
-		if got := tt.mode.String(); got != tt.want {
-			t.Errorf("HostingMode(%d).String() = %q, want %q", tt.mode, got, tt.want)
-		}
-	}
-}
-
 func TestDisplayChannel_String(t *testing.T) {
 	tests := []struct {
 		ch   DisplayChannel
 		want string
 	}{
-		{DisplayPTY, "pty"},
 		{DisplayJSONL, "jsonl"},
-		{DisplayNone, "none"},
+		{DisplayTmux, "tmux"},
 		{DisplayChannel(99), "unknown"},
 	}
 	for _, tt := range tests {
@@ -641,29 +506,20 @@ func TestDisplayChannel_String(t *testing.T) {
 
 func TestDisplayChannel_Derivation(t *testing.T) {
 	tests := []struct {
-		name     string
-		embedded bool // true → AttachProcess with display; false → nil display or no process
-		external bool // true → AttachProcess with nil display (External); false → no process
-		want     DisplayChannel
+		name    string
+		managed bool // true → AttachProcess called
+		want    DisplayChannel
 	}{
-		// process with display → Embedded → DisplayPTY
-		{"embedded+managed", true, false, DisplayPTY},
-		// no process → DisplayJSONL
-		{"embedded+unmanaged", false, false, DisplayJSONL},
-		// process with nil display → External → DisplayNone
-		{"external+managed", false, true, DisplayNone},
-		// no process → DisplayJSONL
-		{"external+unmanaged", false, false, DisplayJSONL},
+		// process attached → tmux owns terminal → DisplayTmux
+		{"managed", true, DisplayTmux},
+		// no process → show structured logs → DisplayJSONL
+		{"unmanaged", false, DisplayJSONL},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := NewSession("/tmp/repo", "repo")
-			switch {
-			case tt.embedded:
-				s.AttachProcess(0, s.NewDisplay(80, 24, 0))
-			case tt.external:
-				s.AttachProcess(0, nil)
-			// else: no process → nil → DisplayJSONL
+			if tt.managed {
+				s.AttachProcess(0)
 			}
 			snap := s.Snapshot()
 			if snap.Display != tt.want {
@@ -673,44 +529,3 @@ func TestDisplayChannel_Derivation(t *testing.T) {
 	}
 }
 
-func TestExternalSession_Hosting(t *testing.T) {
-	s := NewSession("/tmp/repo", "repo")
-	// External: process attached with no display (nil display = External hosting).
-	s.AttachProcess(0, nil)
-	snap := s.Snapshot()
-	if snap.Hosting != HostExternal {
-		t.Errorf("Hosting = %v, want HostExternal", snap.Hosting)
-	}
-	rp := s.process.Load()
-	if rp == nil {
-		t.Fatal("process should be attached")
-	}
-	if rp.display != nil {
-		t.Error("external session should not have a PTYDisplay")
-	}
-	// AppendRaw should not panic with nil display
-	s.AppendRaw([]byte("hello\n"))
-	logs := s.GetLogs()
-	if len(logs) == 0 {
-		t.Error("LogLines should still be populated for external sessions")
-	}
-}
-
-func TestNewSession_DefaultHosting(t *testing.T) {
-	s := NewSession("/tmp/repo", "repo")
-	// New session has no process attached: defaults to HostExternal (no process → External).
-	if s.process.Load() != nil {
-		t.Error("new session should have no process until AttachProcess is called")
-	}
-	snap := s.Snapshot()
-	if snap.Hosting != HostExternal {
-		t.Errorf("new session default Hosting = %v, want HostExternal", snap.Hosting)
-	}
-	// After AttachProcess with a display: becomes Embedded.
-	display := s.NewDisplay(80, 24, 0)
-	s.AttachProcess(0, display)
-	snap = s.Snapshot()
-	if snap.Hosting != HostEmbedded {
-		t.Errorf("after AttachProcess with display, Hosting = %v, want HostEmbedded", snap.Hosting)
-	}
-}

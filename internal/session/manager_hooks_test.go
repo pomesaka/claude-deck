@@ -8,6 +8,24 @@ import (
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
+// noopBackend is a no-op SessionBackend for tests that don't exercise process lifecycle.
+// IsActive is used by Kill/RemoveSession guards — those paths are not exercised in hook tests.
+type noopBackend struct{}
+
+func (noopBackend) StartProcess(_ context.Context, _ *Session, _ ProcessStartOpts, _ func([]byte)) error {
+	return nil
+}
+func (noopBackend) StopProcess(_ DeckSessionID, _ int) error { return nil }
+func (noopBackend) IsActive(_ DeckSessionID) bool            { return true }
+func (noopBackend) Focus(_ DeckSessionID) error              { return nil }
+func (noopBackend) EnsurePreview() error                     { return nil }
+func (noopBackend) FocusPreview() error                      { return nil }
+func (noopBackend) KillPreview() error                       { return nil }
+func (noopBackend) Reconcile(_ []*Session) (ReconcileResult, error) {
+	return ReconcileResult{}, nil
+}
+func (noopBackend) Close() {}
+
 // newTestManager creates a Manager with no store or external dependencies.
 // Assumption: the methods under test (handleHookEvent and findSessionByClaudeID)
 // do not access m.store, m.usage, or m.config. If that changes, this helper
@@ -15,20 +33,22 @@ import (
 func newTestManager() *Manager {
 	return &Manager{
 		sessions:       make(map[DeckSessionID]*Session),
-		Supervisor:     NewProcessSupervisor(),
 		ctx:            context.Background(),
 		hookProc:       newHookProcessor(),
 		pendingChanges: make(map[DeckSessionID]bool),
+		backend:        noopBackend{},
 	}
 }
 
 // addTestSession inserts a session into the manager with a preset ID and Claude session ID.
+// AttachProcess(0) is called so findSessionByClaudeID treats the session as having an active process.
 func addTestSession(m *Manager, deckID DeckSessionID, claudeSessionID ClaudeSessionID) *Session {
 	sess := NewSession("/repo", "repo")
 	sess.ID = deckID
 	if claudeSessionID != "" {
 		sess.SessionChain = []ClaudeSessionID{claudeSessionID}
 	}
+	sess.AttachProcess(0)
 	m.sessions[deckID] = sess
 	return sess
 }
@@ -350,5 +370,99 @@ func TestHandleHookEvent_MultiClear_ChainGrows(t *testing.T) {
 		if !known[ClaudeSessionID(id)] {
 			t.Errorf("knownClaudeSessionIDs missing %q", id)
 		}
+	}
+}
+
+// TestHandleHookEvent_StatusTransitions tests events that route through
+// findSessionByClaudeID and transition the session's status.
+func TestHandleHookEvent_StatusTransitions(t *testing.T) {
+	tests := []struct {
+		name          string
+		initialStatus Status
+		event         hooks.Event
+		wantStatus    Status
+	}{
+		{
+			name:          "Stop → Idle",
+			initialStatus: StatusRunning,
+			event: hooks.Event{
+				HookEventName: hooks.EventStop,
+				SessionID:     "claude-abc",
+			},
+			wantStatus: StatusIdle,
+		},
+		{
+			name:          "UserPromptSubmit → Running",
+			initialStatus: StatusIdle,
+			event: hooks.Event{
+				HookEventName: hooks.EventUserPromptSubmit,
+				SessionID:     "claude-abc",
+			},
+			wantStatus: StatusRunning,
+		},
+		{
+			name:          "PreToolUse → Running",
+			initialStatus: StatusIdle,
+			event: hooks.Event{
+				HookEventName: hooks.EventPreToolUse,
+				SessionID:     "claude-abc",
+			},
+			wantStatus: StatusRunning,
+		},
+		{
+			name:          "PostToolUseFailure → Idle",
+			initialStatus: StatusRunning,
+			event: hooks.Event{
+				HookEventName: hooks.EventPostToolUseFailure,
+				SessionID:     "claude-abc",
+			},
+			wantStatus: StatusIdle,
+		},
+		{
+			name:          "StopFailure → Idle",
+			initialStatus: StatusRunning,
+			event: hooks.Event{
+				HookEventName: hooks.EventStopFailure,
+				SessionID:     "claude-abc",
+			},
+			wantStatus: StatusIdle,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestManager()
+			sess := addTestSession(m, "deck-1", "claude-abc")
+			sess.Status = tt.initialStatus
+
+			m.handleHookEvent(tt.event)
+
+			got := sess.Status
+			if got != tt.wantStatus {
+				t.Errorf("Status = %v, want %v", got, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// TestHandleHookEvent_StatusTransition_NoActiveProcess verifies that events routed
+// through findSessionByClaudeID are ignored when no process is alive.
+func TestHandleHookEvent_StatusTransition_NoActiveProcess(t *testing.T) {
+	m := newTestManager()
+	sess := NewSession("/repo", "repo")
+	sess.ID = "deck-1"
+	sess.SessionChain = []ClaudeSessionID{"claude-abc"}
+	sess.Status = StatusRunning
+	// Intentionally NOT calling AttachProcess — process is nil.
+	m.sessions["deck-1"] = sess
+
+	m.handleHookEvent(hooks.Event{
+		HookEventName: hooks.EventStop,
+		SessionID:     "claude-abc",
+	})
+
+	// findSessionByClaudeID returns nil → handler returns early → status unchanged.
+	if got := sess.Status; got != StatusRunning {
+		t.Errorf("Status = %v, want %v (should be unchanged when no active process)", got, StatusRunning)
 	}
 }

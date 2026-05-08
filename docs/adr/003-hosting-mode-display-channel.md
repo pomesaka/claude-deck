@@ -2,7 +2,7 @@
 
 ## ステータス
 
-Accepted
+Partially superseded by ADR-007: `HostingMode` 型は PTY 削除後に常に `HostExternal` のみとなり YAGNI として除去。`DisplayChannel` は引き続き有効（`DisplayJSONL` / `DisplayNone` の2値）。
 
 ## コンテキスト
 
