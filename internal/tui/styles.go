@@ -28,11 +28,6 @@ var (
 	// Session list styles
 	sessionListStyle = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(colorBorder).
-				Padding(0, 1)
-
-	sessionListFocusedStyle = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
 				BorderForeground(colorBorderFocus).
 				Padding(0, 1)
 
@@ -42,17 +37,6 @@ var (
 	sessionItemSelectedStyle = lipgloss.NewStyle().
 					Background(colorBgSelected).
 					Padding(0, 1)
-
-	// Detail pane styles
-	detailPaneStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colorBorder).
-			Padding(0, 1)
-
-	detailPaneFocusedStyle = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(colorBorderFocus).
-				Padding(0, 1)
 
 	// Status badge styles
 	statusRunningStyle  = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)
@@ -128,11 +112,6 @@ func InitStyles(theme config.ThemeConfig) {
 
 	sessionListStyle = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colorBorder).
-		Padding(0, 1)
-
-	sessionListFocusedStyle = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colorBorderFocus).
 		Padding(0, 1)
 
@@ -141,16 +120,6 @@ func InitStyles(theme config.ThemeConfig) {
 
 	sessionItemSelectedStyle = lipgloss.NewStyle().
 		Background(colorBgSelected).
-		Padding(0, 1)
-
-	detailPaneStyle = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colorBorder).
-		Padding(0, 1)
-
-	detailPaneFocusedStyle = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colorBorderFocus).
 		Padding(0, 1)
 
 	statusRunningStyle = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)

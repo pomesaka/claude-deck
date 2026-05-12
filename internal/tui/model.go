@@ -7,7 +7,6 @@ import (
 
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/textinput"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/pomesaka/claude-deck/internal/config"
@@ -27,23 +26,19 @@ const (
 	viewSelectRepo
 )
 
-// TUIBackendMode describes the TUI layout mode.
-// Both BackendModeTmux and BackendModeSplit use tmux for process hosting;
-// the distinction only affects keystroke routing and right-pane management.
-type TUIBackendMode int
+// BackendMode describes the TUI layout mode.
+// Kept as an interface / extension point for future backend implementations.
+type BackendMode int
 
 const (
-	// BackendModeTmux hosts processes in tmux windows.
-	// Session switching fires tmux select-window.
-	BackendModeTmux TUIBackendMode = iota
 	// BackendModeSplit combines tmux hosting with Ghostty split layout:
-	// the detail pane is hidden, the list takes full width, and cursor navigation
-	// drives the right tmux pane (preview window or session window).
-	BackendModeSplit
+	// the list takes full width and cursor navigation drives the right tmux pane
+	// (preview window or session window).
+	BackendModeSplit BackendMode = iota
 )
 
 // IsSplit reports whether the TUI is in Ghostty split layout mode.
-func (m TUIBackendMode) IsSplit() bool { return m == BackendModeSplit }
+func (m BackendMode) IsSplit() bool { return m == BackendModeSplit }
 
 // Model is the Bubble Tea model for the TUI.
 type Model struct {
@@ -51,7 +46,7 @@ type Model struct {
 	config      *config.Config
 	ghostty     *ghostty.Launcher
 	ctx         context.Context
-	backendMode TUIBackendMode
+	backendMode BackendMode
 
 	width  int
 	height int
@@ -60,9 +55,7 @@ type Model struct {
 	sessions     []*session.Session
 	cursor       int
 	scrollOffset int
-	selectedID  session.DeckSessionID
-	layout      Layout
-	logViewport viewport.Model
+	selectedID   session.DeckSessionID
 
 	// View state
 	mode     viewMode
@@ -86,11 +79,7 @@ type Model struct {
 
 	// Vim-style key sequence state
 	pendingG        bool
-	logFollow       bool // ログビューポート末尾追従モード
 	refreshInterval time.Duration
-
-	// Log rendering cache (JSONL structured logs)
-	logCache renderCache
 
 	// Pre-computed view data — populated in Update(), read-only in View().
 	// Eliminates all Snapshot() / GetSession() calls from the View() path,
@@ -144,16 +133,13 @@ type sessionKilledMsg struct {
 // NewModel creates the initial TUI model.
 // ModelOptions configures optional behaviour for the main list TUI.
 type ModelOptions struct {
-	// SplitMode puts the TUI into list-only mode: the detail pane is hidden and
-	// cursor navigation drives the right tmux pane instead.
-	// Automatically enabled when tmux mode is active and Ghostty is detected.
+	// SplitMode は将来の拡張ポイントとして保持。現在は非 Split レイアウトの実装を削除済みのため、
+	// true/false いずれも BackendModeSplit として動作する。
+	// main.go は Ghostty 検出結果を渡しており、将来の別 backend 追加時に参照される。
 	SplitMode bool
 }
 
 func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context, opt ModelOptions) Model {
-	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(10))
-	vp.SetContent("")
-
 	delegate := newRepoDelegate()
 	rl := list.New(nil, delegate, 80, 24)
 	rl.Title = "リポジトリ選択"
@@ -177,22 +163,18 @@ func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context, opt
 		refreshInterval = 5 * time.Second
 	}
 
-	backendMode := BackendModeTmux
-	if opt.SplitMode {
-		backendMode = BackendModeSplit
-	}
-
+	// opt.SplitMode は将来の拡張ポイント。現在は非 Split 実装を削除済みのため
+	// 値に関わらず BackendModeSplit を使用する。
+	_ = opt.SplitMode
 	m := Model{
 		manager:         mgr,
 		config:          cfg,
 		ghostty:         ghostty.NewLauncher(cfg.Ghostty.Command),
 		ctx:             ctx,
 		repoList:        rl,
-		logViewport:     vp,
 		filterInput:     fi,
-		logFollow:       true,
 		refreshInterval: refreshInterval,
-		backendMode:     backendMode,
+		backendMode:     BackendModeSplit,
 	}
 
 	m.refreshSessions() // cmds discarded — bubbletea event loop not yet running
@@ -239,34 +221,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
-	case tea.MouseWheelMsg:
-		if m.layout.IsDetailFocused() && m.mode == viewDashboard {
-			var cmd tea.Cmd
-			m.logViewport, cmd = m.logViewport.Update(msg)
-			m.logFollow = m.logViewport.AtBottom()
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		}
-
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 		// repoList はヘッダー(1) + フッター(1) を除いた全画面サイズを使う
 		m.repoList.SetSize(msg.Width, msg.Height-2)
 		m.ensureCursorVisible()
-		m.syncLogViewport()
 
 	case SessionRefreshMsg:
 		debuglog.Printf("[tui] SessionRefreshMsg received changedIDs=%d", len(msg.ChangedIDs))
 		cmds = append(cmds, m.refreshSessions()...)
-		// 選択中のセッションが変更対象に含まれるか、ブロードキャストの場合のみ viewport 更新
-		if len(msg.ChangedIDs) == 0 || msg.ChangedIDs[m.selectedID] {
-			m.syncLogViewport()
-		}
-		// split モードで選択中セッションの状態が変わった場合、preview spec を最新化する。
+		// 選択中セッションの状態が変わった場合、preview spec を最新化する。
 		// kill 時の DisplayTmux → DisplayJSONL 遷移などがリアルタイムに preview に届く。
-		if m.backendMode.IsSplit() && m.selectedID != "" {
+		if m.selectedID != "" {
 			if len(msg.ChangedIDs) == 0 || msg.ChangedIDs[m.selectedID] {
 				if spec := m.buildPreviewSpec(); spec.Display != "" {
 					if err := preview.WriteSpec(m.config.DataDir, spec); err != nil {
@@ -291,7 +258,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "新規セッションを作成しました"
 			m.selectedID = msg.sessionID
 			cmds = append(cmds, m.refreshSessions()...)
-			m.layout.FocusDetail()
 			// m.selectedID を refreshSessions() 前に設定するため updateSelected() で
 			// idChanged=false になる。switchRightPane で明示的に右ペインを切替する。
 			cmds = append(cmds, m.switchRightPane(msg.sessionID, true))
@@ -303,10 +269,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "再開エラー: " + msg.err.Error()
 		} else {
 			m.statusMsg = "セッションを再開しました"
-			m.layout.FocusDetail()
 			// ResumeSession が完了した時点でセッションは managed=true になっており
 			// DisplayTmux に遷移済み。switchRightPane が FocusSession + FocusRight を発行する。
-			cmds = append(cmds, m.switchRightPane(m.selectedID, m.backendMode.IsSplit()))
+			cmds = append(cmds, m.switchRightPane(m.selectedID, true))
 		}
 		cmds = append(cmds, clearStatusCmd())
 
@@ -317,7 +282,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "セッションをフォークしました"
 			m.selectedID = msg.sessionID
 			cmds = append(cmds, m.refreshSessions()...)
-			m.layout.FocusDetail()
 			// sessionCreatedMsg と同じ理由で明示的に切替する。
 			cmds = append(cmds, m.switchRightPane(msg.sessionID, true))
 		}
@@ -527,16 +491,12 @@ func (m *Model) updateSelected() []tea.Cmd {
 
 	idChanged := m.selectedID != oldID
 	if idChanged {
-		m.logFollow = true
 		// 選択中のセッションだけ JSONL ストリーミングを開始
 		m.manager.StreamSession(m.selectedID)
 	}
 	// 常に最新 snap を取得する。選択 ID が同じでも display channel が変わる場合
 	// （kill → Completed: DisplayTmux → DisplayJSONL）があるため。
 	m.refreshSelectedSnap()
-	if idChanged {
-		m.syncLogViewport()
-	}
 
 	if m.selectedID == "" {
 		return nil
@@ -555,16 +515,14 @@ func (m *Model) updateSelected() []tea.Cmd {
 	// idChanged=false のケースだけ対象にする。
 	// 理由: idChanged=true のときに StreamSession を呼んでいる段階では selectedSnap が
 	// まだ更新前（refreshSelectedSnap より前）なので、display 遷移は判定できない。
-	// また logFollow を true にして最新ログへ自動スクロールさせる。
 	if !idChanged && newDisplay == session.DisplayJSONL && oldDisplay != session.DisplayJSONL {
-		m.logFollow = true
 		m.manager.StreamSession(sid)
 	}
 
-	// tmux/split mode: カーソル移動(idChanged)またはセッション状態変化(display変化)で
+	// カーソル移動(idChanged)またはセッション状態変化(display変化)で
 	// 右ペインを最新の状態に同期する。focusRight=false なのでカーソル移動では
 	// Ghostty のペインフォーカスは移動しない（ユーザーはリストを閲覧中）。
-	if idChanged || (m.backendMode.IsSplit() && newDisplay != oldDisplay) {
+	if idChanged || newDisplay != oldDisplay {
 		return []tea.Cmd{m.switchRightPane(sid, false)}
 	}
 	return nil
@@ -622,34 +580,26 @@ func (m *Model) switchRightPane(sid session.DeckSessionID, focusRight bool) tea.
 	if sess := m.manager.GetSession(sid); sess != nil {
 		snap := sess.Snapshot()
 		display = snap.Display
-		if m.backendMode.IsSplit() && display != session.DisplayTmux {
+		if display != session.DisplayTmux {
 			spec = m.buildPreviewSpecFromSnap(snap)
 		}
 	}
-	isSplit := m.backendMode.IsSplit()
 	dataDir := m.config.DataDir
 	mgr := m.manager
 	return func() tea.Msg {
-		if isSplit {
-			if display == session.DisplayTmux {
-				_ = mgr.FocusSession(sid)
-				if focusRight {
-					_ = ghostty.FocusRight()
-				}
-				return nil
-			}
-			if err := preview.WriteSpec(dataDir, spec); err != nil {
-				debuglog.Printf("[switchRightPane] preview IPC: %v", err)
-			}
-			_ = mgr.FocusPreviewWindow()
+		if display == session.DisplayTmux {
+			_ = mgr.FocusSession(sid)
 			if focusRight {
 				_ = ghostty.FocusRight()
 			}
 			return nil
 		}
-		// split なし tmux mode: 稼働中セッションのウィンドウに切替
-		if display == session.DisplayTmux {
-			_ = mgr.FocusSession(sid)
+		if err := preview.WriteSpec(dataDir, spec); err != nil {
+			debuglog.Printf("[switchRightPane] preview IPC: %v", err)
+		}
+		_ = mgr.FocusPreviewWindow()
+		if focusRight {
+			_ = ghostty.FocusRight()
 		}
 		return nil
 	}

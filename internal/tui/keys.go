@@ -50,40 +50,19 @@ func (m *Model) handleDashboardKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.handleFilterKey(msg)
 	}
 
-	// TODO: config.toml の keybind 設定に対応する
-	// split mode ではレイアウトサイクルは不要（常にリスト表示のみ）
-	if msg.String() == "ctrl+e" && !m.backendMode.IsSplit() {
-		m.layout.CycleMode()
-		m.syncLogViewport()
-		return nil
-	}
-
-	display := m.selectedDisplayChannel()
-
 	// Vim-style multi-key sequences: gg
 	if m.pendingG {
 		m.pendingG = false
 		if msg.String() == "g" {
-			if m.layout.IsDetailFocused() {
-				m.viewportGotoTop(display)
-			} else {
-				m.cursor = 0
-				cmds := m.updateSelected()
-				m.ensureCursorVisible()
-				return tea.Batch(cmds...)
-			}
-			return nil
+			m.cursor = 0
+			cmds := m.updateSelected()
+			m.ensureCursorVisible()
+			return tea.Batch(cmds...)
 		}
 		// Not gg — fall through to normal handling
 	}
-	// split mode ではリストが常にフォーカスされる（detail ペインは右の tmux ウィンドウ）
-	if !m.backendMode.IsSplit() && m.layout.IsDetailFocused() {
-		if cmd, handled := m.handleDetailPaneKey(msg, display); handled {
-			return cmd
-		}
-	}
 
-	return m.handleListKey(msg, display)
+	return m.handleListKey(msg)
 }
 
 // handleFilterKey processes keys while the filter input is active.
@@ -106,36 +85,8 @@ func (m *Model) handleFilterKey(msg tea.KeyPressMsg) tea.Cmd {
 	return tea.Batch(m.clampCursorToVisible()...)
 }
 
-// handleDetailPaneKey processes scroll keys when the detail pane is focused.
-// Returns (cmd, true) if the key was handled, (nil, false) to fall through.
-func (m *Model) handleDetailPaneKey(msg tea.KeyPressMsg, display session.DisplayChannel) (tea.Cmd, bool) {
-	switch msg.String() {
-	case "G":
-		m.viewportGotoBottom(display)
-		return nil, true
-	case "g":
-		m.pendingG = true
-		return nil, true
-	case "h", "left":
-		m.layout.FocusList()
-		return nil, true
-	case "ctrl+b":
-		// 半ページ下スクロール（ctrl+u と上下ペア）
-		m.viewportHalfPageDown(display)
-		return nil, true
-	case "ctrl+u":
-		// 半ページ上スクロール
-		m.viewportHalfPageUp(display)
-		return nil, true
-	case "j", "down", "k", "up", "pgup", "pgdown", "f", "b", "u":
-		return m.viewportUpdate(msg, display), true
-	}
-	// Other keys (n, enter, r, x, tab, ?) fall through to list handling
-	return nil, false
-}
-
 // handleListKey processes navigation and command keys in the session list.
-func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChannel) tea.Cmd {
+func (m *Model) handleListKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
 	var cmds []tea.Cmd
 	switch key {
@@ -164,42 +115,26 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 	case "g":
 		m.pendingG = true
 
-	case "h", "left":
-		m.layout.FocusList()
-
-	case "l", "right":
-		// split mode では l キーは無効（detail ペインは右の tmux ウィンドウ）
-		if !m.backendMode.IsSplit() {
-			m.layout.FocusDetail()
-		}
-
 	case "tab":
-		if !m.layout.IsDetailFocused() {
-			// リストフォーカス時: 次の approve/answer 待ちセッションへジャンプ
-			if idx := m.findNextAttentionSession(); idx >= 0 {
-				m.cursor = idx
-				cmds = append(cmds, m.updateSelected()...)
-				m.ensureCursorVisible()
-				m.layout.FocusDetail()
-				// tab はユーザーが介入しに行く意図なので focusRight=true で
-				// Ghostty の右ペイン（tmux client）にフォーカスを移す。
-				cmds = append(cmds, m.switchRightPane(m.selectedID, true))
-				m.syncLogViewport()
-				return tea.Batch(cmds...)
-			}
+		// 次の approve/answer 待ちセッションへジャンプ
+		if idx := m.findNextAttentionSession(); idx >= 0 {
+			m.cursor = idx
+			cmds = append(cmds, m.updateSelected()...)
+			m.ensureCursorVisible()
+			// tab はユーザーが介入しに行く意図なので focusRight=true で
+			// Ghostty の右ペイン（tmux client）にフォーカスを移す。
+			cmds = append(cmds, m.switchRightPane(m.selectedID, true))
+			return tea.Batch(cmds...)
 		}
-		m.layout.ToggleFocus()
 
 	case "n":
 		return m.startNewSession()
 
 	case "enter":
-		debuglog.Printf("[key:enter] selectedID=%q display=%v", m.selectedID, display)
-		// tmux mode: focus the window in the tmux client.
-		// Completed sessions pressed with Enter → resume in a new tmux window.
-		if display == session.DisplayTmux {
-			// 実行中セッション: tmux ウィンドウを前面に出し、
-			// Ghostty の右ペイン（tmux client）にフォーカスを移す。
+		debuglog.Printf("[key:enter] selectedID=%q", m.selectedID)
+		// 実行中セッション: tmux ウィンドウを前面に出す。
+		// 完了済みセッション: resume。
+		if m.selectedDisplayChannel() == session.DisplayTmux {
 			return m.switchRightPane(m.selectedID, true)
 		}
 		return m.resumeSelected()
@@ -211,7 +146,6 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 		return m.forkSelected()
 
 	case "R":
-		m.syncLogViewport()
 		return tea.ClearScreen
 
 	case "x":
@@ -221,11 +155,9 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 		return m.openTerminal()
 
 	case "/":
-		if !m.layout.IsDetailFocused() {
-			m.filterActive = true
-			m.filterInput.Focus()
-			return nil
-		}
+		m.filterActive = true
+		m.filterInput.Focus()
+		return nil
 
 	case "esc":
 		// フィルタ適用中 → フィルタ解除
@@ -236,7 +168,7 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg, display session.DisplayChanne
 		}
 
 	case "?":
-		m.statusMsg = "h/l:ペイン切替 j/k:移動 gg/G:先頭/末尾 /:フィルタ tab:要注意 C-b/C-u:半頁 n:新規 Enter/r:再開 f:フォーク t:ターミナル x:終了 R:再描画 C-c:quit"
+		m.statusMsg = "j/k:移動 gg/G:先頭/末尾 /:フィルタ tab:要注意 n:新規 Enter/r:再開 f:フォーク t:ターミナル x:終了 R:再描画 C-c:quit"
 		return clearStatusCmd()
 	}
 
@@ -254,38 +186,6 @@ func (m *Model) clampCursorToVisible() []tea.Cmd {
 	cmds := m.updateSelected()
 	m.ensureCursorVisible()
 	return cmds
-}
-
-// viewportGotoTop scrolls the log viewport to the top.
-func (m *Model) viewportGotoTop(_ session.DisplayChannel) {
-	m.logViewport.GotoTop()
-	m.logFollow = false
-}
-
-// viewportGotoBottom scrolls the log viewport to the bottom and enables follow mode.
-func (m *Model) viewportGotoBottom(_ session.DisplayChannel) {
-	m.logFollow = true
-	m.logViewport.GotoBottom()
-}
-
-// viewportHalfPageUp scrolls the log viewport half a page up.
-func (m *Model) viewportHalfPageUp(_ session.DisplayChannel) {
-	m.logViewport.HalfPageUp()
-	m.logFollow = false
-}
-
-// viewportHalfPageDown scrolls the log viewport half a page down.
-func (m *Model) viewportHalfPageDown(_ session.DisplayChannel) {
-	m.logViewport.HalfPageDown()
-	m.logFollow = m.logViewport.AtBottom()
-}
-
-// viewportUpdate forwards a scroll key to the log viewport and updates follow state.
-func (m *Model) viewportUpdate(msg tea.KeyPressMsg, _ session.DisplayChannel) tea.Cmd {
-	var cmd tea.Cmd
-	m.logViewport, cmd = m.logViewport.Update(msg)
-	m.logFollow = m.logViewport.AtBottom()
-	return cmd
 }
 
 // findNextAttentionSession returns the index of the next session that needs

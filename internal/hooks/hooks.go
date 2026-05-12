@@ -209,6 +209,7 @@ func readNewLines(path string, offset int64, onEvent func(Event)) int64 {
 	}
 
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB: large prompts can exceed default 64KB
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {

@@ -127,12 +127,13 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 		if ev.Source != hooks.SourceClear && ev.Source != hooks.SourceCompact {
 			return
 		}
+		if deckID == "" {
+			debuglog.Printf("[event-watcher] SessionStart source=%s but no ClaudeDeckSessionID, skipping", ev.Source)
+			return
+		}
 
 		// ペアリング: hookProc から対応する SessionEnd を取り出す（mu 不要）
-		var pendEnd *hooks.Event
-		if deckID != "" {
-			pendEnd = m.hookProc.consumePending(deckID)
-		}
+		pendEnd := m.hookProc.consumePending(deckID)
 
 		if pendEnd == nil {
 			debuglog.Printf("[event-watcher] no pending SessionEnd for source=%s deck_session=%s, skipping", ev.Source, deckID)

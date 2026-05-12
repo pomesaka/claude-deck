@@ -137,15 +137,15 @@ func (m *Manager) hasManagedSessionAtWorkspaceLocked(workspacePath string) bool 
 		return false
 	}
 	for _, s := range m.sessions {
-		// WorkspacePath / Status を s.mu なしで直読みする。concurrency.md の鉄則
-		// 「m.mu 保持中に s.mu を取得しない」を守るための措置。
-		// WorkspacePath は Kill が "" に変更する可能性があるが、読み値がナノ秒単位で
-		// 古くなるだけで誤検知（重複セッション作成）にはならないため benign race として許容する。
-		// Status の書き手は常に s.mu を保持し m.mu は保持しないため、同様に許容できる。
-		if s.WorkspacePath != workspacePath {
+		// m.mu(R) → s.mu(R) は CLAUDE.md の「Manager.mu → Session.mu」順に準拠。
+		// s.mu を保持したまま m.mu を取得するパスはコードベース全体に存在しないため安全。
+		s.mu.RLock()
+		wp := s.WorkspacePath
+		status := s.Status
+		s.mu.RUnlock()
+		if wp != workspacePath {
 			continue
 		}
-		status := s.Status
 		if status != StatusUnmanaged && !status.IsTerminal() {
 			return true
 		}
@@ -171,12 +171,11 @@ func (m *Manager) knownClaudeSessionIDs() map[ClaudeSessionID]bool {
 
 // hasClaudeSessionID returns true if any session in the chain contains claudeSessionID.
 // REQUIRES m.mu to be held (at least for reading); accessing m.sessions without it is a data race.
-// SessionChain is read directly (without s.mu) to avoid lock ordering violation (m.mu → s.mu
-// is forbidden per concurrency.md). Writers of SessionChain always hold s.mu, never m.mu,
-// so the concurrent read is a benign race acceptable for this deduplication check.
+// m.mu(R) → s.mu(R) は CLAUDE.md の「Manager.mu → Session.mu」順に準拠。
 func (m *Manager) hasClaudeSessionID(claudeSessionID ClaudeSessionID) bool {
 	for _, existing := range m.sessions {
-		if slices.Contains(existing.SessionChain, claudeSessionID) {
+		chain := existing.ChainIDs() // acquires s.mu.RLock internally
+		if slices.Contains(chain, claudeSessionID) {
 			return true
 		}
 	}

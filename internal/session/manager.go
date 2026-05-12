@@ -256,6 +256,7 @@ func computeActualWorkDir(wsPath, subProjectDir string) string {
 // ResumeSession は既存セッションを対象とするため、このパターンを使用しない。
 func (m *Manager) finalizeNewSession(sess *Session, workDir string) {
 	if bookmark, err := m.jj().GetNearestBookmark(workDir); err == nil && bookmark != "" {
+		// sess.mu と m.mu を同時保持しないため逐次的取得であり、順序は問わない（ABBA なし）。
 		sess.mu.Lock()
 		sess.BookmarkName = bookmark
 		sess.mu.Unlock()
@@ -665,7 +666,7 @@ func (m *Manager) RemoveSession(sessionID DeckSessionID) error {
 		return fmt.Errorf("cannot remove running session (kill it first)")
 	}
 
-	// oldSessionIDs には登録しない。dd は deck メタデータだけ削除し JSONL は残すため、
+	// oldSessionIDs には登録しない。deck メタデータだけ削除し JSONL は残すため、
 	// 次回の DiscoverExternalSessions で外部セッションとして再発見されるのが正しい動作。
 	if warnings := m.removeSessionCore(sessionID); len(warnings) > 0 {
 		debuglog.Printf("[RemoveSession] cleanup warnings: %s", strings.Join(warnings, "; "))
@@ -758,9 +759,17 @@ func (m *Manager) cleanupWorkspace(repoPath, wsName, wsRootPath string) string {
 		warnings = append(warnings, fmt.Sprintf("workspace forget失敗: %v", err))
 	}
 	if wsRootPath != "" {
-		// 安全ガード: DataDir/workspace/ 配下のパスのみ削除する
+		// 安全ガード: DataDir/workspace/ 配下のパスのみ削除する。
+		// symlink (macOS: /var → /private/var) を解決してからプレフィックスを比較する。
+		resolved := wsRootPath
+		if r, err := filepath.EvalSymlinks(wsRootPath); err == nil {
+			resolved = r
+		}
 		base := filepath.Join(m.config.DataDir, "workspace") + string(filepath.Separator)
-		if strings.HasPrefix(wsRootPath, base) {
+		if resolvedBase, err := filepath.EvalSymlinks(filepath.Join(m.config.DataDir, "workspace")); err == nil {
+			base = resolvedBase + string(filepath.Separator)
+		}
+		if strings.HasPrefix(resolved, base) {
 			if err := os.RemoveAll(wsRootPath); err != nil {
 				warnings = append(warnings, fmt.Sprintf("workspace ディレクトリ削除失敗: %v", err))
 			}

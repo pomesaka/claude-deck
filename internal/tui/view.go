@@ -9,7 +9,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/session"
 )
 
@@ -90,53 +89,15 @@ func sessionStatusIcon(s session.Status) string {
 }
 
 func (m Model) renderMain() string {
-	// Height() はボーダー込みの全体高さを設定するため、ヘッダー行(1) + フッター行(1) のみ差し引く。
 	contentHeight := m.height - 2
 	if contentHeight < 3 {
 		contentHeight = 3
 	}
-
-	// splitMode: list-only — detail pane は右の tmux ペインが担う
-	if m.backendMode.IsSplit() {
-		return m.renderSessionList(m.width, contentHeight)
-	}
-
-	// リスト非表示時はペイン間スペースが不要なので frameOverhead を引かない。
-	available := m.width
-	if m.layout.IsListVisible() {
-		available -= 1 // pane gap " "
-	}
-	if available < 20 {
-		available = 20
-	}
-
-	if !m.layout.IsListVisible() {
-		return m.renderDetailPane(available, contentHeight)
-	}
-
-	listWidth := available * 35 / 100
-	if listWidth < 20 {
-		listWidth = 20
-	}
-	detailWidth := available - listWidth
-	if detailWidth < 20 {
-		detailWidth = 20
-	}
-
-	list := m.renderSessionList(listWidth, contentHeight)
-	detail := m.renderDetailPane(detailWidth, contentHeight)
-
-	if m.layout.IsListRight() {
-		return lipgloss.JoinHorizontal(lipgloss.Top, detail, " ", list)
-	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, list, " ", detail)
+	return m.renderSessionList(m.width, contentHeight)
 }
 
 func (m Model) renderSessionList(width, height int) string {
 	style := sessionListStyle
-	if !m.layout.IsDetailFocused() {
-		style = sessionListFocusedStyle
-	}
 
 	// m.viewSnaps は Update() 内で事前計算済み。View() でのロック取得を避けるため
 	// visibleSessions() は呼ばず、キャッシュ済みスナップショットを直接参照する。
@@ -393,77 +354,6 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	return style.Width(width).Render(content)
 }
 
-func (m Model) renderDetailPane(width, height int) string {
-	style := detailPaneStyle
-	if m.layout.IsDetailFocused() {
-		style = detailPaneFocusedStyle
-	}
-
-	if m.selectedSnap == nil {
-		return style.Width(width).Height(height).Render(dimStyle.Render("セッションを選択してください"))
-	}
-
-	snap := *m.selectedSnap
-	var sections []string
-
-	// Width() はボーダー・パディング込みなので、コンテンツ幅は border(2) + padding(2) を引く
-	innerWidth := width - 4
-	if innerWidth < 10 {
-		innerWidth = 10
-	}
-
-	switch snap.Display {
-	case session.DisplayJSONL:
-		// 完了済み / 外部セッション → ヘッダー + JSONL ログ表示
-		sections = append(sections, titleStyle.Render(truncate(fmt.Sprintf("📋 %s (%s)", snap.Name, snap.RepoName), innerWidth)))
-		sections = append(sections, dimStyle.Render(truncate(fmt.Sprintf("   パス: %s", snap.WorkspacePath), innerWidth)))
-		idLine := fmt.Sprintf("   ID: %s  Claude: %s", snap.ID, snap.ClaudeSessionID)
-		if snap.ClearCount > 0 {
-			idLine += fmt.Sprintf("  (/clear×%d)", snap.ClearCount)
-		}
-		sections = append(sections, dimStyle.Render(truncate(idLine, innerWidth)))
-
-		if snap.CurrentTool != "" {
-			sections = append(sections, statusRunningStyle.Render(truncate(fmt.Sprintf("   🔧 %s", snap.CurrentTool), innerWidth)))
-		}
-
-		if snap.Status.NeedsAttention() {
-			sections = append(sections, statusApproveStyle.Render(truncate("   👆 Enter で再開", innerWidth)))
-		}
-
-		if snap.Status == session.StatusError && snap.ErrorMessage != "" {
-			sections = append(sections, statusErrorStyle.Render(truncate("   ✗ "+snap.ErrorMessage, innerWidth)))
-		}
-
-		sections = append(sections, "")
-		sections = append(sections, m.logViewport.View())
-
-	case session.DisplayTmux:
-		// tmux window is showing live Claude Code output — display metadata only.
-		title := fmt.Sprintf("📋 %s (%s)", snap.Name, snap.RepoName)
-		sections = append(sections, titleStyle.Render(truncate(title, innerWidth)))
-		sections = append(sections, dimStyle.Render(truncate(fmt.Sprintf("   パス: %s", snap.WorkspacePath), innerWidth)))
-		sections = append(sections, "")
-		sections = append(sections, dimStyle.Render("  tmux ウィンドウで表示中"))
-		sections = append(sections, "")
-		if snap.CurrentTool != "" {
-			sections = append(sections, statusRunningStyle.Render(truncate(fmt.Sprintf("   🔧 %s", snap.CurrentTool), innerWidth)))
-		}
-		if snap.Status.NeedsAttention() {
-			sections = append(sections, statusApproveStyle.Render(truncate("   👆 承認待ち — tmux ウィンドウで操作してください", innerWidth)))
-		}
-		if snap.TokenUsage.TotalTokens() > 0 {
-			tokenInfo := fmt.Sprintf("   トークン: %s  $%.2f",
-				formatTokens(snap.TokenUsage.InputTokens, snap.TokenUsage.OutputTokens),
-				snap.TokenUsage.EstimatedCostUSD)
-			sections = append(sections, dimStyle.Render(truncate(tokenInfo, innerWidth)))
-		}
-	}
-
-	content := lipgloss.JoinVertical(lipgloss.Left, sections...)
-	return style.Width(width).Height(height).Render(content)
-}
-
 func (m Model) renderFooter() string {
 	// When a status message is active, show it exclusively — no help text.
 	if m.statusMsg != "" {
@@ -477,12 +367,10 @@ func (m Model) renderFooter() string {
 		helpText = "Enter:確定 Esc:キャンセル"
 	} else if m.filterText != "" {
 		helpText = fmt.Sprintf("フィルタ: %s / Esc:解除 ?:ヘルプ", m.filterText)
-	} else if m.backendMode.IsSplit() {
-		helpText = "j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter:入力 r:再開 f:フォーク t:ターミナル R:再描画 x:終了 C-c:quit"
 	} else {
-		helpText = "h/l:ペイン切替 j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter/i:入力/再開 r:再開 f:フォーク t:ターミナル R:再描画 x:終了 C-e:レイアウト C-c:quit"
+		helpText = "j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter:入力 r:再開 f:フォーク t:ターミナル R:再描画 x:終了 C-c:quit"
 	}
-	return footerStyle.Render(dimStyle.Render(helpText + m.layout.Indicator()))
+	return footerStyle.Render(dimStyle.Render(helpText))
 }
 
 const usageGaugeWidth = 10
@@ -617,140 +505,3 @@ func padRightBg(s string, w int, bg lipgloss.Style) string {
 	return s + bg.Render(strings.Repeat(" ", w-cur))
 }
 
-// detailPaneInnerWidth calculates the content width of the detail pane.
-// Depends on m.width and m.layout so it is a method rather than a pure function.
-func (m Model) detailPaneInnerWidth() int {
-	// リスト非表示時はペイン間スペースが存在しないため frameOverhead を引かない。
-	available := m.width
-	if m.layout.IsListVisible() {
-		available -= 1 // pane gap
-	}
-	if available < 20 {
-		available = 20
-	}
-
-	var detailWidth int
-	if !m.layout.IsListVisible() {
-		detailWidth = available
-	} else {
-		listWidth := available * 35 / 100
-		if listWidth < 20 {
-			listWidth = 20
-		}
-		detailWidth = available - listWidth
-		if detailWidth < 20 {
-			detailWidth = 20
-		}
-	}
-	// border(2) + padding(2)
-	innerWidth := detailWidth - 4
-	if innerWidth < 10 {
-		innerWidth = 10
-	}
-	return innerWidth
-}
-
-// detailHeaderLines returns the number of header lines shown above the log
-// viewport for a completed/idle session. Pure function of Snapshot fields.
-func detailHeaderLines(snap session.Snapshot) int {
-	lines := 4 // タイトル + パス + ID行 + 空行
-	if snap.CurrentTool != "" {
-		lines++
-	}
-	if snap.Status.NeedsAttention() {
-		lines++
-	}
-	if snap.Status == session.StatusError && snap.ErrorMessage != "" {
-		lines++
-	}
-	return lines
-}
-
-// detailPaneLayout calculates log viewport height and PTY viewport height
-// from the total terminal height. Pure function — no Model dependency.
-//
-//   - DisplayJSONL → ログ表示   (logHeight = available - headerLines)
-//   - DisplayTmux  → プレースホルダ (logHeight = available)
-func detailPaneLayout(totalHeight int, display session.DisplayChannel, headerLines int) (logHeight int) {
-	contentHeight := totalHeight - 2 // header(1) + footer(1)
-	if contentHeight < 3 {
-		contentHeight = 3
-	}
-	availableLines := contentHeight - 2 // border(top+bottom)
-
-	switch display {
-	case session.DisplayJSONL:
-		availableLines -= headerLines
-		logHeight = availableLines
-	case session.DisplayTmux:
-		logHeight = availableLines
-	}
-
-	if logHeight < 0 {
-		logHeight = 0
-	}
-	return
-}
-
-// detailPaneMetrics calculates the inner width and log height for the detail pane.
-// Convenience method that combines the pure functions above with Model state lookups.
-// Returns the resolved DisplayChannel alongside dimensions.
-func (m *Model) detailPaneMetrics() (innerWidth, logHeight int, display session.DisplayChannel) {
-	innerWidth = m.detailPaneInnerWidth()
-
-	display = session.DisplayJSONL // default for no selection
-	headerLines := 4
-	if m.selectedSnap != nil {
-		display = m.selectedSnap.Display
-		headerLines = detailHeaderLines(*m.selectedSnap)
-	}
-
-	logHeight = detailPaneLayout(m.height, display, headerLines)
-	return
-}
-
-// syncLogViewport is a convenience method that performs all viewport sync steps.
-func (m *Model) syncLogViewport() {
-	if m.width == 0 {
-		return
-	}
-	debuglog.Printf("[syncLogViewport] selectedID=%q detailFocused=%v", m.selectedID, m.layout.IsDetailFocused())
-
-	innerWidth, logHeight, display := m.detailPaneMetrics()
-	m.logViewport.SetWidth(innerWidth)
-	m.logViewport.SetHeight(logHeight)
-	m.syncViewportContent(m.selectedID, innerWidth, display)
-}
-
-// syncViewportContent populates viewport content from the selected session.
-// DisplayChannel に基づいて表示データを選択する:
-//   - DisplayJSONL → logViewport に JSONL ログ表示
-//   - DisplayTmux  → プレースホルダ表示（tmux がホスト中）
-func (m *Model) syncViewportContent(sessionID session.DeckSessionID, innerWidth int, display session.DisplayChannel) {
-	if sessionID == "" {
-		m.logViewport.SetContent("")
-		return
-	}
-	sess := m.manager.GetSession(sessionID)
-	if sess == nil {
-		m.logViewport.SetContent("")
-		return
-	}
-
-	switch display {
-	case session.DisplayJSONL:
-		entries := sess.GetStructuredLogs()
-		if len(entries) > 0 {
-			rendered := RenderLogs(entries, innerWidth, &m.logCache)
-			m.logViewport.SetContent(rendered)
-		} else {
-			m.logViewport.SetContent(dimStyle.Render("(出力なし)"))
-		}
-		if m.logFollow {
-			m.logViewport.GotoBottom()
-		}
-
-	case session.DisplayTmux:
-		m.logViewport.SetContent(dimStyle.Render("(外部ターミナルで表示中)"))
-	}
-}

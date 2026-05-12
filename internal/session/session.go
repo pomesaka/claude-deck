@@ -401,8 +401,17 @@ func (s *Session) AttachProcess(pid int) {
 // 登録済みセッションに対して呼ぶのは禁止。
 func (s *Session) reconcileStatusFromStore() bool {
 	switch s.Status {
-	case StatusRunning, StatusWaitingApproval, StatusWaitingAnswer, StatusIdle:
+	case StatusRunning, StatusWaitingApproval, StatusWaitingAnswer:
 		if !isProcessAlive(s.PID) {
+			s.Status = StatusCompleted
+			now := time.Now()
+			s.FinishedAt = &now
+			return true
+		}
+	case StatusIdle:
+		// PID=0 は「一度も起動していない」を意味するため Completed に補正しない。
+		// PID が設定されていてプロセスが死んでいる場合のみ補正する。
+		if s.PID > 0 && !isProcessAlive(s.PID) {
 			s.Status = StatusCompleted
 			now := time.Now()
 			s.FinishedAt = &now
