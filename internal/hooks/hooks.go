@@ -35,6 +35,7 @@ type Event struct {
 // Hook event name constants.
 const (
 	EventNotification       = "Notification"
+	EventPermissionRequest  = "PermissionRequest" // v2.1.131+: Notification+permission_prompt の代替
 	EventStop               = "Stop"
 	EventStopFailure        = "StopFailure"
 	EventSessionEnd         = "SessionEnd"
@@ -43,6 +44,10 @@ const (
 	EventPreToolUse         = "PreToolUse"
 	EventPostToolUseFailure = "PostToolUseFailure"
 )
+
+// ToolNameAskUserQuestion is the Claude Code tool name for mid-task user questions.
+// PreToolUse with this tool_name signals WaitingAnswer (elicitation_dialog fallback).
+const ToolNameAskUserQuestion = "AskUserQuestion"
 
 // Notification type constants.
 const (
@@ -69,7 +74,7 @@ func EventsFilePath(dataDir string) string {
 
 // PluginVersion is the current plugin version.
 // marketplace.json の version と一致させること。
-const PluginVersion = "1.1.0"
+const PluginVersion = "1.2.0"
 
 // HookStatus describes the state of hook configuration.
 type HookStatus int

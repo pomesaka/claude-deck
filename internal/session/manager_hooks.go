@@ -59,10 +59,21 @@ func (m *Manager) handleHookEvent(ev hooks.Event) {
 	case hooks.EventUserPromptSubmit:
 		m.handleStatusEvent(ClaudeSessionID(ev.SessionID), "UserPromptSubmit", StatusRunning)
 
+	case hooks.EventPermissionRequest:
+		// v2.1.131+ で追加。agent モードでは Notification+permission_prompt が発火しないため
+		// こちらをメインの WaitingApproval 検出手段とする。
+		// hook は exit 0 かつ stdout 未出力で終了するため、通常の権限ダイアログが引き続き表示される。
+		m.handleStatusEvent(ClaudeSessionID(ev.SessionID), "PermissionRequest", StatusWaitingApproval)
+
 	case hooks.EventPreToolUse:
-		// ツール実行開始 = Claude が処理中。WaitingAnswer/WaitingApproval からの復帰も含む。
-		// ask_followup_question 自体も PreToolUse を発火するが、直後の Notification
-		// (elicitation_dialog) が WaitingAnswer に上書きするため問題ない。
+		// AskUserQuestion ツール = ユーザーへの質問待ち。
+		// agent モードでは Notification+elicitation_dialog が発火しないため、
+		// PreToolUse の tool_name で WaitingAnswer を検出する。
+		if ev.ToolName == hooks.ToolNameAskUserQuestion {
+			m.handleStatusEvent(ClaudeSessionID(ev.SessionID), "PreToolUse:AskUserQuestion", StatusWaitingAnswer)
+			return
+		}
+		// それ以外のツール実行開始 = Claude が処理中。WaitingAnswer/WaitingApproval からの復帰も含む。
 		m.handleStatusEvent(ClaudeSessionID(ev.SessionID), "PreToolUse", StatusRunning)
 
 	case hooks.EventStop:
