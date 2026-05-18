@@ -632,10 +632,11 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	m.mu.Unlock()
 
 	// Backend handles AttachProcess internally.
+	forkArgs := append([]string{"--agent", sess.Name}, m.buildAddDirArgs(repoPath)...)
 	if err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
 		Command: m.config.ClaudeCommand,
 		WorkDir: actualWorkDir,
-		Args:    buildStartArgs(string(srcClaudeID), true, "", m.config.DefaultPermissionMode, m.buildAddDirArgs(repoPath)),
+		Args:    buildStartArgs(string(srcClaudeID), true, "", m.config.DefaultPermissionMode, forkArgs),
 		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
 	}, nil); err != nil {
 		m.mu.Lock()

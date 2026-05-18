@@ -185,6 +185,9 @@ func (m *Model) clampCursorToVisible() []tea.Cmd {
 	}
 	cmds := m.updateSelected()
 	m.ensureCursorVisible()
+	// フィルタ変化後に viewSnaps を最新化する。refreshSessions は SessionRefreshMsg で
+	// のみ呼ばれるため、キー入力だけでは viewSnaps が古いまま View() に渡ってしまう。
+	m.refreshViewData()
 	return cmds
 }
 
