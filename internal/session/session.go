@@ -285,6 +285,10 @@ type Session struct {
 	PID           int               `json:"pid,omitempty"`
 	TerminalTitle string            `json:"terminal_title,omitempty"` // OSC 0/2 で設定されたターミナルタイトル（セッション一覧表示用）
 	BookmarkName  string            `json:"bookmark_name,omitempty"`  // jj の最近接ブックマーク名（セッション一覧表示用）
+	// Kill 時に保存した @ / @- の change_id。Resume 時のワークスペース再作成で使う（ADR 009）。
+	// 常にペアで更新すること — setLastJJRevisionsPairLocked() を通じて書き込む。
+	LastJJRevision       string `json:"last_jj_revision,omitempty"`
+	LastJJParentRevision string `json:"last_jj_parent_revision,omitempty"`
 
 	// --- Hydrated from JSONL (JSONL が最新値を上書きするが、ストアにも保存して再起動時に即表示) ---
 	Prompt         string     `json:"prompt,omitempty"`
@@ -614,6 +618,14 @@ func (s *Session) appendToChainLocked(newID ClaudeSessionID) {
 		return
 	}
 	s.SessionChain = append(s.SessionChain, newID)
+}
+
+// setLastJJRevisionsPairLocked sets LastJJRevision and LastJJParentRevision as an atomic pair.
+// Both fields must always be updated together (see ADR 009 for invariant rationale).
+// Caller must hold mu.Lock().
+func (s *Session) setLastJJRevisionsPairLocked(atRev, parentRev string) {
+	s.LastJJRevision = atRev
+	s.LastJJParentRevision = parentRev
 }
 
 // popChainLocked removes the last entry from SessionChain under an already-held write lock.

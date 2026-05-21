@@ -16,6 +16,15 @@ type Runner struct {
 	Command string // jj executable path; defaults to "jj" if empty
 }
 
+// WorkspaceOptions configures revision-restoration behavior for CreateWorkspaceAt.
+// AtRev and ParentRev are empty when creating a new session (trunk() is used).
+// On resume they carry the change_ids captured at Kill time (ADR 009).
+type WorkspaceOptions struct {
+	ExtraSymlinks []string // repo-relative paths to symlink into the workspace
+	AtRev         string   // change_id of @ at kill time; jj edit attempts direct restore
+	ParentRev     string   // change_id of @- at kill time; fallback when AtRev is abandoned
+}
+
 func (r *Runner) command() string {
 	if r.Command != "" {
 		return r.Command
@@ -25,10 +34,19 @@ func (r *Runner) command() string {
 
 // CreateWorkspaceAt creates a new jj workspace at the specified path.
 // The parent directory is created automatically if it doesn't exist.
-// colocated リポジトリの場合、ワークスペースに .git の symlink を作成して
-// gh 等の git 依存ツールが動作するようにする。
-// extraSymlinks にはリポジトリルートからの相対パスを指定し、ワークスペースに symlink を作成する。
-func (r *Runner) CreateWorkspaceAt(repoPath, name, wsPath string, extraSymlinks []string) error {
+// For colocated repos a .git symlink is created so git-dependent tools work.
+//
+// Revision restore order on resume (ADR 009):
+//  1. opts.AtRev non-empty: try jj edit <AtRev>. Restores the exact commit
+//     including any in-progress changes, without creating an extra commit.
+//     jj workspace add creates an initial empty @; jj edit abandons it (expected).
+//     Falls through on failure (AtRev was abandoned by workspace forget).
+//  2. opts.ParentRev non-empty: try jj new <ParentRev> (last committed state).
+//     Falls through on failure.
+//  3. jj new trunk() as final fallback.
+//
+// For new/fork sessions pass zero-value WorkspaceOptions (trunk() is used).
+func (r *Runner) CreateWorkspaceAt(repoPath, name, wsPath string, opts WorkspaceOptions) error {
 	debuglog.Printf("[jj.CreateWorkspaceAt] repoPath=%q name=%q wsPath=%q", repoPath, name, wsPath)
 	if err := os.MkdirAll(filepath.Dir(wsPath), 0o755); err != nil {
 		return fmt.Errorf("creating workspace parent dir: %w", err)
@@ -58,7 +76,7 @@ func (r *Runner) CreateWorkspaceAt(repoPath, name, wsPath string, extraSymlinks 
 	}
 
 	// プロジェクト設定で指定された追加 symlink を作成
-	for _, rel := range extraSymlinks {
+	for _, rel := range opts.ExtraSymlinks {
 		if err := createExtraSymlink(repoPath, wsPath, rel); err != nil {
 			return err
 		}
@@ -72,15 +90,41 @@ func (r *Runner) CreateWorkspaceAt(repoPath, name, wsPath string, extraSymlinks 
 	fetchOut, fetchErr := fetch.CombinedOutput()
 	debuglog.Printf("[jj.CreateWorkspaceAt] jj git fetch done: err=%v output=%q", fetchErr, strings.TrimSpace(string(fetchOut)))
 
+	// revision 復元: AtRev → ParentRev → trunk() の順で試みる（ADR 009）。
+	// @ の change_id が保存されている場合は jj edit で直接そのコミットに戻す。
+	// jj new と異なり余分なコミットが増えず、変更中だったファイルもそのまま復元できる。
+	if opts.AtRev != "" {
+		editCmd := exec.Command(jjCmd, "edit", opts.AtRev)
+		editCmd.Dir = wsPath
+		if out, err := editCmd.CombinedOutput(); err != nil {
+			// @ が abandon 済みの場合（空のまま workspace forget された）は次の fallback へ。
+			debuglog.Printf("[jj.CreateWorkspaceAt] jj edit %s failed: %v output=%q, falling back to opts.ParentRev", opts.AtRev, err, strings.TrimSpace(string(out)))
+		} else {
+			debuglog.Printf("[jj.CreateWorkspaceAt] jj edit %s done", opts.AtRev)
+			return nil
+		}
+	}
+
+	// @- の change_id が保存されている場合は jj new <opts.ParentRev> でその上から再開。
+	if opts.ParentRev != "" {
+		newCmd := exec.Command(jjCmd, "new", opts.ParentRev)
+		newCmd.Dir = wsPath
+		if out, err := newCmd.CombinedOutput(); err != nil {
+			debuglog.Printf("[jj.CreateWorkspaceAt] jj new %s failed: %v output=%q, falling back to trunk()", opts.ParentRev, err, strings.TrimSpace(string(out)))
+		} else {
+			debuglog.Printf("[jj.CreateWorkspaceAt] jj new %s done", opts.ParentRev)
+			return nil
+		}
+	}
+
+	// 最終 fallback: trunk() から新規 revision を作成。
 	debuglog.Printf("[jj.CreateWorkspaceAt] running: jj new trunk()")
-	newCmd := exec.Command(jjCmd, "new", "trunk()")
-	newCmd.Dir = wsPath
-	if output, err := newCmd.CombinedOutput(); err != nil {
-		debuglog.Printf("[jj.CreateWorkspaceAt] jj new trunk() failed: %v output=%q", err, string(output))
-		return fmt.Errorf("jj new trunk(): %s: %w", strings.TrimSpace(string(output)), err)
+	trunkCmd := exec.Command(jjCmd, "new", "trunk()")
+	trunkCmd.Dir = wsPath
+	if out, err := trunkCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("jj new trunk(): %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	debuglog.Printf("[jj.CreateWorkspaceAt] jj new trunk() done")
-
 	return nil
 }
 
@@ -114,6 +158,33 @@ func createExtraSymlink(repoPath, wsPath, rel string) error {
 		return fmt.Errorf("symlinking %s to workspace: %w", rel, err)
 	}
 	return nil
+}
+
+// GetWorkspaceRevisions returns the change_ids of the working copy (@) and its parent (@-).
+// Called before jj workspace forget to preserve the revision for later restore via ResumeSession.
+// @ may be abandoned on workspace forget if it has no changes; @- is always preserved.
+//
+// Error handling is intentionally asymmetric: err is non-nil only when @ cannot be retrieved.
+// Failure to retrieve @- (e.g., @ is root) is treated as success with an empty parentRev.
+// Callers should treat both fields as valid only when err == nil.
+func (r *Runner) GetWorkspaceRevisions(wsPath string) (atRev, parentRev string, err error) {
+	jjCmd := r.command()
+
+	atCmd := exec.Command(jjCmd, "log", "--no-graph", "--color=never", "-r", "@", "-T", "change_id")
+	atCmd.Dir = wsPath
+	atOut, atErr := atCmd.CombinedOutput()
+	if atErr != nil {
+		return "", "", fmt.Errorf("jj log @: %w: %s", atErr, strings.TrimSpace(string(atOut)))
+	}
+
+	parentCmd := exec.Command(jjCmd, "log", "--no-graph", "--color=never", "-r", "@-", "-T", "change_id")
+	parentCmd.Dir = wsPath
+	parentOut, parentErr := parentCmd.CombinedOutput() // @ が root の場合 @- は存在しないため無視
+	if parentErr != nil {
+		debuglog.Printf("[jj.GetWorkspaceRevisions] jj log @- failed (@ may be root): %v output=%q", parentErr, strings.TrimSpace(string(parentOut)))
+	}
+
+	return strings.TrimSpace(string(atOut)), strings.TrimSpace(string(parentOut)), nil
 }
 
 // GetNearestBookmark returns the local bookmark name of the closest ancestor

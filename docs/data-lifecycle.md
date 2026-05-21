@@ -45,10 +45,11 @@ claude-deck が読み書き・作成・削除する外部データの一覧と�
 **ワークスペースが削除済み**（`x` で終了後）の場合:
 ```
 # recreateWorkspace が走る
-~/.local/share/claude-deck/workspace/<encoded>/<name>/   # 再作成（新規と同じ構造）
+~/.local/share/claude-deck/workspace/<encoded>/<name>/   # 再作成
 ~/.local/share/claude-deck/sessions/<id>.json            # WorkspaceName/Path を更新
 ~/.claude/projects/.../<uuid>.jsonl                      # Claude Code が追記
 ```
+ワークスペース再作成時の開始 revision は `LastJJRevision → LastJJParentRevision → trunk()` の優先順で使われる（ADR 009 参照）。
 
 ### `f` — Fork
 
@@ -74,10 +75,14 @@ jj workspace forget <name>    # jj のワークスペース一覧から除去
 **更新（persist）:**
 ```
 ~/.local/share/claude-deck/sessions/<id>.json
-  WorkspaceName = ""   # クリア
-  WorkspacePath = ""   # クリア
+  WorkspaceName = ""             # クリア
+  WorkspacePath = ""             # クリア
   Status = Completed
+  LastJJRevision = <change_id>   # @ の change_id（取得成功時のみ）
+  LastJJParentRevision = <change_id>  # @- の change_id（取得成功時のみ）
 ```
+
+`LastJJRevision` / `LastJJParentRevision` は `r` で resume するときに jj ワークスペースを再作成する際の開始 revision として使われる。取得に失敗した場合は両フィールドをクリア（空文字列）し、resume 時に `jj new trunk()` にフォールバックする。
 
 **触らないもの:**
 ```

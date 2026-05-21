@@ -291,7 +291,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 			extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
 		}
 		debuglog.Printf("[CreateSession] creating jj workspace name=%q path=%q", wsName, wsPath)
-		if err := m.jj().CreateWorkspaceAt(repoPath, wsName, wsPath, extraSymlinks); err != nil {
+		if err := m.jj().CreateWorkspaceAt(repoPath, wsName, wsPath, jj.WorkspaceOptions{ExtraSymlinks: extraSymlinks}); err != nil {
 			return nil, fmt.Errorf("creating jj workspace: %w", err)
 		}
 		debuglog.Printf("[CreateSession] jj workspace created")
@@ -514,16 +514,20 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 	repoPath := sess.RepoPath
 	sessName := sess.Name
 	subProjectDir := sess.SubProjectDir
+	atRev := sess.LastJJRevision
+	parentRev := sess.LastJJParentRevision
 	sess.mu.RUnlock()
-	debuglog.Printf("[ResumeSession] csID=%q wsPath=%q repoPath=%q", csID, wsPath, repoPath)
+	debuglog.Printf("[ResumeSession] csID=%q wsPath=%q repoPath=%q atRev=%q parentRev=%q", csID, wsPath, repoPath, atRev, parentRev)
 
 	if csID == "" {
 		return fmt.Errorf("no Claude Code session ID available for resume")
 	}
 
 	// ワークスペースがなければ（Kill で削除済み）再作成する。
+	// Kill 時に保存した @ / @- の change_id を渡す（ADR 009）。
+	// CreateWorkspaceAt が jj edit <@> → jj new <@-> → jj new trunk() の順で試みる。
 	if wsPath == "" && repoPath != "" && sessName != "" {
-		newWsPath, err := m.recreateWorkspace(repoPath, sessName, subProjectDir)
+		newWsPath, err := m.recreateWorkspace(repoPath, sessName, subProjectDir, atRev, parentRev)
 		if err != nil {
 			debuglog.Printf("[ResumeSession] workspace recreate failed, falling back to repo: %v", err)
 			wsPath = repoPath
@@ -616,7 +620,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	if m.config.WorkspaceSymlinksFunc != nil {
 		extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
 	}
-	if err := m.jj().CreateWorkspaceAt(repoPath, wsName, wsPath, extraSymlinks); err != nil {
+	if err := m.jj().CreateWorkspaceAt(repoPath, wsName, wsPath, jj.WorkspaceOptions{ExtraSymlinks: extraSymlinks}); err != nil {
 		return nil, fmt.Errorf("creating jj workspace: %w", err)
 	}
 	// サブプロジェクト対応: ソースが wsPath/subProject で動いていた場合、
@@ -780,15 +784,16 @@ func (m *Manager) cleanupWorkspace(repoPath, wsName, wsRootPath string) string {
 }
 
 // recreateWorkspace creates a new jj workspace for a session whose workspace was deleted.
+// atRev/parentRev は Kill 時に保存した @ / @- の change_id（ADR 009）。
 // Returns the effective work directory (wsPath/subProjectDir if subProjectDir is set).
-func (m *Manager) recreateWorkspace(repoPath, sessName, subProjectDir string) (string, error) {
+func (m *Manager) recreateWorkspace(repoPath, sessName, subProjectDir, atRev, parentRev string) (string, error) {
 	wsPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), sessName)
 	var extraSymlinks []string
 	if m.config.WorkspaceSymlinksFunc != nil {
 		extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
 	}
-	debuglog.Printf("[recreateWorkspace] repoPath=%q sessName=%q wsPath=%q", repoPath, sessName, wsPath)
-	if err := m.jj().CreateWorkspaceAt(repoPath, sessName, wsPath, extraSymlinks); err != nil {
+	debuglog.Printf("[recreateWorkspace] repoPath=%q sessName=%q wsPath=%q atRev=%q parentRev=%q", repoPath, sessName, wsPath, atRev, parentRev)
+	if err := m.jj().CreateWorkspaceAt(repoPath, sessName, wsPath, jj.WorkspaceOptions{ExtraSymlinks: extraSymlinks, AtRev: atRev, ParentRev: parentRev}); err != nil {
 		return "", fmt.Errorf("recreating jj workspace: %w", err)
 	}
 	if subProjectDir != "" {
@@ -813,6 +818,8 @@ func (m *Manager) Kill(sessionID DeckSessionID) error {
 	wsName := sess.WorkspaceName
 	repoPath := sess.RepoPath
 	sess.mu.RUnlock()
+	// repoPath は生成後に変化しない。wsName は Kill / Resume のどちらかしか実行されない設計のため
+	// RUnlock 後も有効な値として扱える（並行 Kill+Resume のガードは呼び出し元の TUI が担う）。
 
 	if err := m.backend.StopProcess(sessionID, pid); err != nil {
 		return err
@@ -838,12 +845,37 @@ func (m *Manager) Kill(sessionID DeckSessionID) error {
 	// resume 時は recreateWorkspace で新規ワークスペースが作られる。
 	if wsName != "" && repoPath != "" {
 		wsRootPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
+		// GetWorkspaceRevisions は cleanupWorkspace（jj workspace forget）より前に呼ぶこと。
+		// workspace forget 後は @ の change_id が取得できない場合があるため順序依存がある。
+		// @ が空の場合 workspace forget で abandon されるため、@- も fallback として記録する。
+		// 注意: StopProcess は SIGTERM を送るだけでプロセス終了を待機しない。jj log が
+		// Claude Code の jj 操作と競合しうるが、cleanupWorkspace の jj workspace forget も
+		// 同じ前提で動作しており（既存の設計上の制約）、revision 取得を先に行っても
+		// リスクプロファイルは変わらない。
+		atRev, parentRev, revErr := m.jj().GetWorkspaceRevisions(wsRootPath)
+		if revErr != nil {
+			debuglog.Printf("[Kill] GetWorkspaceRevisions failed: %v", revErr)
+		}
 		if w := m.cleanupWorkspace(repoPath, wsName, wsRootPath); w != "" {
 			debuglog.Printf("[Kill] workspace cleanup: %s", w)
 		}
 		sess.mu.Lock()
 		sess.WorkspaceName = ""
 		sess.WorkspacePath = ""
+		if revErr == nil {
+			sess.setLastJJRevisionsPairLocked(atRev, parentRev)
+		} else {
+			// 取得失敗時は古い revision が誤って resume に使われないようクリアする
+			sess.setLastJJRevisionsPairLocked("", "")
+		}
+		sess.mu.Unlock()
+	} else {
+		// ワークスペースなしセッションを Kill する場合。
+		// 現状このパスに到達することはないが、以前の Kill 時の値が残らないよう防御的にクリアする。
+		// 将来 ResumeSession がワークスペースなしパスで revision を参照するようになった場合は
+		// このクリアが正しく機能することをテストで確認すること。
+		sess.mu.Lock()
+		sess.setLastJJRevisionsPairLocked("", "")
 		sess.mu.Unlock()
 	}
 

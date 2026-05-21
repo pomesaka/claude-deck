@@ -105,12 +105,25 @@ Session の状態を構成する4つのデータソース。各ソースが Sess
 
 | ソース | 所有フィールド | 更新タイミング |
 |--------|---------------|---------------|
-| **Store** | ID, Name, RepoPath, SessionChain, Status, PID, BookmarkName | セッション作成・更新時に JSON 永続化 |
+| **Store** | ID, Name, RepoPath, SessionChain, Status, PID, BookmarkName, LastJJRevision, LastJJParentRevision | セッション作成・更新時に JSON 永続化 |
 | **JSONL** | Prompt, PermissionMode, StartedAt, LastActivity, TokenUsage | Claude Code が JSONL に書き込み時 |
 | **Hook** | Status 遷移, SessionChain 追加 | Claude Code フックイベント発火時 |
 | **PTY** | LogLines, CurrentTool, Status (Running via spinner) | PTY 出力受信時 |
 
 **型**: `session.DataSource`
+
+### LastJJRevision / LastJJParentRevision
+
+`x`（Kill）でセッションを終了する直前に保存される jj の revision 情報。常にペアで更新される。
+
+| フィールド | 内容 |
+|---|---|
+| `LastJJRevision` | Kill 時の working copy（`@`）の change_id |
+| `LastJJParentRevision` | Kill 時の working copy の親（`@-`）の change_id（fallback） |
+
+`r`（Resume）でワークスペースを再作成する際に、`jj new trunk()` ではなくここに保存した revision から再開するために使われる（優先順: `@` → `@-` → `trunk()`）。`@` が空の場合は `jj workspace forget` で abandon されるため `@-` を fallback として保存する。詳細は ADR 009 参照。
+
+**フィールド**: `Session.LastJJRevision`, `Session.LastJJParentRevision`
 
 ### Projection (投影)
 
