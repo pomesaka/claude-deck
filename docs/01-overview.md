@@ -1,8 +1,8 @@
 # システム概要
 
-claude-deck は **複数の Claude Code セッションを一括管理する TUI ダッシュボード**。
+claude-deck は **複数の coding agent セッションを一括管理する TUI ダッシュボード**。
 
-ユーザーが Claude Code を複数のプロジェクト・ブランチで並行して走らせ、承認待ち・質問待ちのセッションに素早く切り替えて対処することを支援する。
+ユーザーが Claude Code や Codex CLI を複数のプロジェクト・ブランチで並行して走らせ、承認待ち・質問待ちのセッションに素早く切り替えて対処することを支援する。
 
 ## C4 Context: システムと外部アクター
 
@@ -16,16 +16,16 @@ claude-deck は **複数の Claude Code セッションを一括管理する TUI
 │                     claude-deck                          │
 │                  (TUI ダッシュボード)                      │
 │                                                          │
-│  セッション一覧 / detail pane / PTY 入力                  │
+│  セッション一覧 / detail pane / tmux window 管理           │
 └────┬─────────┬──────────┬──────────┬─────────────────────┘
      │         │          │          │
      ▼         ▼          ▼          ▼
 ┌─────────┐ ┌──────┐ ┌────────┐ ┌────────────┐
-│ Claude  │ │ jj   │ │Ghostty │ │ ファイル    │
-│  Code   │ │(VCS) │ │(端末)  │ │ システム   │
+│ Agent   │ │ jj   │ │Ghostty │ │ ファイル    │
+│ Runtime │ │(VCS) │ │(端末)  │ │ システム   │
 │  CLI    │ │      │ │        │ │            │
 └─────────┘ └──────┘ └────────┘ └────────────┘
-  PTY/Hook    Workspace  外部端末    JSONL/Store
+  tmux/Hook   Workspace  外部端末    JSONL/Store
   プロセス管理  作成/削除   起動       読み書き
 ```
 
@@ -33,7 +33,7 @@ claude-deck は **複数の Claude Code セッションを一括管理する TUI
 
 | 外部システム | claude-deck との関係 |
 |-------------|---------------------|
-| **Claude Code CLI** | PTY プロセスとして起動・管理。Hook イベントで状態変化を通知される。JSONL ログから対話履歴とトークン使用量を読み取る |
+| **Agent runtime CLI** | tmux ウィンドウで起動・管理。Claude provider は Hook イベント、Codex provider は JSONL runtime activity から状態変化を読み取る |
 | **jj (Jujutsu)** | セッションごとに隔離されたワークスペースを作成。ブックマーク名をセッションラベルに使用 |
 | **Ghostty** | 外部ターミナルウィンドウの起動。将来的に detail pane の外部ホスティングに使用予定 |
 | **ファイルシステム** | JSONL ログ監視 (fsnotify)、Hook イベントファイル監視、Store 永続化 |
@@ -46,8 +46,8 @@ claude-deck は **複数の Claude Code セッションを一括管理する TUI
 │  ┌──────────┐    ┌───────────────────────────────────────┐        │
 │  │   TUI    │◄───│  Session Manager                      │        │
 │  │ (Bubble  │    │  ┌──────────┐  ┌──────────────────┐   │        │
-│  │   Tea)   │    │  │ Session  │  │ ProcessSupervisor│   │        │
-│  │          │    │  │ (N 個)   │  │ (PTY lifecycle)  │   │        │
+│  │   Tea)   │    │  │ Session  │  │ Runtime adapter  │   │        │
+│  │          │    │  │ (N 個)   │  │ + tmux backend   │   │        │
 │  │ Snapshot │    │  └──────────┘  └──────────────────┘   │        │
 │  │ で読む   │    │  ┌──────────────┐  ┌──────────────┐   │        │
 │  └──────────┘    │  │hookProcessor │  │ FileWatcher  │   │        │
@@ -56,14 +56,15 @@ claude-deck は **複数の Claude Code セッションを一括管理する TUI
 │                  └───────────────────────────────────────┘        │
 └──────────────────────────────────────────────────────────────────┘
 
-┌─ Claude Code プロセス (N 個) ────┐
-│  PTY 接続 ←→ ProcessSupervisor   │
-│  Hook イベント → hookProcessor    │
+┌─ Agent runtime プロセス (N 個) ──┐
+│  tmux window で実行              │
+│  Hook/JSONL activity → Manager    │
 │  JSONL 書き込み → FileWatcher     │
 └──────────────────────────────────┘
 
 ┌─ データストア ───────────────────┐
 │  ~/.claude/projects/**/*.jsonl   │  Claude Code が書く (一次データ)
+│  ~/.codex/sessions/**/*.jsonl    │  Codex が書く (一次データ)
 │  ~/.local/share/claude-deck/     │
 │    sessions/*.json               │  claude-deck が書く (メタデータ)
 │    claude-deck-events.jsonl      │  Hook イベントログ
@@ -74,33 +75,29 @@ claude-deck は **複数の Claude Code セッションを一括管理する TUI
 
 | 経路 | 手段 | 方向 |
 |------|------|------|
-| claude-deck → Claude Code | PTY stdin | コマンド送信 |
-| Claude Code → claude-deck | PTY stdout | 出力キャプチャ (スピナー検知含む) |
-| Claude Code → claude-deck | Hook JSONL | Status 遷移、SessionChain 更新 |
-| Claude Code → ファイル | JSONL 書き込み | 対話履歴・トークン記録 |
+| claude-deck → Agent runtime | tmux window | CLI 起動・resume・fork |
+| Agent runtime → claude-deck | Hook JSONL / JSONL runtime activity | Status 遷移、SessionChain 更新 |
+| Agent runtime → ファイル | JSONL 書き込み | 対話履歴・トークン記録 |
 | ファイル → claude-deck | fsnotify | JSONL 変更通知、外部セッション発見 |
 
 ## データフロー
 
-Session の状態は4つのデータソースから投影 (projection) される。
+Session の状態は複数のデータソースから投影 (projection) される。
 
 ```
                     ┌───────────────────────────────────────┐
                     │            Session                    │
                     │                                       │
-  PTY 出力 ────────►│ IngestPTYOutput()                     │
-  (バイナリ)        │   → PTYDisplay.Write() → displayCache │
-                    │   → LogLines 追記                     │
-                    │   → スピナー検知 → Status=Running     │
-                    │                                       │
   Hook イベント ───►│ handleHookEvent()                     │
-  (JSONL)          │   → Status 遷移                       │
+  (Claude)         │   → Status 遷移                       │
                     │   → SessionChain 更新 (/clear)        │
                     │                                       │
   JSONL ファイル ──►│ ApplyJSONLTokens()                    │
-  (Claude ログ)    │   → TokenUsage, Prompt, StartedAt     │
+  (Agent ログ)     │   → TokenUsage, Prompt, StartedAt     │
                     │ ApplyFileActivity()                   │
                     │   → LastActivity                      │
+                    │ RuntimeActivity (Codex)               │
+                    │   → Status, CurrentTool               │
                     │                                       │
   Store ──────────►│ LoadExisting()                        │
   (deck JSON)      │   → ID, Name, RepoPath, Status 復元  │
