@@ -173,6 +173,7 @@ func findProjectDirs(fdPath, repoRoot string, markers, excludes []string) ([]str
 func (m *Model) startNewSession() tea.Cmd {
 	m.mode = viewSelectRepo
 	m.statusMsg = "リポジトリを検索中..."
+	m.nextRightPaneGeneration()
 
 	return discoverRepos(m.config)
 }

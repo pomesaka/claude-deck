@@ -150,3 +150,69 @@ func TestEnsureCursorVisible_StaleScrollOffset_Clamped(t *testing.T) {
 	assertCursorVisible(t, m)
 	assertScrollValid(t, m)
 }
+
+func TestRightPaneTargetForDisplay(t *testing.T) {
+	tests := []struct {
+		name    string
+		display session.DisplayChannel
+		want    rightPaneTarget
+	}{
+		{name: "running_session_uses_tmux", display: session.DisplayTmux, want: rightPaneTmux},
+		{name: "archived_session_uses_preview", display: session.DisplayJSONL, want: rightPanePreview},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rightPaneTargetForDisplay(tt.display); got != tt.want {
+				t.Fatalf("rightPaneTargetForDisplay(%v) = %v, want %v", tt.display, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildRightPaneSwitchFromSnap_RunningSessionUsesTmux(t *testing.T) {
+	m := &Model{}
+	got := m.buildRightPaneSwitchFromSnap(session.Snapshot{
+		ID:      session.DeckSessionID("running"),
+		Display: session.DisplayTmux,
+	}, false)
+
+	if got.SessionID != "running" {
+		t.Fatalf("SessionID = %q, want running", got.SessionID)
+	}
+	if got.Target != rightPaneTmux {
+		t.Fatalf("Target = %v, want rightPaneTmux", got.Target)
+	}
+	if got.Spec.Display != "" {
+		t.Fatalf("Spec.Display = %q, want empty for tmux target", got.Spec.Display)
+	}
+	if got.Generation == 0 {
+		t.Fatal("Generation = 0, want non-zero")
+	}
+}
+
+func TestShouldApplyRightPaneSwitchDropsStaleCursorMove(t *testing.T) {
+	m := &Model{selectedID: session.DeckSessionID("current")}
+	sw := rightPaneSwitch{
+		SessionID:  session.DeckSessionID("old"),
+		FocusRight: false,
+		Target:     rightPaneTmux,
+	}
+
+	if m.shouldApplyRightPaneSwitch(sw) {
+		t.Fatal("shouldApplyRightPaneSwitch = true, want false for stale cursor move")
+	}
+}
+
+func TestShouldApplyRightPaneSwitchKeepsExplicitFocus(t *testing.T) {
+	m := &Model{selectedID: session.DeckSessionID("current")}
+	sw := rightPaneSwitch{
+		SessionID:  session.DeckSessionID("old"),
+		FocusRight: true,
+		Target:     rightPaneTmux,
+	}
+
+	if !m.shouldApplyRightPaneSwitch(sw) {
+		t.Fatal("shouldApplyRightPaneSwitch = false, want true for explicit focus")
+	}
+}
