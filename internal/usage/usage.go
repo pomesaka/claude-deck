@@ -5,8 +5,8 @@ package usage
 import (
 	"bufio"
 	"bytes"
-	json "encoding/json/v2"
 	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"io"
 	"os"
 	"path/filepath"
@@ -45,9 +45,18 @@ type SessionInfo struct {
 	Tokens         TokenStats
 }
 
-// Reader reads Claude Code JSONL session data.
+// TranscriptLayout identifies the on-disk transcript format.
+type TranscriptLayout int
+
+const (
+	TranscriptClaude TranscriptLayout = iota
+	TranscriptCodex
+)
+
+// Reader reads local JSONL session transcripts.
 type Reader struct {
-	baseDir string // ~/.claude/projects/
+	baseDir string
+	layout  TranscriptLayout
 }
 
 // NewReader creates a Reader. If baseDir is empty, defaults to ~/.claude/projects/.
@@ -56,7 +65,16 @@ func NewReader(baseDir string) *Reader {
 		home, _ := os.UserHomeDir()
 		baseDir = filepath.Join(home, ".claude", "projects")
 	}
-	return &Reader{baseDir: baseDir}
+	return &Reader{baseDir: baseDir, layout: TranscriptClaude}
+}
+
+// NewCodexReader creates a Reader for Codex CLI transcripts.
+func NewCodexReader(baseDir string) *Reader {
+	if baseDir == "" {
+		home, _ := os.UserHomeDir()
+		baseDir = filepath.Join(home, ".codex", "sessions")
+	}
+	return &Reader{baseDir: baseDir, layout: TranscriptCodex}
 }
 
 // BaseDir returns the base directory for Claude Code JSONL files.
@@ -67,7 +85,7 @@ func (r *Reader) BaseDir() string {
 // ReadSessionByWorkDir finds the Claude Code session whose cwd matches workDir
 // and returns aggregated token stats. Returns nil if not found.
 func (r *Reader) ReadSessionByWorkDir(workDir string) *TokenStats {
-	jsonlFiles, _ := filepath.Glob(filepath.Join(r.baseDir, "*", "*.jsonl"))
+	jsonlFiles := r.sessionFiles()
 
 	for _, path := range jsonlFiles {
 		stats := r.scanFile(path, workDir)
@@ -82,6 +100,14 @@ func (r *Reader) ReadSessionByWorkDir(workDir string) *TokenStats {
 // (subagents etc.) for the given session ID.
 // Returns nil if nothing existed.
 func (r *Reader) DeleteSessionFiles(sessionID string) error {
+	if r.layout == TranscriptCodex {
+		if path := r.ResolveSessionPath(sessionID); path != "" {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		return nil
+	}
 	// JSONL ファイル: <project>/<sessionID>.jsonl
 	jsonlPattern := filepath.Join(r.baseDir, "*", sessionID+".jsonl")
 	if matches, _ := filepath.Glob(jsonlPattern); len(matches) > 0 {
@@ -134,8 +160,10 @@ func (r *Reader) HasConversation(sessionID string) bool {
 	}
 	defer f.Close()
 
-	// "type":"user" を含む行を高速バイト検索（デコード不要）
 	marker := []byte(`"type":"user"`)
+	if r.layout == TranscriptCodex {
+		marker = []byte(`"type":"user_message"`)
+	}
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1*1024*1024)
 	for scanner.Scan() {
@@ -162,6 +190,9 @@ type tokenOnlyMessage struct {
 // 行単位で "usage" を含むかバイト検索し、該当行だけデコードすることで
 // 巨大な content を持つ行のパースを完全にスキップする。
 func (r *Reader) ReadTokensByID(sessionID string) *TokenStats {
+	if r.layout == TranscriptCodex {
+		return r.readCodexTokensByID(sessionID)
+	}
 	path := r.ResolveSessionPath(sessionID)
 	if path == "" {
 		return nil
@@ -211,7 +242,7 @@ func (r *Reader) ReadTokensByID(sessionID string) *TokenStats {
 // files are sorted by mtime descending so the most recent sessions are processed first.
 // 軽量スキャン: 各ファイルの先頭数エントリだけ読み、mtime を LastActivity として使う。
 func (r *Reader) ListAllSessions(maxAge time.Duration, limit, offset int) []*SessionInfo {
-	jsonlFiles, _ := filepath.Glob(filepath.Join(r.baseDir, "*", "*.jsonl"))
+	jsonlFiles := r.sessionFiles()
 
 	// subagent ファイルを除外し、mtime をキャッシュしてソート（新しい順）
 	type fileEntry struct {
@@ -260,11 +291,36 @@ func (r *Reader) ListAllSessions(maxAge time.Duration, limit, offset int) []*Ses
 	return results
 }
 
+func (r *Reader) sessionFiles() []string {
+	switch r.layout {
+	case TranscriptCodex:
+		var files []string
+		years, _ := filepath.Glob(filepath.Join(r.baseDir, "*"))
+		for _, year := range years {
+			months, _ := filepath.Glob(filepath.Join(year, "*"))
+			for _, month := range months {
+				days, _ := filepath.Glob(filepath.Join(month, "*"))
+				for _, day := range days {
+					matches, _ := filepath.Glob(filepath.Join(day, "*.jsonl"))
+					files = append(files, matches...)
+				}
+			}
+		}
+		return files
+	default:
+		files, _ := filepath.Glob(filepath.Join(r.baseDir, "*", "*.jsonl"))
+		return files
+	}
+}
+
 // extractInfoQuick reads only the first few entries of a JSONL file
 // to get basic session metadata (CWD, prompt, permissions).
 // mtime is used as LastActivity approximation to avoid reading the entire file.
 func (r *Reader) extractInfoQuick(path string, mtime time.Time) *SessionInfo {
-	fileSessionID := sessionIDFromPath(path)
+	fileSessionID := r.sessionIDFromPath(path)
+	if r.layout == TranscriptCodex {
+		return r.extractCodexInfoQuick(path, mtime)
+	}
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -313,8 +369,11 @@ func (r *Reader) extractInfoQuick(path string, mtime time.Time) *SessionInfo {
 // The session ID is derived from the filename (not from entry content),
 // because --resume can mix entries from a previous session into the file.
 func (r *Reader) extractInfo(path string) *SessionInfo {
+	if r.layout == TranscriptCodex {
+		return r.extractCodexInfo(path)
+	}
 	// ファイル名がセッション ID（例: 259bcba0-...aa94.jsonl → 259bcba0-...aa94）
-	fileSessionID := sessionIDFromPath(path)
+	fileSessionID := r.sessionIDFromPath(path)
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -407,6 +466,16 @@ func accumulateUsage(stats *TokenStats, msg *jsonlMessage) {
 // scanFile reads a JSONL file and checks if the cwd matches workDir.
 // If it matches, aggregates all token usage from the file.
 func (r *Reader) scanFile(path, workDir string) *TokenStats {
+	if r.layout == TranscriptCodex {
+		info := r.extractCodexInfo(path)
+		if info == nil || !pathMatches(info.CWD, workDir) {
+			return nil
+		}
+		stats := info.Tokens
+		stats.SessionID = info.SessionID
+		stats.EstimatedCostUSD = estimateCost(stats)
+		return &stats
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -450,6 +519,9 @@ func (r *Reader) scanFile(path, workDir string) *TokenStats {
 
 // aggregateFile reads all token usage from a JSONL file.
 func (r *Reader) aggregateFile(path string) *TokenStats {
+	if r.layout == TranscriptCodex {
+		return r.aggregateCodexFile(path)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -458,7 +530,7 @@ func (r *Reader) aggregateFile(path string) *TokenStats {
 
 	dec := jsontext.NewDecoder(f)
 	stats := TokenStats{
-		SessionID: sessionIDFromPath(path),
+		SessionID: r.sessionIDFromPath(path),
 	}
 
 	for {
@@ -492,6 +564,19 @@ func pathMatches(cwd, workDir string) bool {
 // e.g., "/path/to/259bcba0-aa94.jsonl" → "259bcba0-aa94"
 func sessionIDFromPath(path string) string {
 	return strings.TrimSuffix(filepath.Base(path), ".jsonl")
+}
+
+func (r *Reader) sessionIDFromPath(path string) string {
+	if r.layout == TranscriptCodex {
+		name := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+		if strings.HasPrefix(name, "rollout-") {
+			parts := strings.Split(name, "-")
+			if len(parts) >= 8 {
+				return strings.Join(parts[len(parts)-5:], "-")
+			}
+		}
+	}
+	return sessionIDFromPath(path)
 }
 
 // isSubagentPath returns true if the path is inside a "subagents" directory.

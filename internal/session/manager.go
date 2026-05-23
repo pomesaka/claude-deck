@@ -26,7 +26,8 @@ const notifyInterval = 16 * time.Millisecond
 type ManagerConfig struct {
 	DataDir               string
 	AgentRuntime          agentruntime.Runtime
-	ClaudeCommand         string     // deprecated: use AgentRuntime
+	ClaudeCommand         string // deprecated: use AgentRuntime
+	TranscriptReader      *usage.Reader
 	JJ                    *jj.Runner // jj CLI runner (nil uses default "jj")
 	DefaultPermissionMode string
 	MaxSessions           int
@@ -88,12 +89,15 @@ func NewManager(ctx context.Context, st *store.Store, cfg ManagerConfig) *Manage
 	m := &Manager{
 		sessions:       make(map[DeckSessionID]*Session),
 		store:          st,
-		usage:          usage.NewReader(""),
+		usage:          cfg.TranscriptReader,
 		ctx:            ctx,
 		config:         cfg,
 		notifyCh:       make(chan struct{}, 1),
 		pendingChanges: make(map[DeckSessionID]bool),
 		hookProc:       newHookProcessor(),
+	}
+	if m.usage == nil {
+		m.usage = usage.NewReader("")
 	}
 
 	runner := &tmuxrunner.Runner{

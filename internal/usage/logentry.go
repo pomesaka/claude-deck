@@ -3,7 +3,6 @@ package usage
 import (
 	"fmt"
 	"hash/fnv"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -33,12 +32,12 @@ type LogEntry struct {
 
 // ResolveSessionPath returns the JSONL file path for a session ID, or "" if not found.
 func (r *Reader) ResolveSessionPath(sessionID string) string {
-	pattern := filepath.Join(r.baseDir, "*", sessionID+".jsonl")
-	matches, _ := filepath.Glob(pattern)
-	if len(matches) == 0 {
-		return ""
+	for _, path := range r.sessionFiles() {
+		if r.sessionIDFromPath(path) == sessionID {
+			return path
+		}
 	}
-	return matches[0]
+	return ""
 }
 
 // markToolResults scans a tool_result user message and marks corresponding

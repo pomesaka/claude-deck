@@ -170,7 +170,7 @@ func (m *Manager) StreamSession(sessionID DeckSessionID) {
 		// 時点で打ち切ることで /clear が多数回行われた場合の不要な I/O を防ぐ。
 		var prefixEntries []usage.LogEntry
 		for i := len(priorPaths) - 1; i >= 0; i-- {
-			prev := usage.NewLogStreamer(priorPaths[i])
+			prev := m.usage.NewLogStreamer(priorPaths[i])
 			prev.ReadAll()
 			prefixEntries = append(prev.Entries(), prefixEntries...)
 			if len(prefixEntries) >= usage.MaxEntries {
@@ -199,7 +199,7 @@ func (m *Manager) StreamSession(sessionID DeckSessionID) {
 		}
 
 		// Phase 1: 末尾読み込みで即座に表示
-		s := usage.NewLogStreamer(path)
+		s := m.usage.NewLogStreamer(path)
 		fileSize := s.ReadTail(512 * 1024) // 512KB
 		onChange(s.Entries())
 
@@ -213,7 +213,7 @@ func (m *Manager) StreamSession(sessionID DeckSessionID) {
 				return
 			}
 			// エラー時は最初からやり直し
-			s = usage.NewLogStreamer(path)
+			s = m.usage.NewLogStreamer(path)
 			fileSize = s.ReadTail(512 * 1024)
 			onChange(s.Entries())
 			select {
