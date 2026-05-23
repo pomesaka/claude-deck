@@ -78,16 +78,18 @@ func run() error {
 		return fmt.Errorf("creating data dir: %w", err)
 	}
 
-	// Claude Code の workspace trust プロンプトを回避するため、
-	// dataDir に .git を配置し trusted として登録する（初回のみ実効）
-	if err := claudecode.EnsureDataDirTrusted(cfg.DataDir); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: trust setup: %v\n", err)
-	}
+	if cfg.RuntimeProvider() == string(agentruntime.ProviderClaude) {
+		// Claude Code の workspace trust プロンプトを回避するため、
+		// dataDir に .git を配置し trusted として登録する（初回のみ実効）
+		if err := claudecode.EnsureDataDirTrusted(cfg.DataDir); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: trust setup: %v\n", err)
+		}
 
-	// Claude Code の statusline スクリプトを配置し ~/.claude/settings.json に登録する。
-	// スクリプトは各アシスタントメッセージ後に rate_limits データを DataDir に書き出す。
-	if err := claudecode.SetupStatuslineHook(cfg.DataDir); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: statusline setup: %v\n", err)
+		// Claude Code の statusline スクリプトを配置し ~/.claude/settings.json に登録する。
+		// スクリプトは各アシスタントメッセージ後に rate_limits データを DataDir に書き出す。
+		if err := claudecode.SetupStatuslineHook(cfg.DataDir); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: statusline setup: %v\n", err)
+		}
 	}
 
 	// Initialize store
@@ -176,14 +178,17 @@ func run() error {
 	// Hook のセットアップ状態を確認し、イベント監視を開始する。
 	// プラグイン方式への移行を案内。レガシー hooks はそのまま動作する。
 	// Plugin 管理以外は起動前に警告を出してキー入力で続行する。
-	if msg := hookWarningMessage(hooks.CheckHooks()); msg != "" {
-		fmt.Print(msg)
-		fmt.Fprint(os.Stderr, "Press any key to continue...")
-		b := make([]byte, 1)
-		if _, err := os.Stdin.Read(b); err != nil {
-			return err
+	if cfg.RuntimeProvider() == string(agentruntime.ProviderClaude) {
+		msg := hookWarningMessage(hooks.CheckHooks())
+		if msg != "" {
+			fmt.Print(msg)
+			fmt.Fprint(os.Stderr, "Press any key to continue...")
+			b := make([]byte, 1)
+			if _, err := os.Stdin.Read(b); err != nil {
+				return err
+			}
+			fmt.Fprint(os.Stderr, "\033[2K\r") // "Press any key..." 行だけクリア
 		}
-		fmt.Fprint(os.Stderr, "\033[2K\r") // "Press any key..." 行だけクリア
 	}
 	if err := mgr.StartEventWatcher(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: event watcher: %v\n", err)
@@ -268,10 +273,18 @@ func runPreview() error {
 
 // buildManagerConfig constructs the ManagerConfig from app config and derived values.
 func buildManagerConfig(cfg *config.Config, refreshInterval time.Duration) session.ManagerConfig {
+	runtime := agentruntime.Runtime(agentruntime.ClaudeRuntime{Command: cfg.Commands.Claude})
+	transcriptReader := usage.NewReader("")
+	if cfg.RuntimeProvider() == string(agentruntime.ProviderCodex) {
+		runtime = agentruntime.CodexRuntime{Command: cfg.Commands.Codex}
+		transcriptReader = usage.NewCodexReader("")
+	}
+
 	return session.ManagerConfig{
 		DataDir:               cfg.DataDir,
-		AgentRuntime:          agentruntime.ClaudeRuntime{Command: cfg.Commands.Claude},
+		AgentRuntime:          runtime,
 		ClaudeCommand:         cfg.Commands.Claude,
+		TranscriptReader:      transcriptReader,
 		JJ:                    &jj.Runner{Command: cfg.Commands.JJ},
 		DefaultPermissionMode: cfg.Defaults.PermissionMode,
 		MaxSessions:           cfg.Session.MaxSessions,

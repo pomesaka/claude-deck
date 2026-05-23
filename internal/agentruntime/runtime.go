@@ -7,6 +7,7 @@ type Provider string
 
 const (
 	ProviderClaude Provider = "claude"
+	ProviderCodex  Provider = "codex"
 )
 
 // LaunchMode describes how the runtime process should start.
@@ -26,6 +27,7 @@ type StartRequest struct {
 	// SessionID is the runtime conversation/thread ID used by resume/fork.
 	SessionID string
 	Prompt    string
+	WorkDir   string
 
 	SessionName    string
 	PermissionMode string

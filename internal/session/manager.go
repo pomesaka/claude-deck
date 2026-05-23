@@ -307,6 +307,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	addDirArgs := m.buildAddDirArgs(repoPath)
 	startSpec := m.runtime().StartSpec(agentruntime.StartRequest{
 		Mode:           agentruntime.LaunchNew,
+		WorkDir:        actualWorkDir,
 		SessionName:    sess.Name,
 		PermissionMode: m.config.DefaultPermissionMode,
 		AdditionalArgs: addDirArgs,
@@ -557,6 +558,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 	startSpec := m.runtime().StartSpec(agentruntime.StartRequest{
 		Mode:           agentruntime.LaunchResume,
 		SessionID:      string(csID),
+		WorkDir:        workDir,
 		PermissionMode: m.config.DefaultPermissionMode,
 		AdditionalArgs: m.buildAddDirArgs(sess.RepoPath),
 	})
@@ -637,6 +639,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	startSpec := m.runtime().StartSpec(agentruntime.StartRequest{
 		Mode:           agentruntime.LaunchFork,
 		SessionID:      string(srcClaudeID),
+		WorkDir:        actualWorkDir,
 		SessionName:    sess.Name,
 		PermissionMode: m.config.DefaultPermissionMode,
 		AdditionalArgs: m.buildAddDirArgs(repoPath),

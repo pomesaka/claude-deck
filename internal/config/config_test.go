@@ -31,8 +31,14 @@ func TestDefault(t *testing.T) {
 	if cfg.Commands.Claude != "claude" {
 		t.Errorf("Commands.Claude = %q, want 'claude'", cfg.Commands.Claude)
 	}
+	if cfg.Commands.Codex != "codex" {
+		t.Errorf("Commands.Codex = %q, want 'codex'", cfg.Commands.Codex)
+	}
 	if cfg.Commands.JJ != "jj" {
 		t.Errorf("Commands.JJ = %q, want 'jj'", cfg.Commands.JJ)
+	}
+	if cfg.Runtime.Provider != "claude" {
+		t.Errorf("Runtime.Provider = %q, want 'claude'", cfg.Runtime.Provider)
 	}
 	// Session defaults
 	if cfg.Session.MaxSessions != 30 {
@@ -106,7 +112,11 @@ text = "#FFFFFF"
 
 [commands]
 claude = "/usr/local/bin/claude"
+codex = "/opt/bin/codex"
 jj = "/opt/bin/jj"
+
+[runtime]
+provider = "codex"
 
 [session]
 max_sessions = 50
@@ -140,8 +150,14 @@ output_per_mtok = 50.0
 	if cfg.Commands.Claude != "/usr/local/bin/claude" {
 		t.Errorf("Commands.Claude = %q", cfg.Commands.Claude)
 	}
+	if cfg.Commands.Codex != "/opt/bin/codex" {
+		t.Errorf("Commands.Codex = %q", cfg.Commands.Codex)
+	}
 	if cfg.Commands.JJ != "/opt/bin/jj" {
 		t.Errorf("Commands.JJ = %q", cfg.Commands.JJ)
+	}
+	if cfg.Runtime.Provider != "codex" {
+		t.Errorf("Runtime.Provider = %q", cfg.Runtime.Provider)
 	}
 	if cfg.Session.MaxSessions != 50 {
 		t.Errorf("Session.MaxSessions = %d, want 50", cfg.Session.MaxSessions)
@@ -165,6 +181,27 @@ output_per_mtok = 50.0
 	// Unset pricing fields should keep defaults
 	if cfg.Pricing.CacheWritePerMTok != 18.75 {
 		t.Errorf("Pricing.CacheWritePerMTok = %f, want default 18.75", cfg.Pricing.CacheWritePerMTok)
+	}
+}
+
+func TestRuntimeProvider(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "default", in: "", want: "claude"},
+		{name: "normalizes", in: " CoDeX ", want: "codex"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Runtime.Provider = tt.in
+			if got := cfg.RuntimeProvider(); got != tt.want {
+				t.Fatalf("RuntimeProvider() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
