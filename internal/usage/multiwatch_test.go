@@ -340,3 +340,28 @@ func TestMultiWatcher_ContextCancel(t *testing.T) {
 		t.Fatal("Run did not exit after context cancellation")
 	}
 }
+
+func TestMultiWatcher_CodexLayoutSessionID(t *testing.T) {
+	baseDir := t.TempDir()
+	dir := filepath.Join(baseDir, "2026", "05", "23")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "019e5353-bedb-7b62-8ce3-cbc4e1ca6c46"
+	path := filepath.Join(dir, "rollout-2026-05-23T14-34-17-"+sessionID+".jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"event_msg","payload":{"type":"task_started"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mw, err := NewMultiWatcherForLayout(baseDir, TranscriptCodex, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := mw.sessionFiles()
+	if len(files) != 1 {
+		t.Fatalf("len(files) = %d, want 1", len(files))
+	}
+	if got := sessionIDFromPathForLayout(TranscriptCodex, files[0]); got != sessionID {
+		t.Fatalf("sessionID = %q, want %q", got, sessionID)
+	}
+}

@@ -90,3 +90,34 @@ func TestCodexLogStreamer(t *testing.T) {
 		t.Errorf("entries[2] = %#v", entries[2])
 	}
 }
+
+func TestCodexRuntimeActivity(t *testing.T) {
+	r, baseDir := setupCodexReader(t)
+	sessionID := "019e5353-bedb-7b62-8ce3-cbc4e1ca6c46"
+	path := writeCodexJSONL(t, baseDir, sessionID, `{"timestamp":"2026-05-23T05:34:21.974Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-05-23T05:34:22.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-1","arguments":"{\"cmd\":\"pwd\"}"}}
+`)
+
+	got := r.ReadRuntimeActivity(path)
+	if got.SessionID != sessionID {
+		t.Fatalf("SessionID = %q, want %q", got.SessionID, sessionID)
+	}
+	if got.Kind != RuntimeActivityRunning {
+		t.Fatalf("Kind = %v, want RuntimeActivityRunning", got.Kind)
+	}
+	if got.CurrentTool != "exec_command" {
+		t.Fatalf("CurrentTool = %q, want exec_command", got.CurrentTool)
+	}
+
+	path = writeCodexJSONL(t, baseDir, sessionID, `{"timestamp":"2026-05-23T05:34:21.974Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-05-23T05:34:24.000Z","type":"event_msg","payload":{"type":"task_complete"}}
+`)
+
+	got = r.ReadRuntimeActivity(path)
+	if got.Kind != RuntimeActivityIdle {
+		t.Fatalf("Kind = %v, want RuntimeActivityIdle", got.Kind)
+	}
+	if !got.ClearTool {
+		t.Fatal("ClearTool = false, want true")
+	}
+}

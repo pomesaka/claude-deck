@@ -82,6 +82,11 @@ func (r *Reader) BaseDir() string {
 	return r.baseDir
 }
 
+// Layout returns the transcript format handled by this reader.
+func (r *Reader) Layout() TranscriptLayout {
+	return r.layout
+}
+
 // ReadSessionByWorkDir finds the Claude Code session whose cwd matches workDir
 // and returns aggregated token stats. Returns nil if not found.
 func (r *Reader) ReadSessionByWorkDir(workDir string) *TokenStats {

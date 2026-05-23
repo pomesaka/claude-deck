@@ -10,6 +10,27 @@ import (
 	"time"
 )
 
+const codexRuntimeActivityTailBytes int64 = 512 * 1024
+
+type RuntimeActivityKind int
+
+const (
+	// RuntimeActivityNone means the transcript tail contains no status signal.
+	RuntimeActivityNone RuntimeActivityKind = iota
+	// RuntimeActivityRunning means the runtime is actively processing a turn.
+	RuntimeActivityRunning
+	// RuntimeActivityIdle means the runtime completed the current turn.
+	RuntimeActivityIdle
+)
+
+// RuntimeActivity is the small realtime projection extracted from transcript writes.
+type RuntimeActivity struct {
+	SessionID   string
+	Kind        RuntimeActivityKind
+	CurrentTool string
+	ClearTool   bool
+}
+
 type codexEntry struct {
 	Timestamp string         `json:"timestamp"`
 	Type      string         `json:"type"`
@@ -317,4 +338,79 @@ func codexMessageText(raw jsontext.Value) string {
 func firstLine(text string) string {
 	first, _, _ := strings.Cut(strings.TrimSpace(text), "\n")
 	return first
+}
+
+func (r *Reader) ReadRuntimeActivity(path string) RuntimeActivity {
+	if r.layout != TranscriptCodex {
+		return RuntimeActivity{}
+	}
+	return r.readCodexRuntimeActivity(path)
+}
+
+func (r *Reader) readCodexRuntimeActivity(path string) RuntimeActivity {
+	f, err := os.Open(path)
+	if err != nil {
+		return RuntimeActivity{}
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return RuntimeActivity{}
+	}
+	offset := fi.Size() - codexRuntimeActivityTailBytes
+	if offset < 0 {
+		offset = 0
+	}
+	if _, err := f.Seek(offset, 0); err != nil {
+		return RuntimeActivity{}
+	}
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	if offset > 0 && scanner.Scan() {
+		// Drop a possibly partial first line.
+	}
+
+	activity := RuntimeActivity{SessionID: r.sessionIDFromPath(path)}
+	for scanner.Scan() {
+		next, ok := codexRuntimeActivityFromLine(scanner.Bytes())
+		if ok {
+			next.SessionID = activity.SessionID
+			activity = next
+		}
+	}
+	return activity
+}
+
+func codexRuntimeActivityFromLine(line []byte) (RuntimeActivity, bool) {
+	var entry codexEntry
+	if err := json.Unmarshal(line, &entry); err != nil {
+		return RuntimeActivity{}, false
+	}
+	switch entry.Type {
+	case "event_msg":
+		var ev codexEventMsg
+		if json.Unmarshal(entry.Payload, &ev) != nil {
+			return RuntimeActivity{}, false
+		}
+		switch ev.Type {
+		case "task_started":
+			return RuntimeActivity{Kind: RuntimeActivityRunning, ClearTool: true}, true
+		case "task_complete":
+			return RuntimeActivity{Kind: RuntimeActivityIdle, ClearTool: true}, true
+		}
+	case "response_item":
+		var item codexResponseItem
+		if json.Unmarshal(entry.Payload, &item) != nil {
+			return RuntimeActivity{}, false
+		}
+		switch item.Type {
+		case "function_call":
+			return RuntimeActivity{Kind: RuntimeActivityRunning, CurrentTool: item.Name}, true
+		case "function_call_output":
+			return RuntimeActivity{Kind: RuntimeActivityRunning, ClearTool: true}, true
+		}
+	}
+	return RuntimeActivity{}, false
 }
