@@ -13,6 +13,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/pomesaka/claude-deck/internal/agentruntime"
 	"github.com/pomesaka/claude-deck/internal/claudecode"
 	"github.com/pomesaka/claude-deck/internal/config"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
@@ -269,6 +270,7 @@ func runPreview() error {
 func buildManagerConfig(cfg *config.Config, refreshInterval time.Duration) session.ManagerConfig {
 	return session.ManagerConfig{
 		DataDir:               cfg.DataDir,
+		AgentRuntime:          agentruntime.ClaudeRuntime{Command: cfg.Commands.Claude},
 		ClaudeCommand:         cfg.Commands.Claude,
 		JJ:                    &jj.Runner{Command: cfg.Commands.JJ},
 		DefaultPermissionMode: cfg.Defaults.PermissionMode,

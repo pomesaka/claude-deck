@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pomesaka/claude-deck/internal/agentruntime"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/jj"
 	"github.com/pomesaka/claude-deck/internal/store"
@@ -24,7 +25,8 @@ const notifyInterval = 16 * time.Millisecond
 // ManagerConfig holds configuration values used by Manager for session creation.
 type ManagerConfig struct {
 	DataDir               string
-	ClaudeCommand         string     // claude executable path
+	AgentRuntime          agentruntime.Runtime
+	ClaudeCommand         string     // deprecated: use AgentRuntime
 	JJ                    *jj.Runner // jj CLI runner (nil uses default "jj")
 	DefaultPermissionMode string
 	MaxSessions           int
@@ -121,29 +123,11 @@ func (m *Manager) jj() *jj.Runner {
 	return &jj.Runner{}
 }
 
-// buildStartArgs pre-assembles the CLI arg list for a Claude Code process start.
-// Assembles the CLI args for `claude` from semantic parameters, keeping backend
-// implementations decoupled from claude CLI flag semantics.
-//
-// The four launch modes map to:
-//   - resumeID != "" && forkSession  → --resume <id> --fork-session  (fork of an existing session)
-//   - resumeID != "" && !forkSession → --resume <id>                 (resume an existing session)
-//   - resumeID == "" && prompt != "" → -p <prompt>                   (new session with prompt)
-//   - resumeID == "" && prompt == "" → (no extra flags)              (new interactive session)
-func buildStartArgs(resumeID string, forkSession bool, prompt, permMode string, additionalArgs []string) []string {
-	var args []string
-	if resumeID != "" {
-		args = append(args, "--resume", resumeID)
-		if forkSession {
-			args = append(args, "--fork-session")
-		}
-	} else if prompt != "" {
-		args = append(args, "-p", prompt)
+func (m *Manager) runtime() agentruntime.Runtime {
+	if m.config.AgentRuntime != nil {
+		return m.config.AgentRuntime
 	}
-	if permMode != "" {
-		args = append(args, "--permission-mode", permMode)
-	}
-	return append(args, additionalArgs...)
+	return agentruntime.ClaudeRuntime{Command: m.config.ClaudeCommand}
 }
 
 // SetOnChange registers a callback for session state changes.
@@ -217,7 +201,6 @@ func (m *Manager) StartNotifyLoop(ctx context.Context) {
 		}
 	}()
 }
-
 
 // Launch starts a session based on the given LaunchIntent.
 // This is the unified entry point for all session launch operations (New, Resume, Fork).
@@ -318,7 +301,12 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 
 	debuglog.Printf("[CreateSession] starting process workDir=%q", actualWorkDir)
 	addDirArgs := m.buildAddDirArgs(repoPath)
-	additionalArgs := append([]string{"--agent", sess.Name}, addDirArgs...)
+	startSpec := m.runtime().StartSpec(agentruntime.StartRequest{
+		Mode:           agentruntime.LaunchNew,
+		SessionName:    sess.Name,
+		PermissionMode: m.config.DefaultPermissionMode,
+		AdditionalArgs: addDirArgs,
+	})
 
 	// StartProcess より前に m.sessions に登録する。
 	// tmux/PTY プロセスが起動してすぐ SessionStart フックを発火することがあり、
@@ -329,9 +317,9 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 
 	// Backend handles AttachProcess internally (PID storage, exit watcher).
 	if err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
-		Command: m.config.ClaudeCommand,
+		Command: startSpec.Command,
 		WorkDir: actualWorkDir,
-		Args:    buildStartArgs("", false, "", m.config.DefaultPermissionMode, additionalArgs),
+		Args:    startSpec.Args,
 		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
 	}, nil); err != nil {
 		debuglog.Printf("[CreateSession] StartProcess failed: %v", err)
@@ -562,10 +550,16 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 	sess.mu.Unlock()
 
 	debuglog.Printf("[ResumeSession] calling backend.StartProcess")
+	startSpec := m.runtime().StartSpec(agentruntime.StartRequest{
+		Mode:           agentruntime.LaunchResume,
+		SessionID:      string(csID),
+		PermissionMode: m.config.DefaultPermissionMode,
+		AdditionalArgs: m.buildAddDirArgs(sess.RepoPath),
+	})
 	if err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
-		Command: m.config.ClaudeCommand,
+		Command: startSpec.Command,
 		WorkDir: workDir,
-		Args:    buildStartArgs(string(csID), false, "", m.config.DefaultPermissionMode, m.buildAddDirArgs(sess.RepoPath)),
+		Args:    startSpec.Args,
 		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sessionID)},
 	}, nil); err != nil {
 		debuglog.Printf("[ResumeSession] StartProcess failed: %v", err)
@@ -636,11 +630,17 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	m.mu.Unlock()
 
 	// Backend handles AttachProcess internally.
-	forkArgs := append([]string{"--agent", sess.Name}, m.buildAddDirArgs(repoPath)...)
+	startSpec := m.runtime().StartSpec(agentruntime.StartRequest{
+		Mode:           agentruntime.LaunchFork,
+		SessionID:      string(srcClaudeID),
+		SessionName:    sess.Name,
+		PermissionMode: m.config.DefaultPermissionMode,
+		AdditionalArgs: m.buildAddDirArgs(repoPath),
+	})
 	if err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
-		Command: m.config.ClaudeCommand,
+		Command: startSpec.Command,
 		WorkDir: actualWorkDir,
-		Args:    buildStartArgs(string(srcClaudeID), true, "", m.config.DefaultPermissionMode, forkArgs),
+		Args:    startSpec.Args,
 		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
 	}, nil); err != nil {
 		m.mu.Lock()
