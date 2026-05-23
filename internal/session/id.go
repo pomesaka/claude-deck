@@ -7,12 +7,22 @@ import (
 )
 
 // DeckSessionID is a unique identifier for a claude-deck session (random hex).
-// Distinct from ClaudeSessionID to prevent accidental mixing at the type level.
+// Distinct from RuntimeSessionID to prevent accidental mixing at the type level.
 type DeckSessionID string
 
-// ClaudeSessionID is a UUID assigned by Claude Code to a conversation session.
-// /clear and /compact create new ClaudeSessionIDs; the history is tracked in SessionChain.
-type ClaudeSessionID string
+// RuntimeSessionID is the conversation/thread identifier assigned by the
+// backing agent runtime (Claude Code, Codex, etc.).
+//
+// /clear, /compact, /new, or runtime-specific fork/resume flows may create a
+// new runtime session ID while the deck session remains stable. The history is
+// tracked in SessionChain.
+type RuntimeSessionID string
+
+// ClaudeSessionID is kept as a source-compatible alias while the codebase moves
+// from Claude-specific naming to runtime-neutral naming.
+//
+// Deprecated: use RuntimeSessionID.
+type ClaudeSessionID = RuntimeSessionID
 
 // =LOVE member names for workspace naming.
 var loveMembers = []string{

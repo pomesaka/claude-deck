@@ -105,7 +105,10 @@ func (ps *previewStreamer) run(ctx context.Context, spec preview.PreviewSpec, ou
 		case out <- entries:
 		case <-ctx.Done():
 		default:
-			select { case <-out: default: }
+			select {
+			case <-out:
+			default:
+			}
 			select {
 			case out <- entries:
 			case <-ctx.Done():
@@ -399,7 +402,11 @@ func (m PreviewModel) renderHeader(innerWidth int) []string {
 	h = append(h, titleStyle.Render(truncate(title, innerWidth)))
 	h = append(h, dimStyle.Render(truncate(fmt.Sprintf("   パス: %s", m.spec.WorkspacePath), innerWidth)))
 
-	idLine := fmt.Sprintf("   ID: %s  Claude: %s", m.spec.DeckSessionID, m.spec.ClaudeSessionID)
+	runtimeID := m.spec.RuntimeSessionID
+	if runtimeID == "" {
+		runtimeID = m.spec.ClaudeSessionID
+	}
+	idLine := fmt.Sprintf("   ID: %s  Runtime: %s", m.spec.DeckSessionID, runtimeID)
 	if m.spec.ClearCount > 0 {
 		idLine += fmt.Sprintf("  (/clear×%d)", m.spec.ClearCount)
 	}

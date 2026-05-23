@@ -17,7 +17,6 @@ import (
 	"github.com/pomesaka/claude-deck/internal/session"
 )
 
-
 // viewMode determines what the TUI is currently showing.
 type viewMode int
 
@@ -87,9 +86,9 @@ type Model struct {
 	// viewSnaps[i] is a snapshot of visibleSessions()[i] and shares the same
 	// index space as m.cursor. Sorting or filtering changes must always be
 	// followed by refreshViewData() to keep this invariant.
-	viewSnaps    []session.Snapshot
-	selectedSnap *session.Snapshot // snapshot for the selected session (nil = no selection)
-	attentionCount int // sessions with Status.NeedsAttention() == true
+	viewSnaps      []session.Snapshot
+	selectedSnap   *session.Snapshot // snapshot for the selected session (nil = no selection)
+	attentionCount int               // sessions with Status.NeedsAttention() == true
 
 	// rate limits data from Claude Code statusline (Pro/Max subscribers only)
 	rateLimitsStatus ratelimits.Status
@@ -105,7 +104,6 @@ type SessionRefreshMsg struct {
 
 // statusClearMsg clears the status message.
 type statusClearMsg struct{}
-
 
 // sessionCreatedMsg is sent when an async session creation completes.
 type sessionCreatedMsg struct {
@@ -542,20 +540,22 @@ func (m *Model) buildPreviewSpec() preview.PreviewSpec {
 func (m *Model) buildPreviewSpecFromSnap(snap session.Snapshot) preview.PreviewSpec {
 	jsonlPath, priorPaths := m.manager.ResolveJSONLPaths(snap.ID)
 	return preview.PreviewSpec{
-		DeckSessionID:   snap.ID,
-		Name:            snap.Name,
-		RepoName:        snap.RepoName,
-		WorkspacePath:   snap.WorkspacePath,
-		ClaudeSessionID: snap.ClaudeSessionID,
-		PriorClaudeIDs:  snap.PriorClaudeIDs,
-		ClearCount:      snap.ClearCount,
-		Status:          snap.Status.ID(),
-		Display:         snap.Display.String(),
-		CurrentTool:     snap.CurrentTool,
-		ErrorMessage:    snap.ErrorMessage,
-		NeedsAttention:  snap.Status.NeedsAttention(),
-		JSONLPath:       jsonlPath,
-		PriorJSONLPaths: priorPaths,
+		DeckSessionID:    snap.ID,
+		Name:             snap.Name,
+		RepoName:         snap.RepoName,
+		WorkspacePath:    snap.WorkspacePath,
+		RuntimeSessionID: snap.RuntimeSessionID,
+		PriorRuntimeIDs:  snap.PriorRuntimeIDs,
+		ClaudeSessionID:  snap.RuntimeSessionID,
+		PriorClaudeIDs:   snap.PriorRuntimeIDs,
+		ClearCount:       snap.ClearCount,
+		Status:           snap.Status.ID(),
+		Display:          snap.Display.String(),
+		CurrentTool:      snap.CurrentTool,
+		ErrorMessage:     snap.ErrorMessage,
+		NeedsAttention:   snap.Status.NeedsAttention(),
+		JSONLPath:        jsonlPath,
+		PriorJSONLPaths:  priorPaths,
 	}
 }
 

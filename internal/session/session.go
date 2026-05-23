@@ -240,12 +240,12 @@ type runtimeFields struct {
 	JSONLLogEntries []usage.LogEntry // JSONL 由来の構造化ログ（StreamSession で更新）
 }
 
-// Session represents a single Claude Code session.
+// Session represents a single agent runtime session tracked by claude-deck.
 //
 // Data sources:
 //   - Store (persisted as JSON): ID, Name, RepoPath, RepoName, WorkspacePath,
 //     WorkspaceName, SessionChain, Status, FinishedAt, PID
-//   - JSONL (Claude Code primary): Prompt, PermissionMode, StartedAt, TokenUsage
+//   - JSONL (runtime primary): Prompt, PermissionMode, StartedAt, TokenUsage
 //   - Runtime only: rt.JSONLLogEntries, CurrentTool
 //
 // Lock ordering (ABBA デッドロック防止):
@@ -263,28 +263,28 @@ type Session struct {
 	// Fields marked "immutable after creation" are set once by CreateSession /
 	// newExternalSession and never mutated thereafter, so callers may read them
 	// without holding mu. See hasManagedSessionAtWorkspaceLocked for an example.
-	ID            DeckSessionID `json:"id"`            // immutable after creation
-	Name          string        `json:"name"`
-	RepoPath      string        `json:"repo_path"`     // immutable after creation
-	RepoName      string        `json:"repo_name"`     // immutable after creation
+	ID       DeckSessionID `json:"id"` // immutable after creation
+	Name     string        `json:"name"`
+	RepoPath string        `json:"repo_path"` // immutable after creation
+	RepoName string        `json:"repo_name"` // immutable after creation
 	// WorkspacePath is the actual Claude Code working directory and may include a sub-project
 	// subdirectory (i.e., <wsRoot>/<SubProjectDir>). WorkspaceName is the root jj workspace
 	// name; the root can be reconstructed as DataDir/workspace/<encodedRepo>/<WorkspaceName>.
 	// Kill removes the root via WorkspaceName, not WorkspacePath.
 	// set by CreateSession/ForkSession; cleared by Kill; requires mu except where benign race is documented.
 	WorkspacePath string `json:"workspace_path"`
-	WorkspaceName string `json:"workspace_name"` // set by CreateSession; cleared by Kill; requires mu except where benign race is documented
+	WorkspaceName string `json:"workspace_name"`            // set by CreateSession; cleared by Kill; requires mu except where benign race is documented
 	SubProjectDir string `json:"sub_project_dir,omitempty"` // immutable after creation; relative path to sub-project
-	// SessionChain は Claude Code が割り当てるセッション ID の履歴（古い順）。
-	// /clear や compact のたびに末尾に新 ID が追加される。
+	// SessionChain は agent runtime が割り当てるセッション ID の履歴（古い順）。
+	// /clear や compact など runtime 固有の reset 操作で末尾に新 ID が追加される。
 	// 現在の ID は SessionChain[len-1]、旧 ID はそれ以前の要素。
-	// アクセスには CurrentClaudeID() / PriorClaudeIDs() を使うこと。
-	SessionChain  []ClaudeSessionID `json:"session_chain,omitempty"`
-	Status        Status            `json:"status"`
-	FinishedAt    *time.Time        `json:"finished_at,omitempty"`
-	PID           int               `json:"pid,omitempty"`
-	TerminalTitle string            `json:"terminal_title,omitempty"` // OSC 0/2 で設定されたターミナルタイトル（セッション一覧表示用）
-	BookmarkName  string            `json:"bookmark_name,omitempty"`  // jj の最近接ブックマーク名（セッション一覧表示用）
+	// アクセスには CurrentRuntimeID() / PriorRuntimeIDs() を使うこと。
+	SessionChain  []RuntimeSessionID `json:"session_chain,omitempty"`
+	Status        Status             `json:"status"`
+	FinishedAt    *time.Time         `json:"finished_at,omitempty"`
+	PID           int                `json:"pid,omitempty"`
+	TerminalTitle string             `json:"terminal_title,omitempty"` // OSC 0/2 で設定されたターミナルタイトル（セッション一覧表示用）
+	BookmarkName  string             `json:"bookmark_name,omitempty"`  // jj の最近接ブックマーク名（セッション一覧表示用）
 	// Kill 時に保存した @ / @- の change_id。Resume 時のワークスペース再作成で使う（ADR 009）。
 	// 常にペアで更新すること — setLastJJRevisionsPairLocked() を通じて書き込む。
 	LastJJRevision       string `json:"last_jj_revision,omitempty"`
@@ -462,16 +462,23 @@ func (s *Session) GetStructuredLogs() []usage.LogEntry {
 
 // Snapshot is a read-only copy of session state, safe to use without locks.
 type Snapshot struct {
-	ID              DeckSessionID
-	Name            string
-	RepoPath        string
-	RepoName        string
-	WorkspacePath   string
-	SubProjectDir   string
-	ClaudeSessionID ClaudeSessionID
-	// PriorClaudeIDs contains all historical Claude Code session IDs except the current one,
+	ID               DeckSessionID
+	Name             string
+	RepoPath         string
+	RepoName         string
+	WorkspacePath    string
+	SubProjectDir    string
+	RuntimeSessionID RuntimeSessionID
+	// RuntimeSessionIDs contains all historical runtime session IDs except the current one,
 	// in chronological order. Populated from SessionChain[:-1].
-	PriorClaudeIDs []ClaudeSessionID
+	PriorRuntimeIDs []RuntimeSessionID
+	// ClaudeSessionID is retained for compatibility with UI/preview code that
+	// has not yet been renamed.
+	//
+	// Deprecated: use RuntimeSessionID.
+	ClaudeSessionID RuntimeSessionID
+	// Deprecated: use PriorRuntimeIDs.
+	PriorClaudeIDs []RuntimeSessionID
 	// ClearCount is the number of /clear (or compact) operations performed in
 	// this session. 0 means the original session; 1 means cleared once, etc.
 	// Derived from len(SessionChain) - 1.
@@ -480,8 +487,8 @@ type Snapshot struct {
 	// It becomes false when watchProcess detects exit and clears Session.process.
 	// Used by Phase() to distinguish "terminal status but process still running"
 	// (rare race window) from "truly finished".
-	HasProcess bool
-	Display    DisplayChannel
+	HasProcess     bool
+	Display        DisplayChannel
 	Status         Status
 	Prompt         string
 	PermissionMode string
@@ -547,74 +554,90 @@ func (s *Session) Snapshot() Snapshot {
 	}
 
 	snap := Snapshot{
-		ID:              s.ID,
-		Name:            s.Name,
-		RepoPath:        s.RepoPath,
-		RepoName:        s.RepoName,
-		WorkspacePath:   s.WorkspacePath,
-		SubProjectDir:   s.SubProjectDir,
-		ClaudeSessionID: s.CurrentClaudeID(),
-		PriorClaudeIDs:  s.PriorClaudeIDs(),
-		ClearCount:      max(0, len(s.SessionChain)-1),
-		HasProcess:      s.process.Load() != nil,
-		Display:         s.displayChannel(),
-		Status:          s.Status,
-		Prompt:          s.Prompt,
-		PermissionMode:  s.PermissionMode,
-		StartedAt:       s.StartedAt,
-		LastActivity:    s.LastActivity,
-		FinishedAt:      finishedAt,
-		TokenUsage:      s.TokenUsage,
-		CurrentTool:     s.CurrentTool,
-		ErrorMessage:    s.ErrorMessage,
-		TerminalTitle:   s.TerminalTitle,
-		BookmarkName:    s.BookmarkName,
-		Elapsed:         elapsed,
+		ID:               s.ID,
+		Name:             s.Name,
+		RepoPath:         s.RepoPath,
+		RepoName:         s.RepoName,
+		WorkspacePath:    s.WorkspacePath,
+		SubProjectDir:    s.SubProjectDir,
+		RuntimeSessionID: s.CurrentRuntimeID(),
+		PriorRuntimeIDs:  s.PriorRuntimeIDs(),
+		ClaudeSessionID:  s.CurrentRuntimeID(),
+		PriorClaudeIDs:   s.PriorRuntimeIDs(),
+		ClearCount:       max(0, len(s.SessionChain)-1),
+		HasProcess:       s.process.Load() != nil,
+		Display:          s.displayChannel(),
+		Status:           s.Status,
+		Prompt:           s.Prompt,
+		PermissionMode:   s.PermissionMode,
+		StartedAt:        s.StartedAt,
+		LastActivity:     s.LastActivity,
+		FinishedAt:       finishedAt,
+		TokenUsage:       s.TokenUsage,
+		CurrentTool:      s.CurrentTool,
+		ErrorMessage:     s.ErrorMessage,
+		TerminalTitle:    s.TerminalTitle,
+		BookmarkName:     s.BookmarkName,
+		Elapsed:          elapsed,
 	}
 	return snap
 }
 
-// CurrentClaudeID returns the active Claude Code session ID, or "" if none.
-// Must be called with mu held (at least for reading), or use Snapshot.ClaudeSessionID.
-func (s *Session) CurrentClaudeID() ClaudeSessionID {
+// CurrentRuntimeID returns the active runtime session ID, or "" if none.
+// Must be called with mu held (at least for reading), or use Snapshot.RuntimeSessionID.
+func (s *Session) CurrentRuntimeID() RuntimeSessionID {
 	if len(s.SessionChain) == 0 {
 		return ""
 	}
 	return s.SessionChain[len(s.SessionChain)-1]
 }
 
-// ChainIDs returns a copy of all Claude Code session IDs in this session's chain,
+// CurrentClaudeID returns the active runtime session ID, or "" if none.
+//
+// Deprecated: use CurrentRuntimeID.
+func (s *Session) CurrentClaudeID() RuntimeSessionID {
+	return s.CurrentRuntimeID()
+}
+
+// ChainIDs returns a copy of all runtime session IDs in this session's chain,
 // from oldest to newest. The last element is the current active ID.
 // Thread-safe; acquires mu for reading.
-func (s *Session) ChainIDs() []ClaudeSessionID {
+func (s *Session) ChainIDs() []RuntimeSessionID {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	ids := make([]ClaudeSessionID, len(s.SessionChain))
+	ids := make([]RuntimeSessionID, len(s.SessionChain))
 	copy(ids, s.SessionChain)
 	return ids
 }
 
-// PriorClaudeIDs returns all historical Claude Code session IDs excluding the current one.
+// PriorRuntimeIDs returns all historical runtime session IDs excluding the current one.
 // Returns nil if there is no history.
 // Must be called with mu held for reading (RLock is sufficient).
 // Calling from within an already-held RLock is safe: sync.RWMutex allows multiple
 // concurrent RLock holders. Snapshot() calls this while holding mu.RLock().
-func (s *Session) PriorClaudeIDs() []ClaudeSessionID {
+func (s *Session) PriorRuntimeIDs() []RuntimeSessionID {
 	if len(s.SessionChain) <= 1 {
 		return nil
 	}
-	prior := make([]ClaudeSessionID, len(s.SessionChain)-1)
+	prior := make([]RuntimeSessionID, len(s.SessionChain)-1)
 	copy(prior, s.SessionChain[:len(s.SessionChain)-1])
 	return prior
 }
 
+// PriorClaudeIDs returns all historical runtime session IDs excluding the current one.
+//
+// Deprecated: use PriorRuntimeIDs.
+func (s *Session) PriorClaudeIDs() []RuntimeSessionID {
+	return s.PriorRuntimeIDs()
+}
+
 // appendToChainLocked appends newID to SessionChain under an already-held write lock.
 // No-op if newID is empty or already the current (last) ID.
-func (s *Session) appendToChainLocked(newID ClaudeSessionID) {
+func (s *Session) appendToChainLocked(newID RuntimeSessionID) {
 	if newID == "" {
 		return
 	}
-	if s.CurrentClaudeID() == newID {
+	if s.CurrentRuntimeID() == newID {
 		return
 	}
 	s.SessionChain = append(s.SessionChain, newID)

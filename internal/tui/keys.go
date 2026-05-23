@@ -284,8 +284,8 @@ func (m *Model) forkSelected() tea.Cmd {
 	}
 
 	snap := sess.Snapshot()
-	if snap.ClaudeSessionID == "" {
-		m.statusMsg = "ClaudeSessionID がないためフォークできません"
+	if snap.RuntimeSessionID == "" {
+		m.statusMsg = "RuntimeSessionID がないためフォークできません"
 		return clearStatusCmd()
 	}
 
@@ -352,5 +352,3 @@ func (m *Model) openTerminal() tea.Cmd {
 	m.statusMsg = fmt.Sprintf("ターミナルを開きました: %s", workDir)
 	return clearStatusCmd()
 }
-
-

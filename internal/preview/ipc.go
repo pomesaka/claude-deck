@@ -27,18 +27,24 @@ const selectionFileName = "preview-selection"
 // DeckSessionID は内部トレース用（preview 側のルックアップキーとしては使用しない）。
 // Display が空文字列の場合は「選択なし」を意味する。
 type PreviewSpec struct {
-	DeckSessionID   session.DeckSessionID     `json:"deck_session_id"`
-	Name            string                    `json:"name"`
-	RepoName        string                    `json:"repo_name"`
-	WorkspacePath   string                    `json:"workspace_path"`
-	ClaudeSessionID session.ClaudeSessionID   `json:"claude_session_id"`
-	PriorClaudeIDs  []session.ClaudeSessionID `json:"prior_claude_ids"`
-	ClearCount      int                       `json:"clear_count"`
-	Status          string                    `json:"status"`
-	Display         string                    `json:"display"` // "jsonl" | "tmux" | ""
-	CurrentTool     string                    `json:"current_tool"`
-	ErrorMessage    string                    `json:"error_message"`
-	NeedsAttention  bool                      `json:"needs_attention"`
+	DeckSessionID    session.DeckSessionID      `json:"deck_session_id"`
+	Name             string                     `json:"name"`
+	RepoName         string                     `json:"repo_name"`
+	WorkspacePath    string                     `json:"workspace_path"`
+	RuntimeSessionID session.RuntimeSessionID   `json:"runtime_session_id"`
+	PriorRuntimeIDs  []session.RuntimeSessionID `json:"prior_runtime_ids"`
+	// Backward-compatible fields used by older preview processes while the
+	// IPC protocol moves to runtime-neutral naming.
+	//
+	// Deprecated: use RuntimeSessionID and PriorRuntimeIDs.
+	ClaudeSessionID session.RuntimeSessionID   `json:"claude_session_id,omitempty"`
+	PriorClaudeIDs  []session.RuntimeSessionID `json:"prior_claude_ids,omitempty"`
+	ClearCount      int                        `json:"clear_count"`
+	Status          string                     `json:"status"`
+	Display         string                     `json:"display"` // "jsonl" | "tmux" | ""
+	CurrentTool     string                     `json:"current_tool"`
+	ErrorMessage    string                     `json:"error_message"`
+	NeedsAttention  bool                       `json:"needs_attention"`
 	// JSONL パスは main プロセス側で解決済み。preview は claude projects を探索しない。
 	JSONLPath       string   `json:"jsonl_path"`
 	PriorJSONLPaths []string `json:"prior_jsonl_paths"` // /clear 履歴（古い順）
