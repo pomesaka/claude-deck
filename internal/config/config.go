@@ -231,15 +231,25 @@ func Load() (*Config, error) {
 // LoadFrom reads configuration from the specified path.
 func LoadFrom(path string) (*Config, error) {
 	cfg := Default()
+	explicit := struct {
+		DataDir string `toml:"data_dir"`
+		Tmux    struct {
+			SessionName string `toml:"session_name"`
+		} `toml:"tmux"`
+	}{}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			applyRuntimeScopedDefaults(cfg, explicit.DataDir != "", explicit.Tmux.SessionName != "")
 			return cfg, nil
 		}
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
 
+	if err := toml.Unmarshal(data, &explicit); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
@@ -247,8 +257,21 @@ func LoadFrom(path string) (*Config, error) {
 	if cfg.DataDir == "" {
 		cfg.DataDir = DefaultDataDir()
 	}
+	applyRuntimeScopedDefaults(cfg, explicit.DataDir != "", explicit.Tmux.SessionName != "")
 
 	return cfg, nil
+}
+
+func applyRuntimeScopedDefaults(cfg *Config, explicitDataDir, explicitTmuxSession bool) {
+	if cfg.RuntimeProvider() != "codex" {
+		return
+	}
+	if !explicitDataDir && cfg.DataDir == DefaultDataDir() {
+		cfg.DataDir += "-codex"
+	}
+	if !explicitTmuxSession && (cfg.Tmux.SessionName == "" || cfg.Tmux.SessionName == "claude-deck") {
+		cfg.Tmux.SessionName = "claude-deck-codex"
+	}
 }
 
 // WorkspaceSymlinks returns the list of extra symlink paths configured for the given repository.

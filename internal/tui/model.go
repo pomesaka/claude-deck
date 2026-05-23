@@ -554,6 +554,7 @@ func (m *Model) buildPreviewSpecFromSnap(snap session.Snapshot) preview.PreviewS
 		CurrentTool:      snap.CurrentTool,
 		ErrorMessage:     snap.ErrorMessage,
 		NeedsAttention:   snap.Status.NeedsAttention(),
+		TranscriptLayout: m.config.RuntimeProvider(),
 		JSONLPath:        jsonlPath,
 		PriorJSONLPaths:  priorPaths,
 	}
@@ -580,14 +581,17 @@ func (m *Model) switchRightPane(sid session.DeckSessionID, focusRight bool) tea.
 	if sess := m.manager.GetSession(sid); sess != nil {
 		snap := sess.Snapshot()
 		display = snap.Display
-		if display != session.DisplayTmux {
+		if display != session.DisplayTmux || !focusRight {
 			spec = m.buildPreviewSpecFromSnap(snap)
+			if display == session.DisplayTmux && !focusRight && spec.JSONLPath != "" {
+				spec.Display = session.DisplayJSONL.String()
+			}
 		}
 	}
 	dataDir := m.config.DataDir
 	mgr := m.manager
 	return func() tea.Msg {
-		if display == session.DisplayTmux {
+		if display == session.DisplayTmux && focusRight {
 			_ = mgr.FocusSession(sid)
 			if focusRight {
 				_ = ghostty.FocusRight()

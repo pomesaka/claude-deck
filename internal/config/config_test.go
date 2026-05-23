@@ -205,6 +205,61 @@ func TestRuntimeProvider(t *testing.T) {
 	}
 }
 
+func TestLoadFrom_CodexRuntimeScopesDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	content := `
+[runtime]
+provider = "codex"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		t.Fatalf("LoadFrom error: %v", err)
+	}
+
+	if cfg.DataDir != DefaultDataDir()+"-codex" {
+		t.Fatalf("DataDir = %q, want %q", cfg.DataDir, DefaultDataDir()+"-codex")
+	}
+	if cfg.Tmux.SessionName != "claude-deck-codex" {
+		t.Fatalf("Tmux.SessionName = %q, want claude-deck-codex", cfg.Tmux.SessionName)
+	}
+}
+
+func TestLoadFrom_CodexRuntimeKeepsExplicitDataDirAndTmuxSession(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	content := `
+data_dir = "/tmp/custom-deck"
+
+[runtime]
+provider = "codex"
+
+[tmux]
+session_name = "custom-session"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		t.Fatalf("LoadFrom error: %v", err)
+	}
+
+	if cfg.DataDir != "/tmp/custom-deck" {
+		t.Fatalf("DataDir = %q, want /tmp/custom-deck", cfg.DataDir)
+	}
+	if cfg.Tmux.SessionName != "custom-session" {
+		t.Fatalf("Tmux.SessionName = %q, want custom-session", cfg.Tmux.SessionName)
+	}
+}
+
 func TestLoadFrom_InvalidTOML(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad.toml")

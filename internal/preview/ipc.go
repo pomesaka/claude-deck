@@ -37,14 +37,15 @@ type PreviewSpec struct {
 	// IPC protocol moves to runtime-neutral naming.
 	//
 	// Deprecated: use RuntimeSessionID and PriorRuntimeIDs.
-	ClaudeSessionID session.RuntimeSessionID   `json:"claude_session_id,omitempty"`
-	PriorClaudeIDs  []session.RuntimeSessionID `json:"prior_claude_ids,omitempty"`
-	ClearCount      int                        `json:"clear_count"`
-	Status          string                     `json:"status"`
-	Display         string                     `json:"display"` // "jsonl" | "tmux" | ""
-	CurrentTool     string                     `json:"current_tool"`
-	ErrorMessage    string                     `json:"error_message"`
-	NeedsAttention  bool                       `json:"needs_attention"`
+	ClaudeSessionID  session.RuntimeSessionID   `json:"claude_session_id,omitempty"`
+	PriorClaudeIDs   []session.RuntimeSessionID `json:"prior_claude_ids,omitempty"`
+	ClearCount       int                        `json:"clear_count"`
+	Status           string                     `json:"status"`
+	Display          string                     `json:"display"` // "jsonl" | "tmux" | ""
+	CurrentTool      string                     `json:"current_tool"`
+	ErrorMessage     string                     `json:"error_message"`
+	NeedsAttention   bool                       `json:"needs_attention"`
+	TranscriptLayout string                     `json:"transcript_layout,omitempty"` // "claude" | "codex"
 	// JSONL パスは main プロセス側で解決済み。preview は claude projects を探索しない。
 	JSONLPath       string   `json:"jsonl_path"`
 	PriorJSONLPaths []string `json:"prior_jsonl_paths"` // /clear 履歴（古い順）

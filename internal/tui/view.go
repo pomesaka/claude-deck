@@ -43,13 +43,14 @@ func (m Model) View() tea.View {
 
 func (m Model) renderHeader() string {
 	// Left: selected session status bar (kept open for future use when nothing is selected).
-	var statusBar string
+	runtimeBadge := dimStyle.Render("[" + m.config.RuntimeProvider() + "]")
+	statusBar := runtimeBadge
 	if m.selectedSnap != nil {
 		snap := *m.selectedSnap
 		icon := sessionStatusIcon(snap.Status)
 		name := lipgloss.NewStyle().Foreground(colorText).Bold(true).Render(snap.Name)
 		repo := dimStyle.Render("(" + snap.RepoName + ")")
-		statusBar = lipgloss.JoinHorizontal(lipgloss.Top, icon, " ", name, "  ", repo)
+		statusBar = lipgloss.JoinHorizontal(lipgloss.Top, runtimeBadge, " ", icon, " ", name, "  ", repo)
 	}
 	left := lipgloss.NewStyle().Padding(0, 1).Render(statusBar)
 
@@ -504,4 +505,3 @@ func padRightBg(s string, w int, bg lipgloss.Style) string {
 	}
 	return s + bg.Render(strings.Repeat(" ", w-cur))
 }
-
