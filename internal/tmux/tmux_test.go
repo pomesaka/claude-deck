@@ -15,35 +15,35 @@ func TestNewWindowArgs(t *testing.T) {
 			sessionName: "claude-deck",
 			windowName:  "abc123",
 			opts:        WindowOpts{},
-			want:        []string{"new-window", "-t", "claude-deck:", "-n", "abc123"},
+			want:        []string{"new-window", "-d", "-t", "claude-deck:", "-n", "abc123"},
 		},
 		{
 			name:        "with_command_only",
 			sessionName: "claude-deck",
 			windowName:  "sess1",
 			opts:        WindowOpts{Command: "claude --agent sess1"},
-			want:        []string{"new-window", "-t", "claude-deck:", "-n", "sess1", "claude --agent sess1"},
+			want:        []string{"new-window", "-d", "-t", "claude-deck:", "-n", "sess1", "claude --agent sess1"},
 		},
 		{
 			name:        "with_workdir_only",
 			sessionName: "claude-deck",
 			windowName:  "sess2",
 			opts:        WindowOpts{WorkDir: "/home/user/project"},
-			want:        []string{"new-window", "-t", "claude-deck:", "-n", "sess2", "-c", "/home/user/project"},
+			want:        []string{"new-window", "-d", "-t", "claude-deck:", "-n", "sess2", "-c", "/home/user/project"},
 		},
 		{
 			name:        "with_single_env",
 			sessionName: "claude-deck",
 			windowName:  "sess3",
 			opts:        WindowOpts{Env: []string{"CLAUDE_DECK_SESSION_ID=abc"}},
-			want:        []string{"new-window", "-t", "claude-deck:", "-n", "sess3", "-e", "CLAUDE_DECK_SESSION_ID=abc"},
+			want:        []string{"new-window", "-d", "-t", "claude-deck:", "-n", "sess3", "-e", "CLAUDE_DECK_SESSION_ID=abc"},
 		},
 		{
 			name:        "with_multiple_env",
 			sessionName: "claude-deck",
 			windowName:  "sess4",
 			opts:        WindowOpts{Env: []string{"FOO=bar", "BAZ=qux"}},
-			want:        []string{"new-window", "-t", "claude-deck:", "-n", "sess4", "-e", "FOO=bar", "-e", "BAZ=qux"},
+			want:        []string{"new-window", "-d", "-t", "claude-deck:", "-n", "sess4", "-e", "FOO=bar", "-e", "BAZ=qux"},
 		},
 		{
 			name:        "full_options",
@@ -55,7 +55,7 @@ func TestNewWindowArgs(t *testing.T) {
 				Env:     []string{"KEY=val"},
 			},
 			// order: target, name, workdir, env..., command
-			want: []string{"new-window", "-t", "my-session:", "-n", "full", "-c", "/tmp/project", "-e", "KEY=val", "claude"},
+			want: []string{"new-window", "-d", "-t", "my-session:", "-n", "full", "-c", "/tmp/project", "-e", "KEY=val", "claude"},
 		},
 		{
 			name:        "session_name_colon_suffix",
@@ -63,7 +63,7 @@ func TestNewWindowArgs(t *testing.T) {
 			windowName:  "win",
 			opts:        WindowOpts{},
 			// target must be "session:" (with trailing colon) to append to that session
-			want: []string{"new-window", "-t", "my-custom-session:", "-n", "win"},
+			want: []string{"new-window", "-d", "-t", "my-custom-session:", "-n", "win"},
 		},
 	}
 

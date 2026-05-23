@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/pomesaka/claude-deck/internal/debuglog"
+	"github.com/pomesaka/claude-deck/internal/ratelimits"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
@@ -117,10 +118,13 @@ func (m *Manager) handleFileWrite(ev usage.FileEvent) {
 
 func (m *Manager) applyRuntimeActivityFromJSONL(sess *Session, ev usage.FileEvent) {
 	activity := m.usage.ReadRuntimeActivity(ev.Path)
-	if activity.Kind == usage.RuntimeActivityNone && activity.CurrentTool == "" && !activity.ClearTool {
+	if activity.SessionID != "" && activity.SessionID != ev.SessionID {
 		return
 	}
-	if activity.SessionID != "" && activity.SessionID != ev.SessionID {
+	if activity.RateLimits != nil {
+		m.applyRuntimeRateLimits(activity.RateLimits)
+	}
+	if activity.Kind == usage.RuntimeActivityNone && activity.CurrentTool == "" && !activity.ClearTool {
 		return
 	}
 	if !sess.IsProcessAlive() {
@@ -137,6 +141,33 @@ func (m *Manager) applyRuntimeActivityFromJSONL(sess *Session, ev usage.FileEven
 		sess.SetCurrentTool(activity.CurrentTool)
 	} else if activity.ClearTool {
 		sess.SetCurrentTool("")
+	}
+}
+
+func (m *Manager) applyRuntimeRateLimits(limits *usage.RuntimeRateLimits) {
+	if limits == nil {
+		return
+	}
+	var status ratelimits.Status
+	if limits.FiveHourAvailable {
+		status.FiveHour = ratelimits.Window{
+			UsedPct:  limits.FiveHour.UsedPct,
+			ResetsAt: time.Unix(limits.FiveHour.ResetsAt, 0),
+		}
+		status.FiveHourAvailable = true
+	}
+	if limits.SevenDayAvailable {
+		status.SevenDay = ratelimits.Window{
+			UsedPct:  limits.SevenDay.UsedPct,
+			ResetsAt: time.Unix(limits.SevenDay.ResetsAt, 0),
+		}
+		status.SevenDayAvailable = true
+	}
+	if !status.FiveHourAvailable && !status.SevenDayAvailable {
+		return
+	}
+	if err := ratelimits.Save(m.config.DataDir, status); err != nil {
+		debuglog.Printf("[ratelimits] save failed: %v", err)
 	}
 }
 

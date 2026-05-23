@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/pomesaka/claude-deck/internal/ratelimits"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
@@ -49,5 +50,37 @@ func TestApplyRuntimeActivityFromJSONL_Codex(t *testing.T) {
 	}
 	if got := sess.Snapshot().CurrentTool; got != "" {
 		t.Fatalf("CurrentTool = %q, want empty", got)
+	}
+}
+
+func TestApplyRuntimeActivityFromJSONL_CodexRateLimits(t *testing.T) {
+	baseDir := t.TempDir()
+	dataDir := t.TempDir()
+	sessionID := "019e5353-bedb-7b62-8ce3-cbc4e1ca6c46"
+	dir := filepath.Join(baseDir, "2026", "05", "23")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-2026-05-23T14-34-17-"+sessionID+".jsonl")
+	if err := os.WriteFile(path, []byte(`{"timestamp":"2026-05-23T05:34:21.974Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":16.0,"window_minutes":300,"resets_at":1779547690},"secondary":{"used_percent":17.0,"window_minutes":10080,"resets_at":1780114955}}}}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Manager{
+		usage:  usage.NewCodexReader(baseDir),
+		config: ManagerConfig{DataDir: dataDir},
+	}
+	sess := NewSession("/repo", "repo")
+	sess.SessionChain = []RuntimeSessionID{RuntimeSessionID(sessionID)}
+
+	m.applyRuntimeActivityFromJSONL(sess, usage.FileEvent{SessionID: sessionID, Path: path})
+
+	got := ratelimits.Load(dataDir)
+	if !got.FiveHourAvailable || got.FiveHour.UsedPct != 16.0 || got.FiveHour.ResetsAt.Unix() != 1779547690 {
+		t.Fatalf("FiveHour = %#v", got.FiveHour)
+	}
+	if !got.SevenDayAvailable || got.SevenDay.UsedPct != 17.0 || got.SevenDay.ResetsAt.Unix() != 1780114955 {
+		t.Fatalf("SevenDay = %#v", got.SevenDay)
 	}
 }

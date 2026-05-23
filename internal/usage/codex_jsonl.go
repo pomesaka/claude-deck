@@ -29,6 +29,21 @@ type RuntimeActivity struct {
 	Kind        RuntimeActivityKind
 	CurrentTool string
 	ClearTool   bool
+	RateLimits  *RuntimeRateLimits
+}
+
+// RuntimeRateLimits is the runtime-agnostic projection of subscription limits.
+type RuntimeRateLimits struct {
+	FiveHour          RuntimeRateLimitWindow
+	FiveHourAvailable bool
+	SevenDay          RuntimeRateLimitWindow
+	SevenDayAvailable bool
+}
+
+// RuntimeRateLimitWindow holds a single runtime limit window.
+type RuntimeRateLimitWindow struct {
+	UsedPct  float64
+	ResetsAt int64
 }
 
 type codexEntry struct {
@@ -73,6 +88,17 @@ type codexTokenUsage struct {
 	OutputTokens             int `json:"output_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+}
+
+type codexRateLimits struct {
+	Primary   *codexRateLimitWindow `json:"primary"`
+	Secondary *codexRateLimitWindow `json:"secondary"`
+}
+
+type codexRateLimitWindow struct {
+	UsedPct       float64 `json:"used_percent"`
+	WindowMinutes int     `json:"window_minutes"`
+	ResetsAt      int64   `json:"resets_at"`
 }
 
 type codexResponseItem struct {
@@ -376,11 +402,26 @@ func (r *Reader) readCodexRuntimeActivity(path string) RuntimeActivity {
 	for scanner.Scan() {
 		next, ok := codexRuntimeActivityFromLine(scanner.Bytes())
 		if ok {
-			next.SessionID = activity.SessionID
-			activity = next
+			activity.merge(next)
 		}
 	}
 	return activity
+}
+
+func (a *RuntimeActivity) merge(next RuntimeActivity) {
+	sessionID := a.SessionID
+	if next.RateLimits != nil {
+		a.RateLimits = next.RateLimits
+	}
+	if next.Kind == RuntimeActivityNone && next.CurrentTool == "" && !next.ClearTool {
+		a.SessionID = sessionID
+		return
+	}
+	next.SessionID = sessionID
+	if next.RateLimits == nil {
+		next.RateLimits = a.RateLimits
+	}
+	*a = next
 }
 
 func codexRuntimeActivityFromLine(line []byte) (RuntimeActivity, bool) {
@@ -394,11 +435,16 @@ func codexRuntimeActivityFromLine(line []byte) (RuntimeActivity, bool) {
 		if json.Unmarshal(entry.Payload, &ev) != nil {
 			return RuntimeActivity{}, false
 		}
+		limits := codexRateLimitsFromRaw(ev.RateLimits)
 		switch ev.Type {
 		case "task_started":
-			return RuntimeActivity{Kind: RuntimeActivityRunning, ClearTool: true}, true
+			return RuntimeActivity{Kind: RuntimeActivityRunning, ClearTool: true, RateLimits: limits}, true
 		case "task_complete":
-			return RuntimeActivity{Kind: RuntimeActivityIdle, ClearTool: true}, true
+			return RuntimeActivity{Kind: RuntimeActivityIdle, ClearTool: true, RateLimits: limits}, true
+		case "token_count":
+			if limits != nil {
+				return RuntimeActivity{RateLimits: limits}, true
+			}
 		}
 	case "response_item":
 		var item codexResponseItem
@@ -413,4 +459,35 @@ func codexRuntimeActivityFromLine(line []byte) (RuntimeActivity, bool) {
 		}
 	}
 	return RuntimeActivity{}, false
+}
+
+func codexRateLimitsFromRaw(raw jsontext.Value) *RuntimeRateLimits {
+	if len(raw) == 0 {
+		return nil
+	}
+	var limits codexRateLimits
+	if json.Unmarshal(raw, &limits) != nil {
+		return nil
+	}
+	var out RuntimeRateLimits
+	applyCodexRateLimitWindow(&out, limits.Primary)
+	applyCodexRateLimitWindow(&out, limits.Secondary)
+	if !out.FiveHourAvailable && !out.SevenDayAvailable {
+		return nil
+	}
+	return &out
+}
+
+func applyCodexRateLimitWindow(out *RuntimeRateLimits, w *codexRateLimitWindow) {
+	if w == nil {
+		return
+	}
+	switch w.WindowMinutes {
+	case 300:
+		out.FiveHour = RuntimeRateLimitWindow{UsedPct: w.UsedPct, ResetsAt: w.ResetsAt}
+		out.FiveHourAvailable = true
+	case 10080:
+		out.SevenDay = RuntimeRateLimitWindow{UsedPct: w.UsedPct, ResetsAt: w.ResetsAt}
+		out.SevenDayAvailable = true
+	}
 }

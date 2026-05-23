@@ -40,16 +40,17 @@ type Status struct {
 
 // rateLimitsFile mirrors the JSON written by the statusline script.
 type rateLimitsFile struct {
-	RateLimits *struct {
-		FiveHour *struct {
-			UsedPct  float64 `json:"used_percentage"`
-			ResetsAt int64   `json:"resets_at"`
-		} `json:"five_hour"`
-		SevenDay *struct {
-			UsedPct  float64 `json:"used_percentage"`
-			ResetsAt int64   `json:"resets_at"`
-		} `json:"seven_day"`
-	} `json:"rate_limits"`
+	RateLimits *rateLimitsPayload `json:"rate_limits"`
+}
+
+type rateLimitsPayload struct {
+	FiveHour *rateLimitWindowFile `json:"five_hour,omitempty"`
+	SevenDay *rateLimitWindowFile `json:"seven_day,omitempty"`
+}
+
+type rateLimitWindowFile struct {
+	UsedPct  float64 `json:"used_percentage"`
+	ResetsAt int64   `json:"resets_at"`
 }
 
 const rateLimitsFileName = "rate-limits.json"
@@ -84,6 +85,42 @@ func parse(data []byte) Status {
 		s.SevenDayAvailable = true
 	}
 	return s
+}
+
+// Save writes Status to DataDir/rate-limits.json in the same shape Load reads.
+func Save(dataDir string, s Status) error {
+	f := rateLimitsFile{RateLimits: &rateLimitsPayload{}}
+	if s.FiveHourAvailable {
+		f.RateLimits.FiveHour = &rateLimitWindowFile{
+			UsedPct:  s.FiveHour.UsedPct,
+			ResetsAt: s.FiveHour.ResetsAt.Unix(),
+		}
+	}
+	if s.SevenDayAvailable {
+		f.RateLimits.SevenDay = &rateLimitWindowFile{
+			UsedPct:  s.SevenDay.UsedPct,
+			ResetsAt: s.SevenDay.ResetsAt.Unix(),
+		}
+	}
+
+	data, err := json.Marshal(f)
+	if err != nil {
+		return fmt.Errorf("marshaling rate limits: %w", err)
+	}
+
+	path := RateLimitsFilePath(dataDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating rate limits dir: %w", err)
+	}
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("writing rate limits temp file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("renaming rate limits file: %w", err)
+	}
+	return nil
 }
 
 // Watch monitors DataDir/rate-limits.json via fsnotify and calls onUpdate whenever

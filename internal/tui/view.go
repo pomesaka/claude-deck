@@ -59,14 +59,24 @@ func (m Model) renderHeader() string {
 	if m.attentionCount > 0 {
 		badge = statusApproveStyle.Render(fmt.Sprintf(" [%d asking...]", m.attentionCount))
 	}
-	right := badge
-	if usage := m.renderRateLimits(); usage != "" {
-		right = lipgloss.JoinHorizontal(lipgloss.Top, right, "  ", usage)
+	firstLine := left
+	if badge != "" {
+		firstLine = lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", badge)
 	}
-	if right == "" {
-		return left
+
+	usage := m.renderRateLimits()
+	if usage == "" {
+		return firstLine
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
+	secondLine := lipgloss.NewStyle().Padding(0, 1).Render(usage)
+	return lipgloss.JoinVertical(lipgloss.Left, firstLine, secondLine)
+}
+
+func (m Model) headerLineCount() int {
+	if m.renderRateLimits() == "" {
+		return 1
+	}
+	return 2
 }
 
 // sessionStatusIcon returns a colored "●" for the given status.
@@ -90,7 +100,7 @@ func sessionStatusIcon(s session.Status) string {
 }
 
 func (m Model) renderMain() string {
-	contentHeight := m.height - 2
+	contentHeight := m.height - m.headerLineCount() - 1
 	if contentHeight < 3 {
 		contentHeight = 3
 	}

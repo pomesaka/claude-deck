@@ -121,3 +121,25 @@ func TestCodexRuntimeActivity(t *testing.T) {
 		t.Fatal("ClearTool = false, want true")
 	}
 }
+
+func TestCodexRuntimeActivityRateLimits(t *testing.T) {
+	r, baseDir := setupCodexReader(t)
+	sessionID := "019e5353-bedb-7b62-8ce3-cbc4e1ca6c46"
+	path := writeCodexJSONL(t, baseDir, sessionID, `{"timestamp":"2026-05-23T05:34:21.974Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-05-23T05:34:22.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":16.0,"window_minutes":300,"resets_at":1779547690},"secondary":{"used_percent":17.0,"window_minutes":10080,"resets_at":1780114955}}}}
+`)
+
+	got := r.ReadRuntimeActivity(path)
+	if got.Kind != RuntimeActivityRunning {
+		t.Fatalf("Kind = %v, want RuntimeActivityRunning", got.Kind)
+	}
+	if got.RateLimits == nil {
+		t.Fatal("RateLimits = nil, want limits")
+	}
+	if !got.RateLimits.FiveHourAvailable || got.RateLimits.FiveHour.UsedPct != 16.0 || got.RateLimits.FiveHour.ResetsAt != 1779547690 {
+		t.Fatalf("FiveHour = %#v", got.RateLimits.FiveHour)
+	}
+	if !got.RateLimits.SevenDayAvailable || got.RateLimits.SevenDay.UsedPct != 17.0 || got.RateLimits.SevenDay.ResetsAt != 1780114955 {
+		t.Fatalf("SevenDay = %#v", got.RateLimits.SevenDay)
+	}
+}
