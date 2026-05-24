@@ -65,19 +65,19 @@ func newExternalSession(info *usage.SessionInfo) *Session { //nolint:unparam
 	name, repoPath, repoName, subProjectDir := resolveExternalSessionPaths(info.CWD, info.SessionID)
 
 	sess := &Session{
-		ID:            GenerateSessionID(),
-		Name:          name,
-		RepoPath:      repoPath,
-		RepoName:      repoName,
-		WorkspacePath: info.CWD,
-		SubProjectDir: subProjectDir,
-		SessionChain:  []ClaudeSessionID{ClaudeSessionID(info.SessionID)},
-		Status:        StatusUnmanaged,
-		Prompt:          info.Prompt,
-		PermissionMode:  info.PermissionMode,
-		StartedAt:       info.StartedAt,
-		LastActivity:    info.LastActivity,
-		TokenUsage: TokenUsageFromStats(info.Tokens),
+		ID:             GenerateSessionID(),
+		Name:           name,
+		RepoPath:       repoPath,
+		RepoName:       repoName,
+		WorkspacePath:  info.CWD,
+		SubProjectDir:  subProjectDir,
+		SessionChain:   []ClaudeSessionID{ClaudeSessionID(info.SessionID)},
+		Status:         StatusUnmanaged,
+		Prompt:         info.Prompt,
+		PermissionMode: info.PermissionMode,
+		StartedAt:      info.StartedAt,
+		LastActivity:   info.LastActivity,
+		TokenUsage:     TokenUsageFromStats(info.Tokens),
 	}
 	// FinishedAt は「プロセスが終了した時刻」であり、「最後に JSONL が更新された時刻」ではない。
 	// 外部セッションはプロセスが終了したかどうか不明（JSONL が止まっているだけかもしれない）。
@@ -196,15 +196,24 @@ func (m *Manager) handleNewFile(ev usage.FileEvent) {
 	}
 
 	sess := newExternalSession(info)
+	var changed *Session
 
 	m.mu.Lock()
 	// Double-check: DiscoverExternalSessions との競合で重複を防ぐ
-	if !m.hasClaudeSessionID(csID) && !m.hasManagedSessionAtWorkspaceLocked(info.CWD) {
+	if m.hasClaudeSessionID(csID) {
+		// already tracked
+	} else if adopted := m.adoptRuntimeIDForManagedSessionLocked(info); adopted != nil {
+		changed = adopted
+	} else if !m.hasManagedSessionAtWorkspaceLocked(info.CWD) {
 		m.sessions[sess.ID] = sess
+		changed = sess
 	}
 	m.mu.Unlock()
 
-	m.notifyChange()
+	if changed != nil {
+		m.persist(changed)
+		m.notifyChange(changed.ID)
+	}
 }
 
 // DiscoverExternalSessions scans Claude Code JSONL files and imports
@@ -217,6 +226,7 @@ func (m *Manager) DiscoverExternalSessions() (added int, hasMore bool) {
 	known := m.knownClaudeSessionIDs()
 
 	added = 0
+	changedAny := false
 	for _, info := range allInfos {
 		csID := ClaudeSessionID(info.SessionID)
 		if known[csID] {
@@ -224,6 +234,7 @@ func (m *Manager) DiscoverExternalSessions() (added int, hasMore bool) {
 		}
 
 		sess := newExternalSession(info)
+		var changed *Session
 
 		m.mu.Lock()
 		// Double-check: handleNewFile との競合で重複を防ぐ
@@ -231,19 +242,75 @@ func (m *Manager) DiscoverExternalSessions() (added int, hasMore bool) {
 		// 外部セッションを誤って生成しないようワークスペースパスでもチェックする。
 		if m.hasClaudeSessionID(csID) {
 			debuglog.Printf("[discover] skipping duplicate session %s (known claude ID)", info.SessionID)
+		} else if adopted := m.adoptRuntimeIDForManagedSessionLocked(info); adopted != nil {
+			debuglog.Printf("[discover] adopted runtime session %s for deck session %s", info.SessionID, adopted.ID)
+			changed = adopted
 		} else if m.hasManagedSessionAtWorkspaceLocked(info.CWD) {
 			debuglog.Printf("[discover] skipping session %s: active managed session at %s", info.SessionID, info.CWD)
 		} else {
 			m.sessions[sess.ID] = sess
+			changed = sess
 			added++
 		}
 		m.mu.Unlock()
+
+		if changed != nil {
+			m.persist(changed)
+			changedAny = true
+		}
 	}
 
-	if added > 0 {
+	if added > 0 || changedAny {
 		m.notifyChange()
 	}
 	// 取得件数が limit に達したら続きがある可能性がある
 	hasMore = len(allInfos) == m.config.MaxSessions
 	return added, hasMore
+}
+
+// adoptRuntimeIDForManagedSessionLocked attaches a discovered runtime session ID
+// to a claude-deck managed session that was launched before the runtime wrote
+// its JSONL metadata. Claude Code normally fills SessionChain via hooks; Codex
+// has no equivalent hook path, so JSONL discovery is the authoritative pairing
+// source for managed Codex sessions.
+//
+// Caller must hold m.mu. The method follows Manager.mu -> Session.mu ordering.
+func (m *Manager) adoptRuntimeIDForManagedSessionLocked(info *usage.SessionInfo) *Session {
+	if info == nil || info.SessionID == "" {
+		return nil
+	}
+	runtimeID := RuntimeSessionID(info.SessionID)
+	name, repoPath, _, _ := resolveExternalSessionPaths(info.CWD, info.SessionID)
+
+	for _, sess := range m.sessions {
+		sess.mu.Lock()
+		if sess.Status == StatusUnmanaged || len(sess.SessionChain) > 0 {
+			sess.mu.Unlock()
+			continue
+		}
+
+		exactWorkspace := info.CWD != "" && sess.WorkspacePath == info.CWD
+		recreatedWorkspace := sess.WorkspacePath == "" && sess.Name == name && sess.RepoPath == repoPath
+		if !exactWorkspace && !recreatedWorkspace {
+			sess.mu.Unlock()
+			continue
+		}
+
+		sess.appendToChainLocked(runtimeID)
+		if sess.Prompt == "" {
+			sess.Prompt = info.Prompt
+		}
+		if sess.PermissionMode == "" {
+			sess.PermissionMode = info.PermissionMode
+		}
+		if sess.LastActivity.IsZero() {
+			sess.LastActivity = info.LastActivity
+		}
+		if sess.StartedAt.IsZero() {
+			sess.StartedAt = info.StartedAt
+		}
+		sess.mu.Unlock()
+		return sess
+	}
+	return nil
 }

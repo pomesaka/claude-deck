@@ -27,6 +27,9 @@ func buildCodexStartArgs(req StartRequest) []string {
 	if req.PermissionMode != "" && req.PermissionMode != "default" {
 		args = append(args, "--ask-for-approval", req.PermissionMode)
 	}
+	if hasCodexAddDir(req.AdditionalArgs) && !hasCodexSandbox(req.AdditionalArgs) {
+		args = append(args, "--sandbox", "workspace-write")
+	}
 	args = append(args, req.AdditionalArgs...)
 
 	switch req.Mode {
@@ -45,4 +48,22 @@ func buildCodexStartArgs(req StartRequest) []string {
 		args = append(args, req.Prompt)
 	}
 	return args
+}
+
+func hasCodexAddDir(args []string) bool {
+	for _, arg := range args {
+		if arg == "--add-dir" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCodexSandbox(args []string) bool {
+	for _, arg := range args {
+		if arg == "--sandbox" || arg == "-s" {
+			return true
+		}
+	}
+	return false
 }

@@ -53,6 +53,90 @@ func TestApplyRuntimeActivityFromJSONL_Codex(t *testing.T) {
 	}
 }
 
+func TestDiscoverExternalSessionsAdoptsRuntimeIDForManagedCodexWorkspace(t *testing.T) {
+	baseDir := t.TempDir()
+	sessionID := "019e5353-bedb-7b62-8ce3-cbc4e1ca6c46"
+	workDir := "/repo/workspace"
+	writeSessionCodexJSONL(t, baseDir, sessionID, workDir)
+
+	sess := NewSession("/repo", "repo")
+	sess.WorkspacePath = workDir
+
+	m := &Manager{
+		sessions: map[DeckSessionID]*Session{sess.ID: sess},
+		usage:    usage.NewCodexReader(baseDir),
+	}
+
+	added, _ := m.DiscoverExternalSessions()
+	if added != 0 {
+		t.Fatalf("added = %d, want 0", added)
+	}
+
+	got := sess.ChainIDs()
+	if len(got) != 1 || got[0] != RuntimeSessionID(sessionID) {
+		t.Fatalf("SessionChain = %v, want [%s]", got, sessionID)
+	}
+	if len(m.sessions) != 1 {
+		t.Fatalf("len(sessions) = %d, want 1", len(m.sessions))
+	}
+}
+
+func TestDiscoverExternalSessionsAdoptsRuntimeIDForKilledCodexWorkspace(t *testing.T) {
+	baseDir := t.TempDir()
+	mainRepo := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(mainRepo, ".jj", "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(t.TempDir(), "maika-650f")
+	if err := os.MkdirAll(filepath.Join(workspace, ".jj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".jj", "repo"), []byte(filepath.Join(mainRepo, ".jj", "repo")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionID := "019e5a19-f293-7521-87b3-2126f990dbdd"
+	writeSessionCodexJSONL(t, baseDir, sessionID, workspace)
+
+	sess := NewSession(mainRepo, filepath.Base(mainRepo))
+	sess.Name = filepath.Base(workspace)
+	sess.WorkspacePath = ""
+	sess.WorkspaceName = ""
+	sess.SetStatus(StatusCompleted)
+
+	m := &Manager{
+		sessions: map[DeckSessionID]*Session{sess.ID: sess},
+		usage:    usage.NewCodexReader(baseDir),
+	}
+
+	added, _ := m.DiscoverExternalSessions()
+	if added != 0 {
+		t.Fatalf("added = %d, want 0", added)
+	}
+
+	got := sess.ChainIDs()
+	if len(got) != 1 || got[0] != RuntimeSessionID(sessionID) {
+		t.Fatalf("SessionChain = %v, want [%s]", got, sessionID)
+	}
+	if len(m.sessions) != 1 {
+		t.Fatalf("len(sessions) = %d, want 1", len(m.sessions))
+	}
+}
+
+func writeSessionCodexJSONL(t *testing.T, baseDir, sessionID, cwd string) {
+	t.Helper()
+	dir := filepath.Join(baseDir, "2026", "05", "24")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-2026-05-24T22-08-30-"+sessionID+".jsonl")
+	data := `{"timestamp":"2026-05-24T13:08:30.000Z","type":"session_meta","payload":{"id":"` + sessionID + `","timestamp":"2026-05-24T13:08:30.000Z","cwd":"` + cwd + `"}}
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestApplyRuntimeActivityFromJSONL_CodexRateLimits(t *testing.T) {
 	baseDir := t.TempDir()
 	dataDir := t.TempDir()

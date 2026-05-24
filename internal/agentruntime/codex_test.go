@@ -21,7 +21,24 @@ func TestCodexRuntimeStartSpec(t *testing.T) {
 			},
 			want: StartSpec{
 				Command: "codex",
-				Args:    []string{"--cd", "/repo/app", "--add-dir", "/repo/shared"},
+				Args:    []string{"--cd", "/repo/app", "--sandbox", "workspace-write", "--add-dir", "/repo/shared"},
+			},
+		},
+		{
+			name: "add-dir keeps explicit sandbox",
+			req: StartRequest{
+				Mode:           LaunchNew,
+				WorkDir:        "/repo/app",
+				PermissionMode: "default",
+				AdditionalArgs: []string{"--sandbox", "danger-full-access", "--add-dir", "/repo/shared"},
+			},
+			want: StartSpec{
+				Command: "codex",
+				Args: []string{
+					"--cd", "/repo/app",
+					"--sandbox", "danger-full-access",
+					"--add-dir", "/repo/shared",
+				},
 			},
 		},
 		{

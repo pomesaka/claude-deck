@@ -278,9 +278,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "新規セッションを作成しました"
 			m.selectedID = msg.sessionID
 			cmds = append(cmds, m.refreshSessions()...)
-			// m.selectedID を refreshSessions() 前に設定するため updateSelected() で
-			// idChanged=false になる。switchRightPane で明示的に右ペインを切替する。
-			cmds = append(cmds, m.switchRightPane(msg.sessionID, true))
+			// CreateSession が成功した時点で tmux window は作成済み。
+			// 作成直後は JSONL hydrate や snapshot 更新順の影響で Display が一時的に
+			// JSONL に見えることがあるため、明示操作では tmux を直接選ぶ。
+			cmds = append(cmds, m.switchRightPaneToTmux(msg.sessionID, true))
 		}
 		cmds = append(cmds, clearStatusCmd())
 
@@ -289,9 +290,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "再開エラー: " + msg.err.Error()
 		} else {
 			m.statusMsg = "セッションを再開しました"
-			// ResumeSession が完了した時点でセッションは managed=true になっており
-			// DisplayTmux に遷移済み。switchRightPane が FocusSession + FocusRight を発行する。
-			cmds = append(cmds, m.switchRightPane(m.selectedID, true))
+			// ResumeSession が成功した時点で tmux window は作成済み。
+			cmds = append(cmds, m.switchRightPaneToTmux(m.selectedID, true))
 		}
 		cmds = append(cmds, clearStatusCmd())
 
@@ -302,8 +302,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "セッションをフォークしました"
 			m.selectedID = msg.sessionID
 			cmds = append(cmds, m.refreshSessions()...)
-			// sessionCreatedMsg と同じ理由で明示的に切替する。
-			cmds = append(cmds, m.switchRightPane(msg.sessionID, true))
+			// sessionCreatedMsg と同じ理由で tmux を直接選ぶ。
+			cmds = append(cmds, m.switchRightPaneToTmux(msg.sessionID, true))
 		}
 		cmds = append(cmds, clearStatusCmd())
 
@@ -599,6 +599,16 @@ func (m *Model) switchRightPane(sid session.DeckSessionID, focusRight bool) tea.
 	return m.executeRightPaneSwitch(sw)
 }
 
+func (m *Model) switchRightPaneToTmux(sid session.DeckSessionID, focusRight bool) tea.Cmd {
+	sw := rightPaneSwitch{
+		SessionID:  sid,
+		FocusRight: focusRight,
+		Target:     rightPaneTmux,
+		Generation: m.nextRightPaneGeneration(),
+	}
+	return m.executeRightPaneSwitch(sw)
+}
+
 func (m *Model) buildRightPaneSwitch(sid session.DeckSessionID, focusRight bool) rightPaneSwitch {
 	// Update フレーム内で display と spec を確定する。
 	// GetSession(sid) から直接 Snapshot を取得することで sid と selectedID が異なる場合
@@ -645,12 +655,16 @@ func (m *Model) executeRightPaneSwitch(sw rightPaneSwitch) tea.Cmd {
 			return nil
 		}
 		if sw.Target == rightPaneTmux {
-			_ = mgr.FocusSession(sw.SessionID)
+			if err := mgr.FocusSession(sw.SessionID); err != nil {
+				debuglog.Printf("[switchRightPane] tmux focus session=%s: %v", sw.SessionID, err)
+			}
 			if latest != nil && latest.Load() != sw.Generation {
 				return nil
 			}
 			if sw.FocusRight {
-				_ = ghostty.FocusRight()
+				if err := ghostty.FocusRight(); err != nil {
+					debuglog.Printf("[switchRightPane] ghostty focus right: %v", err)
+				}
 			}
 			return nil
 		}
@@ -660,12 +674,16 @@ func (m *Model) executeRightPaneSwitch(sw rightPaneSwitch) tea.Cmd {
 		if latest != nil && latest.Load() != sw.Generation {
 			return nil
 		}
-		_ = mgr.FocusPreviewWindow()
+		if err := mgr.FocusPreviewWindow(); err != nil {
+			debuglog.Printf("[switchRightPane] tmux focus preview: %v", err)
+		}
 		if latest != nil && latest.Load() != sw.Generation {
 			return nil
 		}
 		if sw.FocusRight {
-			_ = ghostty.FocusRight()
+			if err := ghostty.FocusRight(); err != nil {
+				debuglog.Printf("[switchRightPane] ghostty focus right: %v", err)
+			}
 		}
 		return nil
 	}
