@@ -191,7 +191,14 @@ func (r *Runner) GetWorkspaceRevisions(wsPath string) (atRev, parentRev string, 
 // (including @) that has a bookmark. Returns empty string if none found.
 func (r *Runner) GetNearestBookmark(dir string) (string, error) {
 	debuglog.Printf("[jj.GetNearestBookmark] dir=%q", dir)
-	cmd := exec.Command(r.command(), "log", "--no-graph", "--color=never",
+	// WHY --ignore-working-copy: ブランチ表示のために繰り返し呼ばれる読み取り専用の問い合わせ。
+	//   付けないと jj は毎回「作業コピーの snapshot」と「git の ref の取り込み」を操作として書き込み、
+	//   ユーザーやエージェントの jj git fetch / jj new と重なると操作が分岐して、ローカルの bookmark
+	//   （main 等）が意図しないコミットを指したまま統合される（jj 0.37.0・2026-09-30 に実際に 2 回発生）。
+	//   付けると操作を 1 件も書かないことを使い捨てのリポジトリで確認した
+	// WHY NOT GetWorkspaceRevisions にも付ける: Kill 直前の @ の記録は、編集途中のファイルを snapshot で
+	//   @ に取り込んでから行う必要がある（付けると未 snapshot の変更が workspace forget で失われる）
+	cmd := exec.Command(r.command(), "--ignore-working-copy", "log", "--no-graph", "--color=never",
 		"-r", "latest(::@ & bookmarks())",
 		"-T", "bookmarks")
 	cmd.Dir = dir
