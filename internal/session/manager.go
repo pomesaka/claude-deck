@@ -317,8 +317,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	}
 
 	debuglog.Printf("[CreateSession] starting process workDir=%q", actualWorkDir)
-	addDirArgs := m.buildAddDirArgs(repoPath)
-	additionalArgs := append([]string{"--agent", sess.Name}, addDirArgs...)
+	additionalArgs := m.buildSessionArgs(sess.Name, repoPath)
 
 	// StartProcess より前に m.sessions に登録する。
 	// tmux/PTY プロセスが起動してすぐ SessionStart フックを発火することがあり、
@@ -565,7 +564,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 	if err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
 		Command: m.config.ClaudeCommand,
 		WorkDir: workDir,
-		Args:    buildStartArgs(string(csID), false, "", m.config.DefaultPermissionMode, m.buildAddDirArgs(sess.RepoPath)),
+		Args:    buildStartArgs(string(csID), false, "", m.config.DefaultPermissionMode, m.buildSessionArgs(sessName, repoPath)),
 		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sessionID)},
 	}, nil); err != nil {
 		debuglog.Printf("[ResumeSession] StartProcess failed: %v", err)
@@ -636,7 +635,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	m.mu.Unlock()
 
 	// Backend handles AttachProcess internally.
-	forkArgs := append([]string{"--agent", sess.Name}, m.buildAddDirArgs(repoPath)...)
+	forkArgs := m.buildSessionArgs(sess.Name, repoPath)
 	if err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
 		Command: m.config.ClaudeCommand,
 		WorkDir: actualWorkDir,
@@ -951,6 +950,17 @@ func (m *Manager) copySessionsList() []*Session {
 	}
 	m.mu.RUnlock()
 	return list
+}
+
+// buildSessionArgs returns the flags shared by every launch mode (create / resume / fork):
+// --name <name> followed by the --add-dir pairs for the repository.
+// name が空のときは --name を付けない（空文字の表示名を Claude Code に渡さないため）。
+func (m *Manager) buildSessionArgs(name, repoPath string) []string {
+	addDirArgs := m.buildAddDirArgs(repoPath)
+	if name == "" {
+		return addDirArgs
+	}
+	return append([]string{"--name", name}, addDirArgs...)
 }
 
 // buildAddDirArgs returns --add-dir flag pairs for the given repository path.
