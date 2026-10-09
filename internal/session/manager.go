@@ -291,6 +291,13 @@ func computeActualWorkDir(wsPath, subProjectDir string) string {
 // has started, so other processes neither mark the row exited for lacking a
 // window nor close it under the starting process.
 func (m *Manager) startNewSession(sess *Session, workDir string, args []string) error {
+	// WHY 起動前に確かめる: tmux は存在しない -c のディレクトリを指定されてもエラーにせず、
+	// ホームディレクトリでウィンドウを開く（tmux 3.6a で確認）。確かめないと Claude Code が
+	// 意図しない場所で動き始める。サブプロジェクトのディレクトリが、ワークスペースを作った
+	// リポジトリに含まれていないときに起きる（外側に別の jj リポジトリがある場合など）。
+	if info, err := os.Stat(workDir); err != nil || !info.IsDir() {
+		return fmt.Errorf("作業ディレクトリが見つかりません: %s", workDir)
+	}
 	sess.mu.RLock()
 	rec := sess.recordLocked()
 	sess.mu.RUnlock()
@@ -373,7 +380,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	args := buildStartArgs("", false, m.config.DefaultPermissionMode, m.buildSessionArgs(sess.Name, repoPath))
 	if err := m.startNewSession(sess, actualWorkDir, args); err != nil {
 		if withWorkspace {
-			_ = m.jj().ForgetWorkspace(repoPath, sess.Name)
+			m.discardWorkspace(repoPath, sess.Name)
 		}
 		return nil, err
 	}
@@ -655,7 +662,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 
 	args := buildStartArgs(string(srcClaudeID), true, m.config.DefaultPermissionMode, m.buildSessionArgs(sess.Name, repoPath))
 	if err := m.startNewSession(sess, actualWorkDir, args); err != nil {
-		_ = m.jj().ForgetWorkspace(repoPath, wsName)
+		m.discardWorkspace(repoPath, wsName)
 		return nil, fmt.Errorf("starting forked session: %w", err)
 	}
 	return m.GetSession(sess.ID), nil
@@ -784,6 +791,14 @@ func (m *Manager) cleanupWorkspace(repoPath, wsName, wsRootPath string) string {
 		}
 	}
 	return strings.Join(warnings, "; ")
+}
+
+// discardWorkspace removes a workspace created for a session that failed to start.
+func (m *Manager) discardWorkspace(repoPath, wsName string) {
+	wsRootPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
+	if w := m.cleanupWorkspace(repoPath, wsName, wsRootPath); w != "" {
+		debuglog.Printf("[discardWorkspace] %s", w)
+	}
 }
 
 // recreateWorkspace creates a new jj workspace for a session whose workspace was deleted.

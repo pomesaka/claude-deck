@@ -166,6 +166,22 @@ func TestCreateSession_WritesStoreBeforeReturning(t *testing.T) {
 	}
 }
 
+func TestCreateSession_MissingWorkDir(t *testing.T) {
+	m, be := newTestManager(t)
+	repo := t.TempDir()
+	missing := filepath.Join(repo, "not-there")
+
+	if _, err := m.CreateSession(context.Background(), repo, missing, false); err == nil {
+		t.Fatal("CreateSession in a missing directory succeeded")
+	}
+	if len(be.started) != 0 {
+		t.Errorf("a process was started: %+v", be.started)
+	}
+	if recs, _ := m.store.List(); len(recs) != 0 {
+		t.Errorf("store has rows after the refused create: %+v", recs)
+	}
+}
+
 func TestProcessOpts_WithoutDeckCommand(t *testing.T) {
 	m, _ := newTestManager(t)
 	opts := m.processOpts("abc", "/w", nil)
