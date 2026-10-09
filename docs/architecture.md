@@ -4,10 +4,12 @@
 
 ```
 cmd/claude-deck
-  └→ internal/tui        (TUI アプリケーション)
-       ├→ session         (セッション管理)
-       ├→ ghostty         (ターミナルランチャー)
-       └→ config          (設定)
+  ├→ internal/tui        (TUI アプリケーション)
+  │    ├→ session         (セッション管理)
+  │    ├→ ghostty         (ターミナルランチャー)
+  │    └→ config          (設定)
+  └→ internal/control    (CLI サブコマンド ↔ 起動中の TUI の Unix ソケット)
+       └→ session
 
 internal/session (Manager)
   ├→ hooks            (Claude Code フックイベント)
@@ -35,6 +37,10 @@ main() → run()
      c. manager.StartEventWatcher()     ← フックイベント監視
      d. manager.StartFileWatcher()      ← JSONL ファイル変更監視
      e. manager.StartNotifyLoop()       ← UI 更新通知 (60fps)
+     f. control.Serve()                 ← CLI からの new / list / close を受け付ける（ADR-010）
+
+main() → runCLI()                       ← 第 1 引数が new / list / close のとき
+  config.Load() → control.Call(dataDir/control.sock) → 応答を JSON で標準出力へ
 ```
 
 ## セッションライフサイクル

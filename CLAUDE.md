@@ -32,6 +32,7 @@ internal/
   ghostty/       Ghostty ターミナルランチャー
   jj/            Jujutsu ワークスペース管理
   claudecode/    Claude Code パス解決・trust 設定
+  control/       CLI サブコマンド（new / list / close）と起動中の TUI をつなぐ Unix ソケット
   debuglog/      デバッグログ
 ```
 
@@ -124,6 +125,16 @@ Completed / Error      (hook: Stop → Idle)
 | `/` | フィルタ |
 | `tab` | 次の要手動介入セッションへジャンプ |
 
+### CLI サブコマンド
+
+起動中の TUI に依頼して実行する（TUI が起動していなければエラー）。出力は JSON。詳細は [ADR-010](docs/adr/010-cli-control-socket.md)。
+
+| コマンド | 対応するキー |
+|------|------|
+| `claude-deck new [--dir DIR] [--no-workspace]` | `n`（`--no-workspace` は C-Enter） |
+| `claude-deck list` | 一覧表示 |
+| `claude-deck close <ID\|NAME>` | `x` |
+
 ### ディレクトリ構成
 
 ```
@@ -132,6 +143,7 @@ Completed / Error      (hook: Stop → Idle)
   sessions/                           セッション JSON メタデータ
   workspace/<encoded-repo>/<name>/    jj ワークスペース
   claude-deck-events.jsonl            フックイベントログ
+  control.sock                        CLI サブコマンドの依頼を受ける Unix ソケット（TUI 起動中のみ）
   debug.log                           デバッグログ
 ~/.claude/projects/<project>/<uuid>.jsonl   Claude Code JSONL
 ```

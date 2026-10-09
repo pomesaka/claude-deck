@@ -125,20 +125,17 @@ func (m *Manager) jj() *jj.Runner {
 // Assembles the CLI args for `claude` from semantic parameters, keeping backend
 // implementations decoupled from claude CLI flag semantics.
 //
-// The four launch modes map to:
+// The three launch modes map to:
 //   - resumeID != "" && forkSession  → --resume <id> --fork-session  (fork of an existing session)
 //   - resumeID != "" && !forkSession → --resume <id>                 (resume an existing session)
-//   - resumeID == "" && prompt != "" → -p <prompt>                   (new session with prompt)
-//   - resumeID == "" && prompt == "" → (no extra flags)              (new interactive session)
-func buildStartArgs(resumeID string, forkSession bool, prompt, permMode string, additionalArgs []string) []string {
+//   - resumeID == ""                 → (no extra flags)              (new interactive session)
+func buildStartArgs(resumeID string, forkSession bool, permMode string, additionalArgs []string) []string {
 	var args []string
 	if resumeID != "" {
 		args = append(args, "--resume", resumeID)
 		if forkSession {
 			args = append(args, "--fork-session")
 		}
-	} else if prompt != "" {
-		args = append(args, "-p", prompt)
 	}
 	if permMode != "" {
 		args = append(args, "--permission-mode", permMode)
@@ -330,7 +327,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	if err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
 		Command: m.config.ClaudeCommand,
 		WorkDir: actualWorkDir,
-		Args:    buildStartArgs("", false, "", m.config.DefaultPermissionMode, additionalArgs),
+		Args:    buildStartArgs("", false, m.config.DefaultPermissionMode, additionalArgs),
 		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
 	}, nil); err != nil {
 		debuglog.Printf("[CreateSession] StartProcess failed: %v", err)
@@ -564,7 +561,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 	if err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
 		Command: m.config.ClaudeCommand,
 		WorkDir: workDir,
-		Args:    buildStartArgs(string(csID), false, "", m.config.DefaultPermissionMode, m.buildSessionArgs(sessName, repoPath)),
+		Args:    buildStartArgs(string(csID), false, m.config.DefaultPermissionMode, m.buildSessionArgs(sessName, repoPath)),
 		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sessionID)},
 	}, nil); err != nil {
 		debuglog.Printf("[ResumeSession] StartProcess failed: %v", err)
@@ -639,7 +636,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	if err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
 		Command: m.config.ClaudeCommand,
 		WorkDir: actualWorkDir,
-		Args:    buildStartArgs(string(srcClaudeID), true, "", m.config.DefaultPermissionMode, forkArgs),
+		Args:    buildStartArgs(string(srcClaudeID), true, m.config.DefaultPermissionMode, forkArgs),
 		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
 	}, nil); err != nil {
 		m.mu.Lock()
@@ -937,6 +934,33 @@ func (m *Manager) ListSessions() []*Session {
 	}
 
 	return list
+}
+
+// FindSession looks up a session by deck session ID, falling back to its name.
+// Name は一意性が保証されない（外部セッションは ClaudeSessionID の先頭 8 文字など）ため、
+// 複数一致したときは推測で 1 つを選ばずエラーにする。
+func (m *Manager) FindSession(key string) (*Session, error) {
+	if sess := m.GetSession(DeckSessionID(key)); sess != nil {
+		return sess, nil
+	}
+	var matches []*Session
+	for _, s := range m.copySessionsList() {
+		if s.getName() == key {
+			matches = append(matches, s)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return nil, fmt.Errorf("session not found: %s", key)
+	case 1:
+		return matches[0], nil
+	default:
+		ids := make([]string, len(matches))
+		for i, s := range matches {
+			ids[i] = string(s.ID)
+		}
+		return nil, fmt.Errorf("session name %q is ambiguous; use one of the IDs: %s", key, strings.Join(ids, ", "))
+	}
 }
 
 // copySessionsList returns a snapshot of the sessions slice under m.mu.

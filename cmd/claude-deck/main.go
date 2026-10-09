@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/pomesaka/claude-deck/internal/claudecode"
 	"github.com/pomesaka/claude-deck/internal/config"
+	"github.com/pomesaka/claude-deck/internal/control"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/ghostty"
 	"github.com/pomesaka/claude-deck/internal/hooks"
@@ -38,6 +40,20 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+
+	if len(os.Args) > 1 {
+		if _, ok := cliCommands[os.Args[1]]; ok {
+			err := runCLI(os.Args[1], os.Args[2:])
+			if errors.Is(err, flag.ErrHelp) {
+				return
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
 
 	previewMode := flag.Bool("preview", false, "run in preview-only mode (JSONL log viewer, for tmux __preview__ window)")
 	flag.Parse()
@@ -186,6 +202,13 @@ func run() error {
 	}
 	if err := mgr.StartEventWatcher(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: event watcher: %v\n", err)
+	}
+
+	// claude-deck new / list / close からの依頼を受け付ける。失敗しても TUI の操作には影響しない。
+	if ln, err := control.Listen(cfg.DataDir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: control socket: %v\n", err)
+	} else {
+		control.Serve(ctx, ln, control.NewManagerHandler(ctx, mgr))
 	}
 
 	if _, err := p.Run(); err != nil {
