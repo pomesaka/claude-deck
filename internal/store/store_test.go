@@ -42,7 +42,7 @@ func TestStore_RoundTrip(t *testing.T) {
 				Prompt: "hello", PermissionMode: "plan",
 				StartedAt: time.Unix(1_700_000_000, 1), LastActivity: time.Unix(1_700_000_050, 2),
 				InputTokens: 1, OutputTokens: 2, CacheCreationInputTokens: 3, CacheReadInputTokens: 4,
-				EstimatedCostUSD: 0.5, ClosingAt: &closing,
+				EstimatedCostUSD: 0.5, ClosingAt: &closing, LaunchingAt: &finished,
 			},
 		},
 	}

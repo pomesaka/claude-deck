@@ -287,12 +287,14 @@ func computeActualWorkDir(wsPath, subProjectDir string) string {
 //
 // The row is inserted before the process starts: the process's hooks and the
 // TUI's orphan-window cleanup both look the session up in the store, and must
-// find it as soon as the window exists. PID stays 0 until the process has started,
-// which tells other processes that the launch is still in progress.
+// find it as soon as the window exists. LaunchingAt stays set until the process
+// has started, so other processes neither mark the row exited for lacking a
+// window nor close it under the starting process.
 func (m *Manager) startNewSession(sess *Session, workDir string, args []string) error {
 	sess.mu.RLock()
 	rec := sess.recordLocked()
 	sess.mu.RUnlock()
+	beginLaunch(&rec, time.Now())
 	if err := m.store.Insert(rec); err != nil {
 		return fmt.Errorf("saving session: %w", err)
 	}
@@ -307,7 +309,7 @@ func (m *Manager) startNewSession(sess *Session, workDir string, args []string) 
 
 	bookmark, _ := m.jj().GetNearestBookmark(workDir)
 	if _, err := m.store.Update(string(sess.ID), func(r *store.Record) error {
-		r.PID = pid
+		finishLaunch(r, pid)
 		if bookmark != "" {
 			r.BookmarkName = bookmark
 		}
@@ -433,6 +435,29 @@ func (m *Manager) MarkExited(sessionID DeckSessionID) error {
 	return err
 }
 
+// markVanished marks the session exited if, read again inside the transaction,
+// it is still unfinished with no close or launch in progress (see vanished).
+// Callers decide that the window is gone from a window list taken before; the
+// re-read catches a launch that started in between.
+func markVanished(st *store.Store, ur *usage.Reader, sessionID DeckSessionID) error {
+	return st.Tx(func(tx *store.Tx) error {
+		r, err := tx.Get(string(sessionID))
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		if !vanished(r, now) {
+			return nil
+		}
+		others, err := tx.List()
+		if err != nil {
+			return err
+		}
+		applyExited(&r, others, ur.HasConversation, now)
+		return tx.Put(r)
+	})
+}
+
 // MarkExited records that the session's process has ended, without a Manager.
 // See applyExited for the rules.
 func MarkExited(st *store.Store, ur *usage.Reader, sessionID DeckSessionID) error {
@@ -464,7 +489,9 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 
 	// beginResume moves the row out of the finished state, so a second resume
 	// from another process fails here instead of starting a second window.
-	rec, err := m.store.Update(string(sessionID), beginResume)
+	rec, err := m.store.Update(string(sessionID), func(r *store.Record) error {
+		return beginResume(r, time.Now())
+	})
 	if err != nil {
 		return err
 	}
@@ -479,6 +506,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 	fail := func(cause error, markError bool) error {
 		if _, err := m.store.Update(string(sessionID), func(r *store.Record) error {
 			now := time.Now()
+			r.LaunchingAt = nil
 			if markError {
 				setError(r, cause.Error(), now)
 			} else {
@@ -539,7 +567,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 		return fail(fmt.Errorf("resuming claude code: %w", err), false)
 	}
 	if _, err := m.store.Update(string(sessionID), func(r *store.Record) error {
-		r.PID = pid
+		finishLaunch(r, pid)
 		return nil
 	}); err != nil {
 		debuglog.Printf("[ResumeSession] recording pid: %v", err)

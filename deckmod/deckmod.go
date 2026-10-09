@@ -34,11 +34,23 @@ func Install(dir string) (string, error) {
 			return err
 		}
 		// 一時ファイルに書いてから rename する。起動中の Claude Code が書きかけを読まないように。
-		tmp := dst + ".tmp"
-		if err := os.WriteFile(tmp, want, 0o644); err != nil {
+		// 一時ファイル名は呼び出しごとに変える。TUI と CLI が同時に展開しても互いの書きかけを rename しない。
+		tmp, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".*.tmp")
+		if err != nil {
 			return err
 		}
-		return os.Rename(tmp, dst)
+		defer os.Remove(tmp.Name())
+		if _, err := tmp.Write(want); err != nil {
+			tmp.Close()
+			return err
+		}
+		if err := tmp.Close(); err != nil {
+			return err
+		}
+		if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+			return err
+		}
+		return os.Rename(tmp.Name(), dst)
 	})
 	if err != nil {
 		return "", fmt.Errorf("installing claude-deck plugin: %w", err)

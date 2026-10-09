@@ -17,7 +17,7 @@ import (
 
 // storeWatchInterval is how often the TUI checks the store for changes made by
 // other processes (CLI, hook commands, the pane's exit command).
-// PRAGMA data_version は 1 回数十マイクロ秒なので、ステータス表示の遅れが目立たない間隔にする。
+// PRAGMA data_version は行を読まずに済むので、ステータス表示の遅れが目立たない短い間隔にする。
 const storeWatchInterval = 200 * time.Millisecond
 
 // encodePathForDir encodes an absolute path into a directory-safe name.
@@ -282,49 +282,60 @@ func (m *Manager) LoadExisting() error {
 //
 //  1. Window exists, row is finished → the row went stale (e.g. written by an
 //     older claude-deck); set it back to Idle.
-//  2. Window exists, no row → orphaned window; kill it.
-//  3. Row is unfinished, no window → the process ended while nothing recorded it; mark exited.
+//  2. Row is unfinished, no window → the process ended while nothing recorded it; mark exited.
+//  3. Window exists, no row → orphaned window; kill it.
+//
+// A CLI in another process may be launching a session at the same time, so
+// each case reads the store and tmux in the order that cannot misjudge it.
 func (m *Manager) ReconcileTmux() {
-	live, err := m.backend.LiveSessions()
-	if err != nil {
+	// 1: the window is alive, so its row was written before; re-check the status in the transaction.
+	if live, err := m.backend.LiveSessions(); err != nil {
 		debuglog.Printf("[ReconcileTmux] listing windows failed: %v", err)
-		return
-	}
-	recs, err := m.store.List()
-	if err != nil {
-		debuglog.Printf("[ReconcileTmux] store list failed: %v", err)
-		return
-	}
-	known := make(map[DeckSessionID]bool, len(recs))
-	for _, r := range recs {
-		id := DeckSessionID(r.ID)
-		known[id] = true
-		status, ok := StatusFromID(r.Status)
-		if !ok || status == StatusUnmanaged {
-			continue
-		}
-		pid, alive := live[id]
-		switch {
-		case alive && status.IsTerminal():
-			debuglog.Printf("[ReconcileTmux] window alive but status=%s, resetting to Idle session=%s", status, id)
-			if _, err := m.store.Update(r.ID, func(r *store.Record) error {
+	} else {
+		for id, pid := range live {
+			if _, err := m.store.Update(string(id), func(r *store.Record) error {
+				status, ok := StatusFromID(r.Status)
+				if !ok || !status.IsTerminal() {
+					return nil
+				}
+				debuglog.Printf("[ReconcileTmux] window alive but status=%s, resetting to Idle session=%s", status, id)
 				r.Status = StatusIdle.ID()
 				r.FinishedAt = nil
 				r.ErrorMessage = ""
-				r.PID = pid
+				r.ClosingAt = nil
+				finishLaunch(r, pid)
 				return nil
-			}); err != nil {
-				debuglog.Printf("[ReconcileTmux] %s: %v", id, err)
-			}
-		case !alive && !status.IsTerminal():
-			debuglog.Printf("[ReconcileTmux] window gone, marking exited session=%s", id)
-			if err := MarkExited(m.store, m.usage, id); err != nil {
+			}); err != nil && !errors.Is(err, store.ErrNotFound) {
 				debuglog.Printf("[ReconcileTmux] %s: %v", id, err)
 			}
 		}
 	}
-	if err := m.backend.KillOrphans(known); err != nil {
-		debuglog.Printf("[ReconcileTmux] killing orphans: %v", err)
+
+	// 2: same as the periodic check.
+	m.markVanishedSessions()
+
+	// 3: list windows before rows. A window another process creates is always
+	// preceded by its row, so every window in this list that has a row has it in
+	// the later store read.
+	live, err := m.backend.LiveSessions()
+	if err != nil {
+		debuglog.Printf("[ReconcileTmux] listing windows failed: %v", err)
+	} else if recs, err := m.store.List(); err != nil {
+		debuglog.Printf("[ReconcileTmux] store list failed: %v", err)
+	} else {
+		known := make(map[DeckSessionID]bool, len(recs))
+		for _, r := range recs {
+			known[DeckSessionID(r.ID)] = true
+		}
+		var orphans []DeckSessionID
+		for id := range live {
+			if !known[id] {
+				orphans = append(orphans, id)
+			}
+		}
+		if err := m.backend.KillWindows(orphans); err != nil {
+			debuglog.Printf("[ReconcileTmux] killing orphans: %v", err)
+		}
 	}
 	m.Reload()
 }
@@ -333,51 +344,59 @@ func (m *Manager) ReconcileTmux() {
 // exited. It catches exits the pane's exit command did not record: the window
 // was killed from tmux directly, or the claude-deck binary moved.
 //
-// Sessions with PID 0 are skipped: their launch is still in progress in some
-// process and the window may not exist yet.
+// Rows are read before windows: a row whose launch finishes in between then has
+// its window in the list. A launch that starts in between is caught by
+// markVanished re-reading the row.
 func (m *Manager) markVanishedSessions() {
+	recs, err := m.store.List()
+	if err != nil {
+		return
+	}
 	live, err := m.backend.LiveSessions()
 	if err != nil {
 		debuglog.Printf("[markVanishedSessions] listing windows failed: %v", err)
 		return
 	}
-	recs, err := m.store.List()
-	if err != nil {
-		return
-	}
+	now := time.Now()
 	for _, r := range recs {
-		status, ok := StatusFromID(r.Status)
-		if !ok || status.IsTerminal() || status == StatusUnmanaged || r.PID == 0 || r.ClosingAt != nil {
-			continue
-		}
-		if _, alive := live[DeckSessionID(r.ID)]; alive {
+		if _, alive := live[DeckSessionID(r.ID)]; alive || !vanished(r, now) {
 			continue
 		}
 		debuglog.Printf("[markVanishedSessions] window gone, marking exited session=%s", r.ID)
-		if err := MarkExited(m.store, m.usage, DeckSessionID(r.ID)); err != nil {
+		if err := markVanished(m.store, m.usage, DeckSessionID(r.ID)); err != nil {
 			debuglog.Printf("[markVanishedSessions] %s: %v", r.ID, err)
 		}
 	}
 }
 
 // pruneOldSessions deletes the oldest finished sessions beyond MaxSessions.
-// Unfinished sessions are never pruned: their process may still be running.
+// Unfinished sessions and sessions being closed are never pruned: their process
+// may still be running, or a close is about to write the row. The choice is made
+// inside one transaction so a concurrent resume or close is seen.
 func (m *Manager) pruneOldSessions() {
 	if m.config.MaxSessions <= 0 {
 		return
 	}
-	recs, err := m.store.List()
-	if err != nil || len(recs) <= m.config.MaxSessions {
-		return
-	}
-	sort.Slice(recs, func(i, j int) bool {
-		return recordSortTime(recs[i]).After(recordSortTime(recs[j]))
-	})
-	for _, r := range recs[m.config.MaxSessions:] {
-		if status, ok := StatusFromID(r.Status); ok && !status.IsTerminal() {
-			continue
+	if err := m.store.Tx(func(tx *store.Tx) error {
+		recs, err := tx.List()
+		if err != nil || len(recs) <= m.config.MaxSessions {
+			return err
 		}
-		_ = m.store.Delete(r.ID)
+		sort.Slice(recs, func(i, j int) bool {
+			return recordSortTime(recs[i]).After(recordSortTime(recs[j]))
+		})
+		now := time.Now()
+		for _, r := range recs[m.config.MaxSessions:] {
+			if status, ok := StatusFromID(r.Status); (ok && !status.IsTerminal()) || closingActive(r, now) {
+				continue
+			}
+			if err := tx.Delete(r.ID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		debuglog.Printf("[pruneOldSessions] %v", err)
 	}
 }
 

@@ -18,13 +18,32 @@ const (
 	SourceFork = "fork"
 )
 
-// closingTimeout is how long a close in progress blocks another close.
+// closingTimeout is how long a close in progress blocks other operations on the row.
 // WHY 期限付き: close の途中でプロセスが落ちると ClosingAt が残り、そのセッションを二度と close できなくなる。
 // ワークスペースの削除（jj workspace forget + RemoveAll）は通常数秒で終わるので、それより十分長くとる。
 const closingTimeout = 2 * time.Minute
 
+// launchTimeout is how long a launch in progress protects the row from being
+// marked exited for lacking a tmux window.
+// WHY 期限付き: 起動の途中でプロセスが落ちると LaunchingAt が残り、ウィンドウの無い行が終了扱いにならない。
+// 起動（jj ワークスペース作成 + tmux new-window）は通常数秒で終わるので、それより十分長くとる。
+const launchTimeout = 2 * time.Minute
+
+// closingActive reports whether a close started less than closingTimeout ago.
+func closingActive(r store.Record, now time.Time) bool {
+	return r.ClosingAt != nil && now.Sub(*r.ClosingAt) < closingTimeout
+}
+
+// launchActive reports whether a launch started less than launchTimeout ago.
+func launchActive(r store.Record, now time.Time) bool {
+	return r.LaunchingAt != nil && now.Sub(*r.LaunchingAt) < launchTimeout
+}
+
 // ErrClosing is returned when another process is already closing the session.
 var ErrClosing = errors.New("session is already being closed")
+
+// ErrLaunching is returned when another process is still starting the session.
+var ErrLaunching = errors.New("session is still being launched")
 
 // The functions below are the state transitions on a store row. Every process
 // (TUI, CLI, hook commands, the pane's exit command) applies them inside a
@@ -82,6 +101,9 @@ func applyExited(r *store.Record, others []store.Record, hasConversation func(cl
 		r.Status = StatusCompleted.ID()
 		r.FinishedAt = &now
 	}
+	// 終了したプロセスの PID を残すと、後の close が再利用された別プロセスに SIGTERM を送りうる。
+	r.PID = 0
+	r.LaunchingAt = nil
 	if len(r.SessionChain) < 2 {
 		return
 	}
@@ -98,35 +120,62 @@ func applyExited(r *store.Record, others []store.Record, hasConversation func(cl
 	r.SessionChain = r.SessionChain[:len(r.SessionChain)-1]
 }
 
-// beginClose marks the row as being closed. It fails if another close started
-// less than closingTimeout ago.
+// vanished reports whether the row should be marked exited because its tmux
+// window is gone: it is unfinished, and no close or launch is in progress.
+// Callers must read the row inside the same transaction that writes the exit,
+// so a launch that started after the window list was taken is seen here.
+func vanished(r store.Record, now time.Time) bool {
+	status, ok := StatusFromID(r.Status)
+	if !ok || status.IsTerminal() || status == StatusUnmanaged {
+		return false
+	}
+	return !closingActive(r, now) && !launchActive(r, now)
+}
+
+// beginClose marks the row as being closed. It fails while another close or a
+// launch is in progress: closing a session whose window is about to appear would
+// delete its workspace under the starting process.
 func beginClose(r *store.Record, now time.Time) error {
-	if r.ClosingAt != nil && now.Sub(*r.ClosingAt) < closingTimeout {
+	if closingActive(*r, now) {
 		return fmt.Errorf("%w: %s", ErrClosing, r.ID)
+	}
+	if launchActive(*r, now) {
+		return fmt.Errorf("%w: %s", ErrLaunching, r.ID)
 	}
 	r.ClosingAt = &now
 	return nil
 }
 
+// beginLaunch marks the row as being launched. Insert a new row with it set, or
+// call beginResume, before starting the process.
+func beginLaunch(r *store.Record, now time.Time) {
+	r.LaunchingAt = &now
+	r.PID = 0
+}
+
+// finishLaunch records the started process and ends the launch.
+// pid may be 0 when tmux could not report it; the launch is over either way.
+func finishLaunch(r *store.Record, pid int) {
+	r.PID = pid
+	r.LaunchingAt = nil
+}
+
 // beginResume moves a finished session back to Idle before its process starts.
 // It fails unless the session is finished, so two resumes of the same session
 // cannot both start a process.
-//
-// PID is cleared until the new process reports its PID: the TUI treats an
-// unfinished session with PID 0 as "launch in progress" and does not mark it
-// exited for lacking a tmux window.
-func beginResume(r *store.Record) error {
+func beginResume(r *store.Record, now time.Time) error {
 	status, ok := StatusFromID(r.Status)
 	if !ok || !status.IsTerminal() {
 		return fmt.Errorf("session %s is not finished (status %s)", r.ID, r.Status)
 	}
-	if r.ClosingAt != nil {
+	if closingActive(*r, now) {
 		return fmt.Errorf("%w: %s", ErrClosing, r.ID)
 	}
 	r.Status = StatusIdle.ID()
 	r.FinishedAt = nil
 	r.ErrorMessage = ""
-	r.PID = 0
+	r.ClosingAt = nil
+	beginLaunch(r, now)
 	return nil
 }
 

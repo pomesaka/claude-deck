@@ -168,17 +168,20 @@ func TestBeginClose(t *testing.T) {
 	recent := now.Add(-time.Second)
 	stale := now.Add(-closingTimeout - time.Second)
 	tests := []struct {
-		name      string
-		closingAt *time.Time
-		wantErr   error
+		name        string
+		closingAt   *time.Time
+		launchingAt *time.Time
+		wantErr     error
 	}{
-		{"not closing", nil, nil},
-		{"another close in progress", &recent, ErrClosing},
-		{"stale close from a crashed process", &stale, nil},
+		{"not closing", nil, nil, nil},
+		{"another close in progress", &recent, nil, ErrClosing},
+		{"stale close from a crashed process", &stale, nil, nil},
+		{"launch in progress", nil, &recent, ErrLaunching},
+		{"stale launch from a crashed process", nil, &stale, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := store.Record{ID: "s", Status: "running", ClosingAt: tt.closingAt}
+			r := store.Record{ID: "s", Status: "running", ClosingAt: tt.closingAt, LaunchingAt: tt.launchingAt}
 			err := beginClose(&r, now)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("error = %v, want %v", err, tt.wantErr)
@@ -191,29 +194,33 @@ func TestBeginClose(t *testing.T) {
 }
 
 func TestBeginResume(t *testing.T) {
-	finished := time.Unix(1_700_000_000, 0)
+	now := time.Unix(1_700_000_000, 0)
+	recentClose := now.Add(-time.Second)
+	staleClose := now.Add(-closingTimeout - time.Second)
 	tests := []struct {
 		name    string
 		rec     store.Record
 		wantErr bool
 	}{
-		{"completed session resumes", store.Record{ID: "s", Status: "completed", FinishedAt: &finished, PID: 9}, false},
+		{"completed session resumes", store.Record{ID: "s", Status: "completed", FinishedAt: &now, PID: 9}, false},
 		{"error session resumes", store.Record{ID: "s", Status: "error", ErrorMessage: "gone", PID: 9}, false},
 		{"running session cannot resume", store.Record{ID: "s", Status: "running"}, true},
 		{"idle session cannot resume", store.Record{ID: "s", Status: "idle"}, true},
-		{"session being closed cannot resume", store.Record{ID: "s", Status: "completed", ClosingAt: &finished}, true},
+		{"session being closed cannot resume", store.Record{ID: "s", Status: "completed", ClosingAt: &recentClose}, true},
+		{"stale close from a crashed process does not block resume", store.Record{ID: "s", Status: "completed", ClosingAt: &staleClose}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := tt.rec
-			err := beginResume(&r)
+			err := beginResume(&r, now)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if err != nil {
 				return
 			}
-			if r.Status != "idle" || r.FinishedAt != nil || r.ErrorMessage != "" || r.PID != 0 {
+			if r.Status != "idle" || r.FinishedAt != nil || r.ErrorMessage != "" || r.PID != 0 || r.ClosingAt != nil ||
+				r.LaunchingAt == nil || !r.LaunchingAt.Equal(now) {
 				t.Errorf("after resume: %+v", r)
 			}
 		})

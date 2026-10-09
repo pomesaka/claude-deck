@@ -60,13 +60,11 @@ func (b *fakeBackend) LiveSessions() (map[DeckSessionID]int, error) {
 	return out, nil
 }
 
-func (b *fakeBackend) KillOrphans(known map[DeckSessionID]bool) error {
+func (b *fakeBackend) KillWindows(ids []DeckSessionID) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for id := range b.windows {
-		if !known[id] {
-			delete(b.windows, id)
-		}
+	for _, id := range ids {
+		delete(b.windows, id)
 	}
 	return nil
 }
@@ -342,10 +340,14 @@ func TestReload_KeepsProjectedFields(t *testing.T) {
 func TestReconcileTmux(t *testing.T) {
 	m, be := newTestManager(t)
 	finished := time.Now().Add(-time.Hour)
+	launching := time.Now()
+	staleLaunch := time.Now().Add(-launchTimeout - time.Second)
 	for _, r := range []store.Record{
 		{ID: "stale-finished", Status: StatusCompleted.ID(), FinishedAt: &finished},
 		{ID: "gone-running", Status: StatusRunning.ID(), PID: 7},
-		{ID: "gone-launching", Status: StatusIdle.ID()},
+		// A CLI in another process may be launching while the TUI starts.
+		{ID: "launching", Status: StatusIdle.ID(), LaunchingAt: &launching},
+		{ID: "launch-crashed", Status: StatusIdle.ID(), LaunchingAt: &staleLaunch},
 		{ID: "alive-idle", Status: StatusIdle.ID(), PID: 8},
 	} {
 		if err := m.store.Insert(r); err != nil {
@@ -364,8 +366,8 @@ func TestReconcileTmux(t *testing.T) {
 	}{
 		{"stale-finished", StatusIdle},
 		{"gone-running", StatusCompleted},
-		// At startup no other launch can be in flight for an old row, so PID 0 does not protect it.
-		{"gone-launching", StatusCompleted},
+		{"launching", StatusIdle},
+		{"launch-crashed", StatusCompleted},
 		{"alive-idle", StatusIdle},
 	}
 	for _, tt := range tests {
@@ -385,11 +387,15 @@ func TestReconcileTmux(t *testing.T) {
 
 func TestMarkVanishedSessions(t *testing.T) {
 	m, be := newTestManager(t)
-	closing := time.Now()
+	now := time.Now()
+	stale := now.Add(-3 * time.Minute)
 	for _, r := range []store.Record{
 		{ID: "gone", Status: StatusRunning.ID(), PID: 7},
-		{ID: "launching", Status: StatusIdle.ID(), PID: 0},
-		{ID: "closing", Status: StatusIdle.ID(), PID: 9, ClosingAt: &closing},
+		{ID: "gone-without-pid", Status: StatusIdle.ID()},
+		{ID: "launching", Status: StatusIdle.ID(), LaunchingAt: &now},
+		{ID: "launch-crashed", Status: StatusIdle.ID(), LaunchingAt: &stale},
+		{ID: "closing", Status: StatusIdle.ID(), PID: 9, ClosingAt: &now},
+		{ID: "close-crashed", Status: StatusIdle.ID(), PID: 9, ClosingAt: &stale},
 		{ID: "alive", Status: StatusIdle.ID(), PID: 10},
 	} {
 		if err := m.store.Insert(r); err != nil {
@@ -405,8 +411,11 @@ func TestMarkVanishedSessions(t *testing.T) {
 		want string
 	}{
 		{"gone", StatusCompleted.ID()},
+		{"gone-without-pid", StatusCompleted.ID()},
 		{"launching", StatusIdle.ID()},
+		{"launch-crashed", StatusCompleted.ID()},
 		{"closing", StatusIdle.ID()},
+		{"close-crashed", StatusCompleted.ID()},
 		{"alive", StatusIdle.ID()},
 	}
 	for _, tt := range tests {
@@ -415,6 +424,111 @@ func TestMarkVanishedSessions(t *testing.T) {
 				t.Errorf("status = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// The window list is taken before the transaction. A launch that claims the row
+// in between must not be marked exited.
+func TestMarkVanished_RereadsTheRow(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.store.Insert(store.Record{ID: "s", Status: StatusCompleted.ID()}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	// Another process resumes the session after this process decided the window is gone.
+	if _, err := otherProcess(t, m).Update("s", func(r *store.Record) error {
+		return beginResume(r, time.Now())
+	}); err != nil {
+		t.Fatalf("beginResume: %v", err)
+	}
+	if err := markVanished(m.store, m.usage, "s"); err != nil {
+		t.Fatalf("markVanished: %v", err)
+	}
+	if got := mustGet(t, m.store, "s").Status; got != StatusIdle.ID() {
+		t.Errorf("status = %q, want idle (launch in progress)", got)
+	}
+}
+
+func TestPruneOldSessions(t *testing.T) {
+	m, _ := newTestManager(t)
+	m.config.MaxSessions = 1
+	at := func(sec int64) time.Time { return time.Unix(1_700_000_000+sec, 0) }
+	now := time.Now()
+	for _, r := range []store.Record{
+		{ID: "newest", Status: StatusCompleted.ID(), LastActivity: at(9)},
+		{ID: "old-finished", Status: StatusCompleted.ID(), LastActivity: at(1)},
+		{ID: "old-closing", Status: StatusCompleted.ID(), LastActivity: at(1), ClosingAt: &now},
+		{ID: "old-running", Status: StatusRunning.ID(), LastActivity: at(0)},
+	} {
+		if err := m.store.Insert(r); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+	}
+	m.pruneOldSessions()
+
+	recs, _ := m.store.List()
+	var ids []string
+	for _, r := range recs {
+		ids = append(ids, r.ID)
+	}
+	if want := []string{"newest", "old-closing", "old-running"}; !slices.Equal(ids, want) {
+		t.Errorf("remaining = %v, want %v", ids, want)
+	}
+}
+
+func TestPersistAll(t *testing.T) {
+	m, _ := newTestManager(t)
+	sess := createPlainSession(t, m)
+	// The process that created the session wrote a bookmark after this TUI loaded the row.
+	if _, err := otherProcess(t, m).Update(string(sess.ID), func(r *store.Record) error {
+		r.BookmarkName = "feat/x"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sess.mu.Lock()
+	sess.BookmarkName = ""
+	sess.mu.Unlock()
+	sess.ApplyJSONLTokens(JSONLTokenData{InputTokens: 10, OutputTokens: 5}, PricingPolicy{})
+
+	m.PersistAll()
+
+	r := mustGet(t, m.store, sess.ID)
+	if r.InputTokens != 10 || r.OutputTokens != 5 {
+		t.Errorf("tokens = %d/%d, want 10/5", r.InputTokens, r.OutputTokens)
+	}
+	if r.BookmarkName != "feat/x" {
+		t.Errorf("BookmarkName = %q, overwritten by the empty in-memory value", r.BookmarkName)
+	}
+}
+
+func TestKill_RefusedWhileLaunching(t *testing.T) {
+	m, _ := newTestManager(t)
+	now := time.Now()
+	if err := m.store.Insert(store.Record{ID: "s", Status: StatusIdle.ID(), LaunchingAt: &now}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	m.Reload()
+	if err := m.Kill("s"); !errors.Is(err, ErrLaunching) {
+		t.Errorf("Kill error = %v, want ErrLaunching", err)
+	}
+}
+
+func TestWatchStore_ReloadsOnOtherProcessWrite(t *testing.T) {
+	m, _ := newTestManager(t)
+	sess := createPlainSession(t, m)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.WatchStore(ctx)
+
+	if err := RecordHookStatus(otherProcess(t, m), sess.ID, StatusRunning); err != nil {
+		t.Fatalf("RecordHookStatus: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for sess.GetStatus() != StatusRunning {
+		if time.Now().After(deadline) {
+			t.Fatal("WatchStore did not pick up the other process's write")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

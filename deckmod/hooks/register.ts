@@ -8,38 +8,50 @@ const HOOK_TIMEOUT_MS = 5_000
 
 // WHY 直列化: hook はほぼ同時に続けて発火する（tool.call の前後と PermissionRequest など）。
 // 書き込みを並行に走らせると後の状態が先に store に入り、古い状態で上書きされることがある。
-let queue: Promise<void> = Promise.resolve()
+let queue: Promise<boolean> = Promise.resolve(true)
 
 // WHY 判定用の hook に .catch(next(e)) を付ける: 状態の報告に失敗しても、ツール呼び出しや承認の流れは止めない。
 // deck() は失敗をすべて握りつぶすので、next を呼んだ後に例外が出ることはない。
 
-// The last status this process wrote. Repeating it is skipped: tool.call fires for
-// every tool, and each write spawns a process and wakes the TUI.
+// The last status this process wrote successfully. Repeating it is skipped:
+// tool.call fires for every tool, and each write spawns a process and wakes the TUI.
 let lastStatus: DeckStatus | undefined
 
+// Tool calls (main loop and subagents) between tool.call and its result.
+// WHY 数える: 並行に走るツール呼び出しの 1 つが終わった時点で Running に戻すと、
+// 別の呼び出しの承認ダイアログが開いたままでも Approve 待ちが消える。
+let inFlight = 0
+
 /**
- * Runs `claude-deck hook <args> --session <id>`. claude-deck sets both variables
- * when it starts the session; in any other session the mod does nothing.
- * Failures are dropped: a missed status must not fail the user's turn.
+ * Runs `claude-deck hook <args> --session <id>` and resolves whether it succeeded.
+ * claude-deck sets both variables when it starts the session; in any other
+ * session the mod does nothing. Failures are dropped: a missed status must not
+ * fail the user's turn.
  */
-function deck($: EngineInterface, args: string[]): Promise<void> {
-  const run = async () => {
+function deck($: EngineInterface, args: string[]): Promise<boolean> {
+  const run = async (): Promise<boolean> => {
     try {
       const [bin, id] = await Promise.all([$.env.get('CLAUDE_DECK_BIN'), $.env.get('CLAUDE_DECK_SESSION_ID')])
-      if (!bin || !id) return
-      await $.process.run([bin, 'hook', ...args, '--session', id], { timeoutMs: HOOK_TIMEOUT_MS })
+      if (!bin || !id) return false
+      const { exitCode } = await $.process.run([bin, 'hook', ...args, '--session', id], { timeoutMs: HOOK_TIMEOUT_MS })
+      return exitCode === 0
     } catch {
-      // dropped; see above
+      return false
     }
   }
   queue = queue.then(run, run)
   return queue
 }
 
-function setStatus($: EngineInterface, status: DeckStatus): Promise<void> {
-  if (status === lastStatus) return queue
-  lastStatus = status
-  return deck($, ['status', status])
+async function setStatus($: EngineInterface, status: DeckStatus): Promise<void> {
+  if (status === lastStatus) return
+  if (await deck($, ['status', status])) {
+    lastStatus = status
+  }
+}
+
+function isWaiting(): boolean {
+  return lastStatus === 'waiting_approval' || lastStatus === 'waiting_answer'
 }
 
 export const register: Register = on => {
@@ -61,18 +73,23 @@ export const register: Register = on => {
   // next(e) holds the approval dialog and AskUserQuestion's wait: when it resolves,
   // the user has answered and Claude is working again.
   on('tool.call', async ($, e, next) => {
-    if (e.agentId !== undefined) {
-      const result = await next(e)
-      // A subagent's approval dialog also waits on the user (PermissionRequest below).
-      if (lastStatus === 'waiting_approval' || lastStatus === 'waiting_answer') {
+    const isMain = e.agentId === undefined
+    inFlight++
+    try {
+      if (isMain && e.tool === ASK_USER_QUESTION) {
+        await setStatus($, 'waiting_answer')
+      } else if (isMain && !isWaiting()) {
         await setStatus($, 'running')
       }
-      return result
+      return await next(e)
+    } finally {
+      inFlight--
+      // A subagent's approval dialog also waits on the user (PermissionRequest below),
+      // so its end clears a wait too. Otherwise a subagent leaves the main loop's status alone.
+      if (inFlight === 0 && (isMain || isWaiting())) {
+        await setStatus($, 'running')
+      }
     }
-    await setStatus($, e.tool === ASK_USER_QUESTION ? 'waiting_answer' : 'running')
-    const result = await next(e)
-    await setStatus($, 'running')
-    return result
   }).catch(($, e, next) => next(e))
 
   // WHY tool.check の ask で判定しない: auto モードでは ask でもダイアログを出さずに実行される。
@@ -84,7 +101,8 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   // WHY classic.Stop でなく turn.complete: 承認ダイアログで拒否したターンは Stop を発火しない
-  // （Claude Code 2.1.287 で確認）。turn.complete は拒否・中断・API エラーのどれでも発火する。
+  // （Claude Code 2.1.287 と 2.1.295 で確認）。turn.complete は reason に answer / aborted / refusal / error を持ち、
+  // 中断や API エラーで終わったターンでも発火する（Mods の型定義 TurnCompleteReason）。
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       await setStatus($, 'idle')

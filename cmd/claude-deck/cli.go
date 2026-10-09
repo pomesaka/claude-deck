@@ -190,6 +190,15 @@ const (
 	hookExited       = "exited"
 )
 
+// hookStatuses are the statuses a hook may report. Completed and Error come from
+// the exit command and close, which also record FinishedAt.
+var hookStatuses = map[string]bool{
+	session.StatusRunning.ID():         true,
+	session.StatusIdle.ID():            true,
+	session.StatusWaitingApproval.ID(): true,
+	session.StatusWaitingAnswer.ID():   true,
+}
+
 // parseHookArgs parses `hook <event> [args] --session ID`. These are called by
 // the deck-status plugin and by the pane's exit command, not by people.
 func parseHookArgs(args []string) (cliRequest, error) {
@@ -206,7 +215,7 @@ func parseHookArgs(args []string) (cliRequest, error) {
 			return cliRequest{}, fmt.Errorf("hook status: missing status\n%s", usage)
 		}
 		req.Status = args[1]
-		if _, ok := session.StatusFromID(req.Status); !ok {
+		if !hookStatuses[req.Status] {
 			return cliRequest{}, fmt.Errorf("hook status: unknown status %q", req.Status)
 		}
 		args = args[2:]

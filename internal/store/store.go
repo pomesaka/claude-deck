@@ -61,6 +61,9 @@ type Record struct {
 	// ClosingAt is set while a close (TUI x / CLI close) is in progress.
 	// It guards against two processes closing the same session at once.
 	ClosingAt *time.Time
+	// LaunchingAt is set from the moment a launch (new / fork / resume) claims the
+	// row until its process has started.
+	LaunchingAt *time.Time
 }
 
 const schema = `
@@ -90,14 +93,15 @@ CREATE TABLE IF NOT EXISTS sessions (
 	cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
 	cache_read_input_tokens     INTEGER NOT NULL DEFAULT 0,
 	estimated_cost_usd          REAL NOT NULL DEFAULT 0,
-	closing_at                  INTEGER
+	closing_at                  INTEGER,
+	launching_at                INTEGER
 );`
 
 const columns = `id, name, repo_path, repo_name, workspace_path, workspace_name, sub_project_dir,
 	session_chain, status, finished_at, pid, error_message, terminal_title, bookmark_name,
 	last_jj_revision, last_jj_parent_revision, prompt, permission_mode, started_at, last_activity,
 	input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
-	estimated_cost_usd, closing_at`
+	estimated_cost_usd, closing_at, launching_at`
 
 // Store is a handle to the session database. Safe for concurrent use.
 type Store struct {
@@ -121,6 +125,8 @@ func OpenPath(path string) (*Store, error) {
 	// WHY _txlock=immediate: 読んでから書くトランザクションを DEFERRED で始めると、
 	// 2 プロセスが同時に読んだ後どちらかの書き込みが SQLITE_BUSY で失敗する（busy_timeout も効かない）。
 	// IMMEDIATE なら開始時点で書き込みロックを取り、後続は busy_timeout の範囲で待つ。
+	// modernc.org/sqlite v1.60.1 で、DEFERRED にすると TestStore_ConcurrentUpdatesFromTwoHandles が
+	// 0.01 秒で "database is locked (517)" になることを確認した（2026-10-09）。
 	dsn := "file:" + path + "?_txlock=immediate" +
 		"&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
 	db, err := sql.Open("sqlite", dsn)
@@ -241,12 +247,12 @@ func (t *Tx) Put(r Record) error {
 		return fmt.Errorf("marshaling session chain: %w", err)
 	}
 	_, err = t.tx.Exec(`INSERT OR REPLACE INTO sessions (`+columns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.Name, r.RepoPath, r.RepoName, r.WorkspacePath, r.WorkspaceName, r.SubProjectDir,
 		string(chainJSON), r.Status, nullableTime(r.FinishedAt), r.PID, r.ErrorMessage, r.TerminalTitle, r.BookmarkName,
 		r.LastJJRevision, r.LastJJParentRevision, r.Prompt, r.PermissionMode, unixNano(r.StartedAt), unixNano(r.LastActivity),
 		r.InputTokens, r.OutputTokens, r.CacheCreationInputTokens, r.CacheReadInputTokens,
-		r.EstimatedCostUSD, nullableTime(r.ClosingAt),
+		r.EstimatedCostUSD, nullableTime(r.ClosingAt), nullableTime(r.LaunchingAt),
 	)
 	return err
 }
@@ -286,6 +292,7 @@ func scanAll(rows *sql.Rows) ([]Record, error) {
 			r                       Record
 			chainJSON               string
 			finishedAt, closingAt   sql.NullInt64
+			launchingAt             sql.NullInt64
 			startedAt, lastActivity int64
 		)
 		if err := rows.Scan(
@@ -293,7 +300,7 @@ func scanAll(rows *sql.Rows) ([]Record, error) {
 			&chainJSON, &r.Status, &finishedAt, &r.PID, &r.ErrorMessage, &r.TerminalTitle, &r.BookmarkName,
 			&r.LastJJRevision, &r.LastJJParentRevision, &r.Prompt, &r.PermissionMode, &startedAt, &lastActivity,
 			&r.InputTokens, &r.OutputTokens, &r.CacheCreationInputTokens, &r.CacheReadInputTokens,
-			&r.EstimatedCostUSD, &closingAt,
+			&r.EstimatedCostUSD, &closingAt, &launchingAt,
 		); err != nil {
 			return nil, err
 		}
@@ -305,6 +312,7 @@ func scanAll(rows *sql.Rows) ([]Record, error) {
 		}
 		r.FinishedAt = timePtr(finishedAt)
 		r.ClosingAt = timePtr(closingAt)
+		r.LaunchingAt = timePtr(launchingAt)
 		r.StartedAt = fromUnixNano(startedAt)
 		r.LastActivity = fromUnixNano(lastActivity)
 		out = append(out, r)

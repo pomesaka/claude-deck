@@ -99,6 +99,7 @@ func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 		{name: "hook unknown event", command: "hook", args: []string{"bogus", "--session", "abc"}},
 		{name: "hook status without status", command: "hook", args: []string{"status"}},
 		{name: "hook status unknown status", command: "hook", args: []string{"status", "busy", "--session", "abc"}},
+		{name: "hook status completed", command: "hook", args: []string{"status", "completed", "--session", "abc"}},
 		{name: "hook without session", command: "hook", args: []string{"exited"}},
 	}
 	for _, tt := range tests {

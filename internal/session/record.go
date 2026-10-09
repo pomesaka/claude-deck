@@ -123,9 +123,14 @@ func (s *Session) applyProjectionRecordLocked(r store.Record) {
 }
 
 // copyProjection copies the TUI-projected fields of src into r.
+// An empty BookmarkName is not copied: the process that created the session
+// writes it after the TUI may have loaded the row, and the TUI refreshes it only
+// for running sessions, so an empty in-memory value means "not read", not "none".
 func copyProjection(r *store.Record, src store.Record) {
 	r.TerminalTitle = src.TerminalTitle
-	r.BookmarkName = src.BookmarkName
+	if src.BookmarkName != "" {
+		r.BookmarkName = src.BookmarkName
+	}
 	r.Prompt = src.Prompt
 	r.PermissionMode = src.PermissionMode
 	r.StartedAt = src.StartedAt

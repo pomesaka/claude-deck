@@ -113,6 +113,11 @@ func (b *tmuxBackend) IsActive(sessionID DeckSessionID) bool {
 func (b *tmuxBackend) LiveSessions() (map[DeckSessionID]int, error) {
 	windows, err := b.runner.ListWindows()
 	if err != nil {
+		// tmux セッションごと消えていれば、どのセッションのウィンドウも無い。
+		// エラーのまま返すと、呼び出し側は終了を記録できない。
+		if !b.runner.HasSession() {
+			return map[DeckSessionID]int{}, nil
+		}
 		return nil, err
 	}
 	live := make(map[DeckSessionID]int, len(windows))
@@ -125,24 +130,20 @@ func (b *tmuxBackend) LiveSessions() (map[DeckSessionID]int, error) {
 	return live, nil
 }
 
-// KillOrphans kills tmux windows that belong to no known session.
-func (b *tmuxBackend) KillOrphans(known map[DeckSessionID]bool) error {
-	live, err := b.LiveSessions()
-	if err != nil {
-		return err
+// KillWindows kills the given sessions' tmux windows.
+func (b *tmuxBackend) KillWindows(ids []DeckSessionID) error {
+	if len(ids) == 0 {
+		return nil
 	}
-	for id := range live {
-		if known[id] {
-			continue
-		}
-		debuglog.Printf("[tmuxBackend.KillOrphans] killing orphaned window=%s", id)
+	for _, id := range ids {
+		debuglog.Printf("[tmuxBackend.KillWindows] killing window=%s", id)
 		_ = b.runner.KillWindow(string(id))
 	}
 
 	// Killing the last window destroys the tmux session itself.
 	// Re-create it so subsequent NewWindow calls have a live session to target.
 	if !b.runner.HasSession() {
-		debuglog.Printf("[tmuxBackend.KillOrphans] session died after orphan cleanup, re-creating")
+		debuglog.Printf("[tmuxBackend.KillWindows] session died after killing windows, re-creating")
 		if err := b.runner.NewSession(); err != nil {
 			return fmt.Errorf("re-creating tmux session: %w", err)
 		}

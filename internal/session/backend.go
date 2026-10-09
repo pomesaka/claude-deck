@@ -28,8 +28,9 @@ type SessionBackend interface {
 	// window's process PID.
 	LiveSessions() (map[DeckSessionID]int, error)
 
-	// KillOrphans stops hosting windows that belong to no known session.
-	KillOrphans(known map[DeckSessionID]bool) error
+	// KillWindows stops the hosting windows of the given sessions, keeping the
+	// hosting environment itself usable.
+	KillWindows(ids []DeckSessionID) error
 
 	// Focus makes the session's terminal visible in the hosting environment.
 	// tmuxBackend: runs tmux select-window for ~0ms session switching.
