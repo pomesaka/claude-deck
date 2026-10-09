@@ -4,23 +4,25 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
 
 // Config holds the application configuration.
 type Config struct {
-	Defaults   DefaultConfig             `toml:"defaults"`
-	Discovery  DiscoveryConfig           `toml:"discovery"`
-	Ghostty    GhosttyConfig             `toml:"ghostty"`
-	Tmux       TmuxConfig                `toml:"tmux"`
-	Keybinds   KeybindConfig             `toml:"keybinds"`
-	Theme      ThemeConfig               `toml:"theme"`
-	Commands   CommandsConfig            `toml:"commands"`
-	Session    SessionConfig             `toml:"session"`
-	Pricing    PricingConfig             `toml:"pricing"`
-	Projects   map[string]ProjectConfig  `toml:"projects"`
-	DataDir    string                    `toml:"data_dir"`
+	Defaults  DefaultConfig            `toml:"defaults"`
+	Discovery DiscoveryConfig          `toml:"discovery"`
+	Ghostty   GhosttyConfig            `toml:"ghostty"`
+	Tmux      TmuxConfig               `toml:"tmux"`
+	Keybinds  KeybindConfig            `toml:"keybinds"`
+	Theme     ThemeConfig              `toml:"theme"`
+	Commands  CommandsConfig           `toml:"commands"`
+	Runtime   RuntimeConfig            `toml:"runtime"`
+	Session   SessionConfig            `toml:"session"`
+	Pricing   PricingConfig            `toml:"pricing"`
+	Projects  map[string]ProjectConfig `toml:"projects"`
+	DataDir   string                   `toml:"data_dir"`
 }
 
 // DiscoveryConfig holds settings for repository and project discovery.
@@ -29,7 +31,7 @@ type DiscoveryConfig struct {
 	// project directories within jj repositories. Empty means repo root only.
 	ProjectMarkers []string `toml:"project_markers"`
 	// Excludes are directory names to skip during fd search.
-	Excludes       []string `toml:"excludes"`
+	Excludes []string `toml:"excludes"`
 }
 
 // ProjectConfig holds per-project settings keyed by repository path.
@@ -62,7 +64,13 @@ type ThemeConfig struct {
 // CommandsConfig holds external command paths.
 type CommandsConfig struct {
 	Claude string `toml:"claude"`
+	Codex  string `toml:"codex"`
 	JJ     string `toml:"jj"`
+}
+
+// RuntimeConfig selects the agent CLI and transcript layout used by the app.
+type RuntimeConfig struct {
+	Provider string `toml:"provider"`
 }
 
 // SessionConfig holds session management limits.
@@ -88,7 +96,7 @@ type DefaultConfig struct {
 
 // GhosttyConfig holds Ghostty terminal settings.
 type GhosttyConfig struct {
-	Command  string `toml:"command"`
+	Command string `toml:"command"`
 	// DeckWidth is the pixel width of the left (claude-deck list) pane when
 	// using Ghostty split mode.  The right pane (tmux attach) gets the remainder.
 	DeckWidth int `toml:"deck_width"`
@@ -184,7 +192,11 @@ func Default() *Config {
 		},
 		Commands: CommandsConfig{
 			Claude: "claude",
+			Codex:  "codex",
 			JJ:     "jj",
+		},
+		Runtime: RuntimeConfig{
+			Provider: "claude",
 		},
 		Session: SessionConfig{
 			MaxSessions:     30,
@@ -207,6 +219,15 @@ func Default() *Config {
 // store as the process that started it.
 const EnvDataDir = "CLAUDE_DECK_DATA_DIR"
 
+// RuntimeProvider returns the normalized runtime provider name.
+func (c *Config) RuntimeProvider() string {
+	provider := strings.ToLower(strings.TrimSpace(c.Runtime.Provider))
+	if provider == "" {
+		return "claude"
+	}
+	return provider
+}
+
 // Load reads configuration from the default config file.
 func Load() (*Config, error) {
 	cfg, err := LoadFrom(filepath.Join(DefaultConfigDir(), "config.toml"))
@@ -222,15 +243,25 @@ func Load() (*Config, error) {
 // LoadFrom reads configuration from the specified path.
 func LoadFrom(path string) (*Config, error) {
 	cfg := Default()
+	explicit := struct {
+		DataDir string `toml:"data_dir"`
+		Tmux    struct {
+			SessionName string `toml:"session_name"`
+		} `toml:"tmux"`
+	}{}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			applyRuntimeScopedDefaults(cfg, explicit.DataDir != "", explicit.Tmux.SessionName != "")
 			return cfg, nil
 		}
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
 
+	if err := toml.Unmarshal(data, &explicit); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
@@ -238,8 +269,21 @@ func LoadFrom(path string) (*Config, error) {
 	if cfg.DataDir == "" {
 		cfg.DataDir = DefaultDataDir()
 	}
+	applyRuntimeScopedDefaults(cfg, explicit.DataDir != "", explicit.Tmux.SessionName != "")
 
 	return cfg, nil
+}
+
+func applyRuntimeScopedDefaults(cfg *Config, explicitDataDir, explicitTmuxSession bool) {
+	if cfg.RuntimeProvider() != "codex" {
+		return
+	}
+	if !explicitDataDir && cfg.DataDir == DefaultDataDir() {
+		cfg.DataDir += "-codex"
+	}
+	if !explicitTmuxSession && (cfg.Tmux.SessionName == "" || cfg.Tmux.SessionName == "claude-deck") {
+		cfg.Tmux.SessionName = "claude-deck-codex"
+	}
 }
 
 // WorkspaceSymlinks returns the list of extra symlink paths configured for the given repository.

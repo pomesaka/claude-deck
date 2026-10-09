@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pomesaka/claude-deck/internal/agentruntime"
 	"github.com/pomesaka/claude-deck/internal/config"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/jj"
@@ -38,7 +39,9 @@ const (
 // ManagerConfig holds configuration values used by Manager for session creation.
 type ManagerConfig struct {
 	DataDir               string
-	ClaudeCommand         string     // claude executable path
+	AgentRuntime          agentruntime.Runtime
+	ClaudeCommand         string // deprecated: use AgentRuntime
+	TranscriptReader      *usage.Reader
 	JJ                    *jj.Runner // jj CLI runner (nil uses default "jj")
 	DefaultPermissionMode string
 	MaxSessions           int
@@ -110,11 +113,14 @@ func NewManager(ctx context.Context, st *store.Store, cfg ManagerConfig) *Manage
 	m := &Manager{
 		sessions:       make(map[DeckSessionID]*Session),
 		store:          st,
-		usage:          usage.NewReader(""),
+		usage:          cfg.TranscriptReader,
 		ctx:            ctx,
 		config:         cfg,
 		notifyCh:       make(chan struct{}, 1),
 		pendingChanges: make(map[DeckSessionID]bool),
+	}
+	if m.usage == nil {
+		m.usage = usage.NewReader("")
 	}
 
 	runner := &tmuxrunner.Runner{
@@ -144,30 +150,29 @@ func (m *Manager) jj() *jj.Runner {
 	return &jj.Runner{}
 }
 
-// buildStartArgs pre-assembles the CLI arg list for a Claude Code process start.
-// Assembles the CLI args for `claude` from semantic parameters, keeping backend
-// implementations decoupled from claude CLI flag semantics.
-//
-// The three launch modes map to:
-//   - resumeID != "" && forkSession  → --resume <id> --fork-session  (fork of an existing session)
-//   - resumeID != "" && !forkSession → --resume <id>                 (resume an existing session)
-//   - resumeID == ""                 → (no extra flags)              (new interactive session)
-func buildStartArgs(resumeID string, forkSession bool, permMode string, additionalArgs []string) []string {
-	var args []string
-	if resumeID != "" {
-		args = append(args, "--resume", resumeID)
-		if forkSession {
-			args = append(args, "--fork-session")
-		}
+func (m *Manager) runtime() agentruntime.Runtime {
+	if m.config.AgentRuntime != nil {
+		return m.config.AgentRuntime
 	}
-	if permMode != "" {
-		args = append(args, "--permission-mode", permMode)
-	}
-	return append(args, additionalArgs...)
+	return agentruntime.ClaudeRuntime{Command: m.config.ClaudeCommand}
+}
+
+// startSpec builds the runtime command for one launch. Every launch mode goes through
+// here so that the session name, the plugin dir and --add-dir are passed the same way.
+func (m *Manager) startSpec(mode agentruntime.LaunchMode, runtimeID RuntimeSessionID, workDir, name, repoPath string) agentruntime.StartSpec {
+	return m.runtime().StartSpec(agentruntime.StartRequest{
+		Mode:           mode,
+		SessionID:      string(runtimeID),
+		WorkDir:        workDir,
+		SessionName:    name,
+		PermissionMode: m.config.DefaultPermissionMode,
+		PluginDir:      m.config.PluginDir,
+		AdditionalArgs: m.buildAddDirArgs(repoPath),
+	})
 }
 
 // processOpts assembles the ProcessStartOpts shared by every launch mode.
-func (m *Manager) processOpts(sessionID DeckSessionID, workDir string, args []string) ProcessStartOpts {
+func (m *Manager) processOpts(sessionID DeckSessionID, workDir string, spec agentruntime.StartSpec) ProcessStartOpts {
 	env := []string{EnvSessionID + "=" + string(sessionID), EnvDataDir + "=" + m.config.DataDir}
 	var onExit []string
 	if m.config.DeckCommand != "" {
@@ -175,9 +180,9 @@ func (m *Manager) processOpts(sessionID DeckSessionID, workDir string, args []st
 		onExit = []string{m.config.DeckCommand, "hook", "exited", "--session", string(sessionID)}
 	}
 	return ProcessStartOpts{
-		Command: m.config.ClaudeCommand,
+		Command: spec.Command,
 		WorkDir: workDir,
-		Args:    args,
+		Args:    spec.Args,
 		Env:     env,
 		OnExit:  onExit,
 	}
@@ -290,7 +295,7 @@ func computeActualWorkDir(wsPath, subProjectDir string) string {
 // find it as soon as the window exists. LaunchingAt stays set until the process
 // has started, so other processes neither mark the row exited for lacking a
 // window nor close it under the starting process.
-func (m *Manager) startNewSession(sess *Session, workDir string, args []string) error {
+func (m *Manager) startNewSession(sess *Session, workDir string, spec agentruntime.StartSpec) error {
 	// WHY 起動前に確かめる: tmux は存在しない -c のディレクトリを指定されてもエラーにせず、
 	// ホームディレクトリでウィンドウを開く（tmux 3.6a で確認）。確かめないと Claude Code が
 	// 意図しない場所で動き始める。サブプロジェクトのディレクトリが、ワークスペースを作った
@@ -306,7 +311,7 @@ func (m *Manager) startNewSession(sess *Session, workDir string, args []string) 
 		return fmt.Errorf("saving session: %w", err)
 	}
 
-	pid, err := m.backend.StartProcess(sess.ID, m.processOpts(sess.ID, workDir, args))
+	pid, err := m.backend.StartProcess(sess.ID, m.processOpts(sess.ID, workDir, spec))
 	if err != nil {
 		if derr := m.store.Delete(string(sess.ID)); derr != nil {
 			debuglog.Printf("[startNewSession] store delete after failed start: %v", derr)
@@ -377,8 +382,8 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	}
 
 	debuglog.Printf("[CreateSession] starting process workDir=%q", actualWorkDir)
-	args := buildStartArgs("", false, m.config.DefaultPermissionMode, m.buildSessionArgs(sess.Name, repoPath))
-	if err := m.startNewSession(sess, actualWorkDir, args); err != nil {
+	spec := m.startSpec(agentruntime.LaunchNew, "", actualWorkDir, sess.Name, repoPath)
+	if err := m.startNewSession(sess, actualWorkDir, spec); err != nil {
 		if withWorkspace {
 			m.discardWorkspace(repoPath, sess.Name)
 		}
@@ -567,8 +572,8 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 		return fail(fmt.Errorf("ディレクトリが見つかりません: %s", workDir), true)
 	}
 
-	args := buildStartArgs(csID, false, m.config.DefaultPermissionMode, m.buildSessionArgs(rec.Name, rec.RepoPath))
-	pid, err := m.backend.StartProcess(sessionID, m.processOpts(sessionID, workDir, args))
+	spec := m.startSpec(agentruntime.LaunchResume, RuntimeSessionID(csID), workDir, rec.Name, rec.RepoPath)
+	pid, err := m.backend.StartProcess(sessionID, m.processOpts(sessionID, workDir, spec))
 	if err != nil {
 		debuglog.Printf("[ResumeSession] StartProcess failed: %v", err)
 		return fail(fmt.Errorf("resuming claude code: %w", err), false)
@@ -660,8 +665,8 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	sess.WorkspaceName = wsName
 	sess.SubProjectDir = srcSubProjectDir
 
-	args := buildStartArgs(string(srcClaudeID), true, m.config.DefaultPermissionMode, m.buildSessionArgs(sess.Name, repoPath))
-	if err := m.startNewSession(sess, actualWorkDir, args); err != nil {
+	spec := m.startSpec(agentruntime.LaunchFork, srcClaudeID, actualWorkDir, sess.Name, repoPath)
+	if err := m.startNewSession(sess, actualWorkDir, spec); err != nil {
 		m.discardWorkspace(repoPath, wsName)
 		return nil, fmt.Errorf("starting forked session: %w", err)
 	}
@@ -1016,20 +1021,6 @@ func (m *Manager) copySessionsList() []*Session {
 	}
 	m.mu.RUnlock()
 	return list
-}
-
-// buildSessionArgs returns the flags shared by every launch mode (create / resume / fork):
-// --name <name>, --plugin-dir, and the --add-dir pairs for the repository.
-// name が空のときは --name を付けない（空文字の表示名を Claude Code に渡さないため）。
-func (m *Manager) buildSessionArgs(name, repoPath string) []string {
-	var args []string
-	if name != "" {
-		args = append(args, "--name", name)
-	}
-	if m.config.PluginDir != "" {
-		args = append(args, "--plugin-dir", m.config.PluginDir)
-	}
-	return append(args, m.buildAddDirArgs(repoPath)...)
 }
 
 // buildAddDirArgs returns --add-dir flag pairs for the given repository path.

@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pomesaka/claude-deck/internal/agentruntime"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
+	"github.com/pomesaka/claude-deck/internal/store"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
@@ -65,19 +67,19 @@ func newExternalSession(info *usage.SessionInfo) *Session { //nolint:unparam
 	name, repoPath, repoName, subProjectDir := resolveExternalSessionPaths(info.CWD, info.SessionID)
 
 	sess := &Session{
-		ID:            GenerateSessionID(),
-		Name:          name,
-		RepoPath:      repoPath,
-		RepoName:      repoName,
-		WorkspacePath: info.CWD,
-		SubProjectDir: subProjectDir,
-		SessionChain:  []ClaudeSessionID{ClaudeSessionID(info.SessionID)},
-		Status:        StatusUnmanaged,
-		Prompt:          info.Prompt,
-		PermissionMode:  info.PermissionMode,
-		StartedAt:       info.StartedAt,
-		LastActivity:    info.LastActivity,
-		TokenUsage: TokenUsageFromStats(info.Tokens),
+		ID:             GenerateSessionID(),
+		Name:           name,
+		RepoPath:       repoPath,
+		RepoName:       repoName,
+		WorkspacePath:  info.CWD,
+		SubProjectDir:  subProjectDir,
+		SessionChain:   []ClaudeSessionID{ClaudeSessionID(info.SessionID)},
+		Status:         StatusUnmanaged,
+		Prompt:         info.Prompt,
+		PermissionMode: info.PermissionMode,
+		StartedAt:      info.StartedAt,
+		LastActivity:   info.LastActivity,
+		TokenUsage:     TokenUsageFromStats(info.Tokens),
 	}
 	// FinishedAt は「プロセスが終了した時刻」であり、「最後に JSONL が更新された時刻」ではない。
 	// 外部セッションはプロセスが終了したかどうか不明（JSONL が止まっているだけかもしれない）。
@@ -195,6 +197,10 @@ func (m *Manager) handleNewFile(ev usage.FileEvent) {
 		return
 	}
 
+	if m.adoptRuntimeID(info) {
+		return
+	}
+
 	sess := newExternalSession(info)
 
 	m.mu.Lock()
@@ -217,9 +223,15 @@ func (m *Manager) DiscoverExternalSessions() (added int, hasMore bool) {
 	known := m.knownClaudeSessionIDs()
 
 	added = 0
+	adoptedAny := false
 	for _, info := range allInfos {
 		csID := ClaudeSessionID(info.SessionID)
 		if known[csID] {
+			continue
+		}
+		if m.adoptRuntimeID(info) {
+			debuglog.Printf("[discover] adopted runtime session %s for a managed session", info.SessionID)
+			adoptedAny = true
 			continue
 		}
 
@@ -240,10 +252,56 @@ func (m *Manager) DiscoverExternalSessions() (added int, hasMore bool) {
 		m.mu.Unlock()
 	}
 
-	if added > 0 {
+	if added > 0 || adoptedAny {
 		m.notifyChange()
 	}
 	// 取得件数が limit に達したら続きがある可能性がある
 	hasMore = len(allInfos) == m.config.MaxSessions
 	return added, hasMore
+}
+
+// adoptRuntimeID links a discovered runtime session ID to the managed session that
+// was launched in the same workspace and has no runtime ID yet. It reports whether
+// the ID was linked.
+//
+// WHY Claude Code を除く: Claude Code は deck-status プラグインの SessionStart が、環境変数の
+// deck ID で行を特定して ID を書く。作業ディレクトリの一致で推測すると、同じディレクトリで
+// 動く別の Claude Code の JSONL を取り違えうる。Codex には hook が無いので、JSONL の発見が
+// 唯一の手がかりになる。
+func (m *Manager) adoptRuntimeID(info *usage.SessionInfo) bool {
+	if info == nil || info.SessionID == "" || m.runtime().Provider() == agentruntime.ProviderClaude {
+		return false
+	}
+	name, repoPath, _, _ := resolveExternalSessionPaths(info.CWD, info.SessionID)
+
+	var target DeckSessionID
+	m.mu.RLock()
+	for _, sess := range m.sessions {
+		sess.mu.RLock()
+		candidate := sess.Status != StatusUnmanaged && len(sess.SessionChain) == 0
+		exactWorkspace := info.CWD != "" && sess.WorkspacePath == info.CWD
+		recreatedWorkspace := sess.WorkspacePath == "" && sess.Name == name && sess.RepoPath == repoPath
+		sess.mu.RUnlock()
+		if candidate && (exactWorkspace || recreatedWorkspace) {
+			target = sess.ID
+			break
+		}
+	}
+	m.mu.RUnlock()
+	if target == "" {
+		return false
+	}
+
+	adopted := false
+	if _, err := m.store.Update(string(target), func(r *store.Record) error {
+		adopted = applySessionStart(r, info.SessionID, SourceStartup)
+		return nil
+	}); err != nil {
+		debuglog.Printf("[adoptRuntimeID] %s: %v", target, err)
+		return false
+	}
+	if adopted {
+		m.Reload()
+	}
+	return adopted
 }

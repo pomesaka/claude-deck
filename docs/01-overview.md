@@ -1,8 +1,8 @@
 # システム概要
 
-claude-deck は **複数の Claude Code セッションを一括管理する TUI ダッシュボード**。
+claude-deck は **複数の coding agent セッションを一括管理する TUI ダッシュボード**。
 
-ユーザーが Claude Code を複数のプロジェクト・ブランチで並行して走らせ、承認待ち・質問待ちのセッションに素早く切り替えて対処することを支援する。
+ユーザーが Claude Code や Codex CLI を複数のプロジェクト・ブランチで並行して走らせ、承認待ち・質問待ちのセッションに素早く切り替えて対処することを支援する。
 
 ## C4 Context: システムと外部アクター
 
@@ -16,13 +16,13 @@ claude-deck は **複数の Claude Code セッションを一括管理する TUI
 │                     claude-deck                          │
 │                  (TUI ダッシュボード)                      │
 │                                                          │
-│  セッション一覧 / detail pane                             │
+│  セッション一覧 / detail pane / tmux window 管理           │
 └────┬─────────┬──────────┬──────────┬─────────────────────┘
      │         │          │          │
      ▼         ▼          ▼          ▼
 ┌─────────┐ ┌──────┐ ┌────────┐ ┌────────────┐
-│ Claude  │ │ jj   │ │Ghostty │ │ ファイル    │
-│  Code   │ │(VCS) │ │(端末)  │ │ システム   │
+│ Agent   │ │ jj   │ │Ghostty │ │ ファイル    │
+│ Runtime │ │(VCS) │ │(端末)  │ │ システム   │
 │  CLI    │ │      │ │        │ │            │
 └─────────┘ └──────┘ └────────┘ └────────────┘
   tmux/Hook   Workspace  外部端末    JSONL/Store
@@ -33,7 +33,7 @@ claude-deck は **複数の Claude Code セッションを一括管理する TUI
 
 | 外部システム | claude-deck との関係 |
 |-------------|---------------------|
-| **Claude Code CLI** | tmux ウィンドウで起動する。deck-status プラグイン（`--plugin-dir` で渡す）が `claude-deck hook` を実行して状態変化を store に書く。JSONL ログから対話履歴とトークン使用量を読み取る |
+| **Agent runtime CLI** | tmux ウィンドウで起動する。Claude provider は deck-status プラグイン（`--plugin-dir` で渡す）が `claude-deck hook` を実行して状態変化を store に書く。Codex provider は TUI が JSONL の runtime activity を読んで store に書く。どちらも JSONL ログから対話履歴とトークン使用量を読み取る |
 | **jj (Jujutsu)** | セッションごとに隔離されたワークスペースを作成。ブックマーク名をセッションラベルに使用 |
 | **Ghostty** | 外部ターミナルウィンドウの起動。将来的に detail pane の外部ホスティングに使用予定 |
 | **ファイルシステム** | JSONL ログ監視 (fsnotify)、Store（SQLite `deck.db`）の読み書きと変更監視 |
@@ -57,14 +57,15 @@ claude-deck は **複数の Claude Code セッションを一括管理する TUI
 │  store を直接読み書きする。new / close は tmux も操作    │
 └─────────────────────────────────────────────────────────┘
 
-┌─ Claude Code プロセス (N 個、tmux ウィンドウ内) ────────┐
-│  deck-status プラグイン → claude-deck hook ...           │
+┌─ Agent runtime プロセス (N 個、tmux ウィンドウ内) ──────┐
+│  Claude: deck-status プラグイン → claude-deck hook ...   │
 │  終了後に同じペインで claude-deck hook exited            │
 │  JSONL 書き込み → FileWatcher                            │
 └─────────────────────────────────────────────────────────┘
 
 ┌─ データストア ───────────────────┐
 │  ~/.claude/projects/**/*.jsonl   │  Claude Code が書く (一次データ)
+│  ~/.codex/sessions/**/*.jsonl    │  Codex が書く (一次データ)
 │  ~/.local/share/claude-deck/     │
 │    deck.db                       │  SQLite。deck セッションの信頼できる唯一の情報源
 │    plugin/                       │  deck-status プラグイン
@@ -75,17 +76,18 @@ claude-deck は **複数の Claude Code セッションを一括管理する TUI
 
 | 経路 | 手段 | 方向 |
 |------|------|------|
-| claude-deck → Claude Code | tmux ウィンドウの作成・削除 | 起動・終了 |
+| claude-deck → Agent runtime | tmux ウィンドウの作成・削除 | 起動・resume・fork・終了 |
 | Claude Code → store | deck-status プラグインが `claude-deck hook` を実行 | Status 遷移、SessionChain 更新 |
-| ペインのシェル → store | claude 終了後に `claude-deck hook exited` を実行 | Completed の記録 |
+| Codex の JSONL → store | TUI が runtime activity と JSONL の発見から書く | Status 遷移、SessionChain の最初の ID |
+| ペインのシェル → store | runtime 終了後に `claude-deck hook exited` を実行 | Completed の記録 |
 | CLI → store | `claude-deck new / list / close` | セッションの作成・一覧・close |
 | store → TUI | `PRAGMA data_version` を 200ms ごとに確認して `Reload` | 他プロセスの書き込みの反映 |
-| Claude Code → ファイル | JSONL 書き込み | 対話履歴・トークン記録 |
+| Agent runtime → ファイル | JSONL 書き込み | 対話履歴・トークン記録 |
 | ファイル → claude-deck | fsnotify | JSONL 変更通知、外部セッション発見 |
 
 ## データフロー
 
-Session の状態は3つのデータソースから投影 (projection) される。
+Session の状態は複数のデータソースから投影 (projection) される。
 
 ```
                     ┌───────────────────────────────────────┐
@@ -96,9 +98,11 @@ Session の状態は3つのデータソースから投影 (projection) される
   hook/CLI が書く  │     PID, ワークスペース               │
                     │                                       │
   JSONL ファイル ──►│ ApplyJSONLTokens()                    │
-  (Claude ログ)    │   → TokenUsage, Prompt, StartedAt     │
+  (Agent ログ)     │   → TokenUsage, Prompt, StartedAt     │
                     │ ApplyFileActivity()                   │
                     │   → LastActivity                      │
+                    │ RuntimeActivity (Codex)               │
+                    │   → CurrentTool（Status は store へ） │
                     │                                       │
                     │           ┌──────────┐                │
                     │           │ Snapshot  │───────► TUI   │

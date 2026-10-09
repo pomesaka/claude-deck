@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/pomesaka/claude-deck/internal/debuglog"
+	"github.com/pomesaka/claude-deck/internal/ratelimits"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
@@ -78,7 +79,7 @@ func (ss *streamState) clearIfCurrent(id DeckSessionID) {
 // in a background goroutine. Write events are coalesced (2秒間隔) して
 // LastActivity を更新。新規ファイルは 30 秒間隔の re-glob で発見する。
 func (m *Manager) StartFileWatcher(ctx context.Context) error {
-	mw, err := usage.NewMultiWatcher(m.usage.BaseDir(), 30*time.Second)
+	mw, err := usage.NewMultiWatcherForLayout(m.usage.BaseDir(), m.usage.Layout(), 30*time.Second)
 	if err != nil {
 		return err
 	}
@@ -106,12 +107,82 @@ func (m *Manager) handleFileWrite(ev usage.FileEvent) {
 
 		if string(csID) == ev.SessionID {
 			s.ApplyFileActivity(ev.ModTime)
+			m.applyRuntimeActivityFromJSONL(s, ev)
 			debuglog.Printf("[filewrite] matched session %s (deck=%s) LastActivity -> %s", csID, s.ID, ev.ModTime.Format("15:04:05"))
 			m.notifyChange(s.ID)
 			return
 		}
 	}
 	debuglog.Printf("[filewrite] no matching session for %s", ev.SessionID)
+}
+
+func (m *Manager) applyRuntimeActivityFromJSONL(sess *Session, ev usage.FileEvent) {
+	activity := m.usage.ReadRuntimeActivity(ev.Path)
+	if activity.SessionID != "" && activity.SessionID != ev.SessionID {
+		return
+	}
+	if activity.RateLimits != nil {
+		m.applyRuntimeRateLimits(activity.RateLimits)
+	}
+	if activity.Kind == usage.RuntimeActivityNone && activity.CurrentTool == "" && !activity.ClearTool {
+		return
+	}
+	if !sess.IsProcessAlive() {
+		return
+	}
+
+	switch activity.Kind {
+	case usage.RuntimeActivityRunning:
+		m.recordRuntimeStatus(sess, StatusRunning)
+	case usage.RuntimeActivityIdle:
+		m.recordRuntimeStatus(sess, StatusIdle)
+	}
+	if activity.CurrentTool != "" {
+		sess.SetCurrentTool(activity.CurrentTool)
+	} else if activity.ClearTool {
+		sess.SetCurrentTool("")
+	}
+}
+
+// recordRuntimeStatus writes a status read from the runtime's JSONL to the store.
+// Runtimes without hooks (Codex) report their status this way; the store stays the
+// only place the status is decided, as with `claude-deck hook status`.
+func (m *Manager) recordRuntimeStatus(sess *Session, status Status) {
+	if sess.GetStatus() == status {
+		return
+	}
+	if err := RecordHookStatus(m.store, sess.ID, status); err != nil {
+		debuglog.Printf("[recordRuntimeStatus] %s: %v", sess.ID, err)
+		return
+	}
+	m.Reload()
+}
+
+func (m *Manager) applyRuntimeRateLimits(limits *usage.RuntimeRateLimits) {
+	if limits == nil {
+		return
+	}
+	var status ratelimits.Status
+	if limits.FiveHourAvailable {
+		status.FiveHour = ratelimits.Window{
+			UsedPct:  limits.FiveHour.UsedPct,
+			ResetsAt: time.Unix(limits.FiveHour.ResetsAt, 0),
+		}
+		status.FiveHourAvailable = true
+	}
+	if limits.SevenDayAvailable {
+		status.SevenDay = ratelimits.Window{
+			UsedPct:  limits.SevenDay.UsedPct,
+			ResetsAt: time.Unix(limits.SevenDay.ResetsAt, 0),
+		}
+		status.SevenDayAvailable = true
+	}
+	if !status.FiveHourAvailable && !status.SevenDayAvailable {
+		return
+	}
+	if err := ratelimits.Save(m.config.DataDir, status); err != nil {
+		debuglog.Printf("[ratelimits] save failed: %v", err)
+	}
 }
 
 // StreamSession starts JSONL streaming for the given session (detail pane selection).
@@ -170,7 +241,7 @@ func (m *Manager) StreamSession(sessionID DeckSessionID) {
 		// 時点で打ち切ることで /clear が多数回行われた場合の不要な I/O を防ぐ。
 		var prefixEntries []usage.LogEntry
 		for i := len(priorPaths) - 1; i >= 0; i-- {
-			prev := usage.NewLogStreamer(priorPaths[i])
+			prev := m.usage.NewLogStreamer(priorPaths[i])
 			prev.ReadAll()
 			prefixEntries = append(prev.Entries(), prefixEntries...)
 			if len(prefixEntries) >= usage.MaxEntries {
@@ -199,7 +270,7 @@ func (m *Manager) StreamSession(sessionID DeckSessionID) {
 		}
 
 		// Phase 1: 末尾読み込みで即座に表示
-		s := usage.NewLogStreamer(path)
+		s := m.usage.NewLogStreamer(path)
 		fileSize := s.ReadTail(512 * 1024) // 512KB
 		onChange(s.Entries())
 
@@ -213,7 +284,7 @@ func (m *Manager) StreamSession(sessionID DeckSessionID) {
 				return
 			}
 			// エラー時は最初からやり直し
-			s = usage.NewLogStreamer(path)
+			s = m.usage.NewLogStreamer(path)
 			fileSize = s.ReadTail(512 * 1024)
 			onChange(s.Entries())
 			select {

@@ -3,9 +3,11 @@ package session
 import (
 	"slices"
 	"testing"
+
+	"github.com/pomesaka/claude-deck/internal/agentruntime"
 )
 
-func TestBuildSessionArgs(t *testing.T) {
+func TestStartSpec_SharedFlags(t *testing.T) {
 	tests := []struct {
 		name      string
 		sessName  string
@@ -47,9 +49,9 @@ func TestBuildSessionArgs(t *testing.T) {
 			m.config.AddDirsFunc = func(string) []string { return tt.addDirs }
 			m.config.PluginDir = tt.pluginDir
 
-			got := m.buildSessionArgs(tt.sessName, "/repo")
+			got := m.startSpec(agentruntime.LaunchNew, "", "/repo", tt.sessName, "/repo").Args
 			if !slices.Equal(got, tt.want) {
-				t.Errorf("buildSessionArgs(%q) = %v, want %v", tt.sessName, got, tt.want)
+				t.Errorf("startSpec(%q).Args = %v, want %v", tt.sessName, got, tt.want)
 			}
 		})
 	}

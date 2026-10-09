@@ -159,7 +159,23 @@ store と tmux を直接操作するので、TUI が起動していなくても�
   workspace/<encoded-repo>/<name>/    jj ワークスペース
   debug.log                           デバッグログ
 ~/.claude/projects/<project>/<uuid>.jsonl   Claude Code JSONL
+~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl Codex JSONL
 ```
+
+### Runtime provider
+
+`config.toml` の `[runtime] provider` で `claude`（デフォルト）または `codex` を選択する。
+
+```toml
+[runtime]
+provider = "codex"
+
+[commands]
+codex = "codex"
+```
+
+- `claude`: Claude Code plugin hooks を status / SessionChain 更新に使う。transcript は `~/.claude/projects`。
+- `codex`: Codex JSONL (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`) を transcript と runtime activity の一次データとして使う。
 
 ### deck-status プラグイン
 

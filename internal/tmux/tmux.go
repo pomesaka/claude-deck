@@ -169,7 +169,7 @@ func (r *Runner) SendKeys(windowName, keys string) error {
 // Separated from NewWindow so the argument construction can be unit-tested
 // without spawning real tmux processes.
 func newWindowArgs(sessionName, windowName string, opts WindowOpts) []string {
-	args := []string{"new-window", "-t", sessionName + ":", "-n", windowName}
+	args := []string{"new-window", "-d", "-t", sessionName + ":", "-n", windowName}
 	if opts.WorkDir != "" {
 		args = append(args, "-c", opts.WorkDir)
 	}

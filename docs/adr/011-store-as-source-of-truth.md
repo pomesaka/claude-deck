@@ -101,3 +101,14 @@ classic hook ではなく Mods を使う理由は、2026-10-09 に Mods の hook
 
 - バックグラウンドのサブエージェントが結果を返すと、`UserPromptSubmit` と `turn.start` が発火し、人の入力と区別できない。メインのループが結果を処理している間は実際に動いているので、Running にするのは誤りではないが、確かめてはいない
 - deck-status プラグインはローカルの `--plugin-dir` でだけ読み込む。marketplace での配布は決めていない
+
+## 追記（2026-10-09）: Runtime adapter（ADR-009 runtime-provider-abstraction）との統合
+
+main の Codex 対応と統合したときに、次のように決めた。
+
+- 起動コマンドは `agentruntime.Runtime` が組み立てる。`--name` と `--plugin-dir` は Claude の adapter が付け、Codex の adapter は `PluginDir` を無視する。deck-status プラグインの書き出しも Claude provider のときだけ行う。
+- Codex には hook が無いので、TUI が JSONL から読んだステータスと最初の runtime セッション ID を store に書く（`recordRuntimeStatus`、`adoptRuntimeID`）。遷移の規則は hook と同じ `applyHookStatus`・`applySessionStart` を使う。TUI が起動していない間、Codex セッションのステータスは更新されない。
+- 作業ディレクトリの一致で runtime セッション ID を結び付けるのは Codex だけにした。Claude Code は SessionStart hook が環境変数の deck ID で行を特定するので、推測が要らない。同じディレクトリで動く別の Claude Code の JSONL を取り違えないためでもある。
+- ウィンドウのコマンド末尾の `claude-deck hook exited` は runtime によらず付く。
+- Codex provider はデータディレクトリが別（`claude-deck-codex`）なので、`deck.db` も provider ごとに分かれる。
+

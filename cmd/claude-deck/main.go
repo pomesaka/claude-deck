@@ -16,6 +16,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/pomesaka/claude-deck/deckmod"
+	"github.com/pomesaka/claude-deck/internal/agentruntime"
 	"github.com/pomesaka/claude-deck/internal/claudecode"
 	"github.com/pomesaka/claude-deck/internal/config"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
@@ -92,16 +93,18 @@ func run() error {
 		return fmt.Errorf("creating data dir: %w", err)
 	}
 
-	// Claude Code の workspace trust プロンプトを回避するため、
-	// dataDir に .git を配置し trusted として登録する（初回のみ実効）
-	if err := claudecode.EnsureDataDirTrusted(cfg.DataDir); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: trust setup: %v\n", err)
-	}
+	if cfg.RuntimeProvider() == string(agentruntime.ProviderClaude) {
+		// Claude Code の workspace trust プロンプトを回避するため、
+		// dataDir に .git を配置し trusted として登録する（初回のみ実効）
+		if err := claudecode.EnsureDataDirTrusted(cfg.DataDir); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: trust setup: %v\n", err)
+		}
 
-	// Claude Code の statusline スクリプトを配置し ~/.claude/settings.json に登録する。
-	// スクリプトは各アシスタントメッセージ後に rate_limits データを DataDir に書き出す。
-	if err := claudecode.SetupStatuslineHook(cfg.DataDir); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: statusline setup: %v\n", err)
+		// Claude Code の statusline スクリプトを配置し ~/.claude/settings.json に登録する。
+		// スクリプトは各アシスタントメッセージ後に rate_limits データを DataDir に書き出す。
+		if err := claudecode.SetupStatuslineHook(cfg.DataDir); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: statusline setup: %v\n", err)
+		}
 	}
 
 	// Initialize store
@@ -268,8 +271,8 @@ func runPreview() error {
 }
 
 // buildManagerConfig constructs the ManagerConfig from app config.
-// It installs the deck-status plugin under the data directory, since every
-// session claude-deck starts (from the TUI or the CLI) loads it with --plugin-dir.
+// For Claude Code it installs the deck-status plugin under the data directory, since
+// every session claude-deck starts (from the TUI or the CLI) loads it with --plugin-dir.
 func buildManagerConfig(cfg *config.Config) (session.ManagerConfig, error) {
 	refreshInterval, err := time.ParseDuration(cfg.Session.RefreshInterval)
 	if err != nil {
@@ -282,13 +285,25 @@ func buildManagerConfig(cfg *config.Config) (session.ManagerConfig, error) {
 	if resolved, err := filepath.EvalSymlinks(deckCommand); err == nil {
 		deckCommand = resolved
 	}
-	pluginDir, err := deckmod.Install(filepath.Join(cfg.DataDir, "plugin"))
-	if err != nil {
-		return session.ManagerConfig{}, err
+
+	runtime := agentruntime.Runtime(agentruntime.ClaudeRuntime{Command: cfg.Commands.Claude})
+	transcriptReader := usage.NewReader("")
+	pluginDir := ""
+	if cfg.RuntimeProvider() == string(agentruntime.ProviderCodex) {
+		runtime = agentruntime.CodexRuntime{Command: cfg.Commands.Codex}
+		transcriptReader = usage.NewCodexReader("")
+	} else {
+		pluginDir, err = deckmod.Install(filepath.Join(cfg.DataDir, "plugin"))
+		if err != nil {
+			return session.ManagerConfig{}, err
+		}
 	}
+
 	return session.ManagerConfig{
 		DataDir:               cfg.DataDir,
+		AgentRuntime:          runtime,
 		ClaudeCommand:         cfg.Commands.Claude,
+		TranscriptReader:      transcriptReader,
 		JJ:                    &jj.Runner{Command: cfg.Commands.JJ},
 		DefaultPermissionMode: cfg.Defaults.PermissionMode,
 		MaxSessions:           cfg.Session.MaxSessions,

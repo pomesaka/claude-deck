@@ -1,7 +1,8 @@
 # claude-deck
 
 A TUI dashboard for managing multiple [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions.
-Integrates [jj (Jujutsu)](https://github.com/jj-vcs/jj) workspaces and [Ghostty](https://ghostty.org/) terminals to orchestrate and monitor Claude Code agents in parallel.
+Codex CLI support is available via `runtime.provider = "codex"`.
+Integrates [jj (Jujutsu)](https://github.com/jj-vcs/jj) workspaces and [Ghostty](https://ghostty.org/) terminals to orchestrate and monitor coding agents in parallel.
 
 <!-- <--- ダッシュボード全体のスクリーンショット: 左にセッションリスト、右に詳細ペイン。複数セッションが異なるステータス(Running/Idle/承認待ち)で並んでいる状態 ---> -->
 
@@ -21,7 +22,7 @@ claude-deck solves this with a single dashboard that monitors all sessions, high
 - **Multi-session dashboard** — Monitor all Claude Code sessions in a single TUI with real-time status updates
 - **Attention alerts** — Sessions waiting for approval or answers are highlighted and reachable with `Tab`
 - **JSONL structured log viewer** — Browse tool calls, diffs, and assistant responses in a readable format
-- **PTY input mode** — Interact with Claude Code directly from the dashboard (`Enter`/`i`)
+- **tmux session hosting** — Interact with the selected agent in its managed tmux window
 - **jj workspace isolation** — Each session gets its own workspace, preventing file conflicts between agents
 - **Session discovery** — Automatically finds Claude Code sessions started outside claude-deck
 - **Token & cost tracking** — Per-session token usage with cost estimates
@@ -42,7 +43,7 @@ claude-deck solves this with a single dashboard that monitors all sessions, high
 ### Prerequisites
 
 - Go 1.26+
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude` command)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude` command) or Codex CLI (`codex` command)
 - [jj (Jujutsu)](https://github.com/jj-vcs/jj)
 - [Ghostty](https://ghostty.org/) (optional, for `t` key terminal launch)
 
@@ -64,7 +65,9 @@ GOEXPERIMENT=jsonv2 go build -o claude-deck ./cmd/claude-deck
 
 ### Status tracking
 
-claude-deck tracks session status (running, waiting for approval, idle) with the `deck-status` plugin embedded in the binary. On startup it is written to `~/.local/share/claude-deck/plugin/` and passed to every Claude Code session claude-deck launches with `--plugin-dir`. No separate install is needed.
+With `runtime.provider = "claude"` (the default), claude-deck tracks session status (running, waiting for approval, idle) with the `deck-status` plugin embedded in the binary. On startup it is written to `~/.local/share/claude-deck/plugin/` and passed to every Claude Code session claude-deck launches with `--plugin-dir`. No separate install is needed.
+
+With `runtime.provider = "codex"`, the status is read from the Codex JSONL instead.
 
 ### First run
 
@@ -140,7 +143,12 @@ diff_del = "#F38BA8"
 
 [commands]
 claude = "claude"
+codex = "codex"
 jj = "jj"
+
+[runtime]
+# "claude" (default) or "codex"
+provider = "claude"
 
 [discovery]
 # Marker files to detect subprojects within jj repositories (monorepo support).
@@ -205,7 +213,8 @@ See [docs/architecture.md](docs/architecture.md) for details.
   plugin/                                  deck-status plugin
   workspace/<encoded-repo>/<name>/         jj workspaces
   debug.log                                Debug log
-~/.claude/projects/<project>/<uuid>.jsonl  Claude Code JSONL (read by claude-deck)
+~/.claude/projects/<project>/<uuid>.jsonl              Claude Code JSONL (read by claude-deck)
+~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl           Codex JSONL (read by claude-deck when provider = "codex")
 ```
 
 ## Q&A

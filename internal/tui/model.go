@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"charm.land/bubbles/v2/list"
@@ -16,7 +17,6 @@ import (
 	"github.com/pomesaka/claude-deck/internal/ratelimits"
 	"github.com/pomesaka/claude-deck/internal/session"
 )
-
 
 // viewMode determines what the TUI is currently showing.
 type viewMode int
@@ -87,12 +87,16 @@ type Model struct {
 	// viewSnaps[i] is a snapshot of visibleSessions()[i] and shares the same
 	// index space as m.cursor. Sorting or filtering changes must always be
 	// followed by refreshViewData() to keep this invariant.
-	viewSnaps    []session.Snapshot
-	selectedSnap *session.Snapshot // snapshot for the selected session (nil = no selection)
-	attentionCount int // sessions with Status.NeedsAttention() == true
+	viewSnaps      []session.Snapshot
+	selectedSnap   *session.Snapshot // snapshot for the selected session (nil = no selection)
+	attentionCount int               // sessions with Status.NeedsAttention() == true
 
 	// rate limits data from Claude Code statusline (Pro/Max subscribers only)
 	rateLimitsStatus ratelimits.Status
+
+	// rightPaneGeneration is shared with pane-switch Cmds so stale switches cannot
+	// overwrite the latest selected session after rapid cursor movement.
+	rightPaneGeneration *atomic.Uint64
 }
 
 // SessionRefreshMsg triggers a session list refresh.
@@ -105,7 +109,6 @@ type SessionRefreshMsg struct {
 
 // statusClearMsg clears the status message.
 type statusClearMsg struct{}
-
 
 // sessionCreatedMsg is sent when an async session creation completes.
 type sessionCreatedMsg struct {
@@ -167,14 +170,15 @@ func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context, opt
 	// 値に関わらず BackendModeSplit を使用する。
 	_ = opt.SplitMode
 	m := Model{
-		manager:         mgr,
-		config:          cfg,
-		ghostty:         ghostty.NewLauncher(cfg.Ghostty.Command),
-		ctx:             ctx,
-		repoList:        rl,
-		filterInput:     fi,
-		refreshInterval: refreshInterval,
-		backendMode:     BackendModeSplit,
+		manager:             mgr,
+		config:              cfg,
+		ghostty:             ghostty.NewLauncher(cfg.Ghostty.Command),
+		ctx:                 ctx,
+		repoList:            rl,
+		filterInput:         fi,
+		refreshInterval:     refreshInterval,
+		backendMode:         BackendModeSplit,
+		rightPaneGeneration: &atomic.Uint64{},
 	}
 
 	m.refreshSessions() // cmds discarded — bubbletea event loop not yet running
@@ -203,6 +207,22 @@ func metadataTickCmd(interval time.Duration) tea.Cmd {
 // claude-deck statusline script. main.go injects this via p.Send().
 type RateLimitsUpdatedMsg struct {
 	Status ratelimits.Status
+}
+
+type rightPaneTarget int
+
+const (
+	rightPaneNone rightPaneTarget = iota
+	rightPanePreview
+	rightPaneTmux
+)
+
+type rightPaneSwitch struct {
+	SessionID  session.DeckSessionID
+	FocusRight bool
+	Target     rightPaneTarget
+	Spec       preview.PreviewSpec
+	Generation uint64
 }
 
 // Init returns the initial command.
@@ -258,9 +278,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "新規セッションを作成しました"
 			m.selectedID = msg.sessionID
 			cmds = append(cmds, m.refreshSessions()...)
-			// m.selectedID を refreshSessions() 前に設定するため updateSelected() で
-			// idChanged=false になる。switchRightPane で明示的に右ペインを切替する。
-			cmds = append(cmds, m.switchRightPane(msg.sessionID, true))
+			// CreateSession が成功した時点で tmux window は作成済み。
+			// 作成直後は JSONL hydrate や snapshot 更新順の影響で Display が一時的に
+			// JSONL に見えることがあるため、明示操作では tmux を直接選ぶ。
+			cmds = append(cmds, m.switchRightPaneToTmux(msg.sessionID, true))
 		}
 		cmds = append(cmds, clearStatusCmd())
 
@@ -269,9 +290,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "再開エラー: " + msg.err.Error()
 		} else {
 			m.statusMsg = "セッションを再開しました"
-			// ResumeSession が完了した時点でセッションは managed=true になっており
-			// DisplayTmux に遷移済み。switchRightPane が FocusSession + FocusRight を発行する。
-			cmds = append(cmds, m.switchRightPane(m.selectedID, true))
+			// ResumeSession が成功した時点で tmux window は作成済み。
+			cmds = append(cmds, m.switchRightPaneToTmux(m.selectedID, true))
 		}
 		cmds = append(cmds, clearStatusCmd())
 
@@ -282,8 +302,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "セッションをフォークしました"
 			m.selectedID = msg.sessionID
 			cmds = append(cmds, m.refreshSessions()...)
-			// sessionCreatedMsg と同じ理由で明示的に切替する。
-			cmds = append(cmds, m.switchRightPane(msg.sessionID, true))
+			// sessionCreatedMsg と同じ理由で tmux を直接選ぶ。
+			cmds = append(cmds, m.switchRightPaneToTmux(msg.sessionID, true))
 		}
 		cmds = append(cmds, clearStatusCmd())
 
@@ -542,67 +562,148 @@ func (m *Model) buildPreviewSpec() preview.PreviewSpec {
 func (m *Model) buildPreviewSpecFromSnap(snap session.Snapshot) preview.PreviewSpec {
 	jsonlPath, priorPaths := m.manager.ResolveJSONLPaths(snap.ID)
 	return preview.PreviewSpec{
-		DeckSessionID:   snap.ID,
-		Name:            snap.Name,
-		RepoName:        snap.RepoName,
-		WorkspacePath:   snap.WorkspacePath,
-		ClaudeSessionID: snap.ClaudeSessionID,
-		PriorClaudeIDs:  snap.PriorClaudeIDs,
-		ClearCount:      snap.ClearCount,
-		Status:          snap.Status.ID(),
-		Display:         snap.Display.String(),
-		CurrentTool:     snap.CurrentTool,
-		ErrorMessage:    snap.ErrorMessage,
-		NeedsAttention:  snap.Status.NeedsAttention(),
-		JSONLPath:       jsonlPath,
-		PriorJSONLPaths: priorPaths,
+		DeckSessionID:    snap.ID,
+		Name:             snap.Name,
+		RepoName:         snap.RepoName,
+		WorkspacePath:    snap.WorkspacePath,
+		RuntimeSessionID: snap.RuntimeSessionID,
+		PriorRuntimeIDs:  snap.PriorRuntimeIDs,
+		ClaudeSessionID:  snap.RuntimeSessionID,
+		PriorClaudeIDs:   snap.PriorRuntimeIDs,
+		ClearCount:       snap.ClearCount,
+		Status:           snap.Status.ID(),
+		Display:          snap.Display.String(),
+		CurrentTool:      snap.CurrentTool,
+		ErrorMessage:     snap.ErrorMessage,
+		NeedsAttention:   snap.Status.NeedsAttention(),
+		TranscriptLayout: m.config.RuntimeProvider(),
+		JSONLPath:        jsonlPath,
+		PriorJSONLPaths:  priorPaths,
 	}
 }
 
 // switchRightPane は右ペイン制御を tea.Cmd として返す。
-// Update() のメッセージハンドラから発行する明示的なユーザー操作（Enter/n/r/f）に使う。
+// カーソル移動と明示的なユーザー操作（Enter/n/r/f）から使う。
 //
-// 副作用: split モードかつ DisplayJSONL の場合、preview.WriteSpec でプレビュープロセスへ
-// IPC 書き込みを行う（選択セッションの PreviewSpec をファイルに書き出す）。
+// 副作用: split モードでは DisplayTmux の場合は tmux window を、DisplayJSONL の場合は
+// preview window を右ペインへ表示する。focusRight は Ghostty のキーボードフォーカス移動だけを制御する。
 //
-// display と spec は Update フレーム内（Cmd 生成時）でキャプチャする。
-// bubbletea は Cmd を別 goroutine で実行するため、後からカーソルが移動しても
-// 生成時点のセッションに対する仕様が書き出される（順序性の保証）。
+// display と spec は switchRightPane 呼び出し時点でキャプチャする。
+// bubbletea の Cmd は完了順が保証されないため、共有 generation を使って
+// 非同期副作用の実行直前とフォーカス移動前に stale な切り替えを破棄する。
 //
 // sid は selectedID とは限らない（sessionCreatedMsg/sessionForkedMsg は新規セッションの ID を渡す）。
 // そのため selectedSnap ではなく GetSession(sid) で直接取得する。
 func (m *Model) switchRightPane(sid session.DeckSessionID, focusRight bool) tea.Cmd {
+	sw := m.buildRightPaneSwitch(sid, focusRight)
+	return m.executeRightPaneSwitch(sw)
+}
+
+func (m *Model) switchRightPaneToTmux(sid session.DeckSessionID, focusRight bool) tea.Cmd {
+	sw := rightPaneSwitch{
+		SessionID:  sid,
+		FocusRight: focusRight,
+		Target:     rightPaneTmux,
+		Generation: m.nextRightPaneGeneration(),
+	}
+	return m.executeRightPaneSwitch(sw)
+}
+
+func (m *Model) buildRightPaneSwitch(sid session.DeckSessionID, focusRight bool) rightPaneSwitch {
 	// Update フレーム内で display と spec を確定する。
 	// GetSession(sid) から直接 Snapshot を取得することで sid と selectedID が異なる場合
 	// （sessionCreatedMsg / sessionForkedMsg など）でも正しいセッションの spec が書き出される。
-	var display session.DisplayChannel
-	var spec preview.PreviewSpec
+	sw := rightPaneSwitch{SessionID: sid, FocusRight: focusRight}
 	if sess := m.manager.GetSession(sid); sess != nil {
-		snap := sess.Snapshot()
-		display = snap.Display
-		if display != session.DisplayTmux {
-			spec = m.buildPreviewSpecFromSnap(snap)
-		}
+		sw = m.buildRightPaneSwitchFromSnap(sess.Snapshot(), focusRight)
+	} else {
+		sw.Generation = m.nextRightPaneGeneration()
 	}
+	return sw
+}
+
+func (m *Model) buildRightPaneSwitchFromSnap(snap session.Snapshot, focusRight bool) rightPaneSwitch {
+	sw := rightPaneSwitch{
+		SessionID:  snap.ID,
+		FocusRight: focusRight,
+		Target:     rightPaneTargetForDisplay(snap.Display),
+		Generation: m.nextRightPaneGeneration(),
+	}
+	if sw.Target == rightPanePreview {
+		sw.Spec = m.buildPreviewSpecFromSnap(snap)
+	}
+	return sw
+}
+
+func rightPaneTargetForDisplay(display session.DisplayChannel) rightPaneTarget {
+	if display == session.DisplayTmux {
+		return rightPaneTmux
+	}
+	return rightPanePreview
+}
+
+func (m *Model) executeRightPaneSwitch(sw rightPaneSwitch) tea.Cmd {
+	if !m.shouldApplyRightPaneSwitch(sw) {
+		return nil
+	}
+
+	latest := m.rightPaneGeneration
 	dataDir := m.config.DataDir
 	mgr := m.manager
 	return func() tea.Msg {
-		if display == session.DisplayTmux {
-			_ = mgr.FocusSession(sid)
-			if focusRight {
-				_ = ghostty.FocusRight()
+		if latest != nil && latest.Load() != sw.Generation {
+			return nil
+		}
+		if sw.Target == rightPaneTmux {
+			if err := mgr.FocusSession(sw.SessionID); err != nil {
+				debuglog.Printf("[switchRightPane] tmux focus session=%s: %v", sw.SessionID, err)
+			}
+			if latest != nil && latest.Load() != sw.Generation {
+				return nil
+			}
+			if sw.FocusRight {
+				if err := ghostty.FocusRight(); err != nil {
+					debuglog.Printf("[switchRightPane] ghostty focus right: %v", err)
+				}
 			}
 			return nil
 		}
-		if err := preview.WriteSpec(dataDir, spec); err != nil {
+		if err := preview.WriteSpec(dataDir, sw.Spec); err != nil {
 			debuglog.Printf("[switchRightPane] preview IPC: %v", err)
 		}
-		_ = mgr.FocusPreviewWindow()
-		if focusRight {
-			_ = ghostty.FocusRight()
+		if latest != nil && latest.Load() != sw.Generation {
+			return nil
+		}
+		if err := mgr.FocusPreviewWindow(); err != nil {
+			debuglog.Printf("[switchRightPane] tmux focus preview: %v", err)
+		}
+		if latest != nil && latest.Load() != sw.Generation {
+			return nil
+		}
+		if sw.FocusRight {
+			if err := ghostty.FocusRight(); err != nil {
+				debuglog.Printf("[switchRightPane] ghostty focus right: %v", err)
+			}
 		}
 		return nil
 	}
+}
+
+func (m *Model) shouldApplyRightPaneSwitch(sw rightPaneSwitch) bool {
+	if sw.Target == rightPaneNone {
+		return false
+	}
+	if !sw.FocusRight && sw.SessionID != m.selectedID {
+		return false
+	}
+	return true
+}
+
+func (m *Model) nextRightPaneGeneration() uint64 {
+	if m.rightPaneGeneration == nil {
+		m.rightPaneGeneration = &atomic.Uint64{}
+	}
+	return m.rightPaneGeneration.Add(1)
 }
 
 // ensureCursorVisible adjusts scrollOffset so the cursor is within the visible window.

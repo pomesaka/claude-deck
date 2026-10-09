@@ -13,6 +13,7 @@ import (
 // Use Run for blocking event-driven streaming, or ReadAll for one-shot reads.
 type LogStreamer struct {
 	path      string
+	layout    TranscriptLayout
 	entries   []LogEntry
 	toolIndex map[string]int
 	depth     int // サブエージェントの再帰深度（0=親）
@@ -26,10 +27,26 @@ type LogStreamer struct {
 func NewLogStreamer(path string) *LogStreamer {
 	return &LogStreamer{
 		path:          path,
+		layout:        TranscriptClaude,
 		toolIndex:     make(map[string]int),
 		agentMap:      make(map[string]string),
 		inlinedAgents: make(map[string]bool),
 	}
+}
+
+// NewCodexLogStreamer creates a streamer for Codex transcript JSONL.
+func NewCodexLogStreamer(path string) *LogStreamer {
+	s := NewLogStreamer(path)
+	s.layout = TranscriptCodex
+	return s
+}
+
+// NewLogStreamer creates a streamer that matches this Reader's transcript layout.
+func (r *Reader) NewLogStreamer(path string) *LogStreamer {
+	if r.layout == TranscriptCodex {
+		return NewCodexLogStreamer(path)
+	}
+	return NewLogStreamer(path)
 }
 
 // MaxEntries is the maximum number of log entries to keep. Override from config before use.
@@ -55,6 +72,10 @@ func (s *LogStreamer) ReadAll() {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
+		if s.layout == TranscriptCodex {
+			processCodexEntry(scanner.Bytes(), &s.entries)
+			continue
+		}
 		var entry jsonlEntry
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			continue // skip malformed lines
@@ -94,6 +115,10 @@ func (s *LogStreamer) ReadTail(tailBytes int64) int64 {
 	}
 
 	for scanner.Scan() {
+		if s.layout == TranscriptCodex {
+			processCodexEntry(scanner.Bytes(), &s.entries)
+			continue
+		}
 		var entry jsonlEntry
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			continue
@@ -121,6 +146,12 @@ func (s *LogStreamer) RunFrom(ctx context.Context, offset int64, onChange func([
 	scanner := bufio.NewScanner(tr)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
+		if s.layout == TranscriptCodex {
+			if processCodexEntry(scanner.Bytes(), &s.entries) && onChange != nil {
+				onChange(s.Entries())
+			}
+			continue
+		}
 		var entry jsonlEntry
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			continue // skip malformed lines

@@ -43,13 +43,14 @@ func (m Model) View() tea.View {
 
 func (m Model) renderHeader() string {
 	// Left: selected session status bar (kept open for future use when nothing is selected).
-	var statusBar string
+	runtimeBadge := dimStyle.Render("[" + m.config.RuntimeProvider() + "]")
+	statusBar := runtimeBadge
 	if m.selectedSnap != nil {
 		snap := *m.selectedSnap
 		icon := sessionStatusIcon(snap.Status)
 		name := lipgloss.NewStyle().Foreground(colorText).Bold(true).Render(snap.Name)
 		repo := dimStyle.Render("(" + snap.RepoName + ")")
-		statusBar = lipgloss.JoinHorizontal(lipgloss.Top, icon, " ", name, "  ", repo)
+		statusBar = lipgloss.JoinHorizontal(lipgloss.Top, runtimeBadge, " ", icon, " ", name, "  ", repo)
 	}
 	left := lipgloss.NewStyle().Padding(0, 1).Render(statusBar)
 
@@ -58,14 +59,24 @@ func (m Model) renderHeader() string {
 	if m.attentionCount > 0 {
 		badge = statusApproveStyle.Render(fmt.Sprintf(" [%d asking...]", m.attentionCount))
 	}
-	right := badge
-	if usage := m.renderRateLimits(); usage != "" {
-		right = lipgloss.JoinHorizontal(lipgloss.Top, right, "  ", usage)
+	firstLine := left
+	if badge != "" {
+		firstLine = lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", badge)
 	}
-	if right == "" {
-		return left
+
+	usage := m.renderRateLimits()
+	if usage == "" {
+		return firstLine
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
+	secondLine := lipgloss.NewStyle().Padding(0, 1).Render(usage)
+	return lipgloss.JoinVertical(lipgloss.Left, firstLine, secondLine)
+}
+
+func (m Model) headerLineCount() int {
+	if m.renderRateLimits() == "" {
+		return 1
+	}
+	return 2
 }
 
 // sessionStatusIcon returns a colored "●" for the given status.
@@ -89,7 +100,7 @@ func sessionStatusIcon(s session.Status) string {
 }
 
 func (m Model) renderMain() string {
-	contentHeight := m.height - 2
+	contentHeight := m.height - m.headerLineCount() - 1
 	if contentHeight < 3 {
 		contentHeight = 3
 	}
@@ -504,4 +515,3 @@ func padRightBg(s string, w int, bg lipgloss.Style) string {
 	}
 	return s + bg.Render(strings.Repeat(" ", w-cur))
 }
-

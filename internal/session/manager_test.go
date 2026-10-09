@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pomesaka/claude-deck/internal/agentruntime"
 	"github.com/pomesaka/claude-deck/internal/store"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
@@ -184,7 +185,7 @@ func TestCreateSession_MissingWorkDir(t *testing.T) {
 
 func TestProcessOpts_WithoutDeckCommand(t *testing.T) {
 	m, _ := newTestManager(t)
-	opts := m.processOpts("abc", "/w", nil)
+	opts := m.processOpts("abc", "/w", agentruntime.StartSpec{Command: "claude"})
 	if opts.OnExit != nil {
 		t.Errorf("OnExit = %v, want nil when DeckCommand is empty", opts.OnExit)
 	}
