@@ -307,7 +307,7 @@ func (m *Model) forkSelected() tea.Cmd {
 // Runs asynchronously via tea.Cmd so large workspace deletions (e.g. node_modules) do not block the UI.
 //
 // Unlike resumeSelected/forkSelected (which complete quickly and are guarded at the Manager
-// layer by status checks), cleanupWorkspace can take many seconds on large directories.
+// layer by status checks), removing the workspace can take many seconds on large directories.
 // m.killing prevents concurrent workspace deletions while one is already in flight.
 func (m *Model) killSelected() tea.Cmd {
 	if m.selectedID == "" || m.killing {

@@ -17,8 +17,8 @@ func TestDefault(t *testing.T) {
 	if cfg.DataDir == "" {
 		t.Error("expected non-empty DataDir")
 	}
-	if cfg.Keybinds.Quit != "q" {
-		t.Errorf("Keybinds.Quit = %q, want 'q'", cfg.Keybinds.Quit)
+	if cfg.Keybinds.Fork != "f" {
+		t.Errorf("Keybinds.Fork = %q, want 'f'", cfg.Keybinds.Fork)
 	}
 	// Theme defaults
 	if cfg.Theme.Primary != "#7C3AED" {
@@ -120,7 +120,7 @@ provider = "codex"
 
 [session]
 max_sessions = 50
-max_log_lines = 2000
+max_log_lines = 2000 # 読む側の無い古いキー。あっても読み込みは失敗しない
 discovery_days = 7
 refresh_interval = "10s"
 

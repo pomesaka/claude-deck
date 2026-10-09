@@ -48,59 +48,6 @@ func TestStatus_IsTerminal(t *testing.T) {
 	}
 }
 
-func TestStatus_CanTransitionTo(t *testing.T) {
-	tests := []struct {
-		from, to Status
-		want     bool
-	}{
-		// Identity transitions
-		{StatusIdle, StatusIdle, true},
-		{StatusRunning, StatusRunning, true},
-
-		// Idle transitions
-		{StatusIdle, StatusRunning, true},
-		{StatusIdle, StatusCompleted, true},
-		{StatusIdle, StatusError, true},
-		{StatusIdle, StatusWaitingApproval, false},
-
-		// Running transitions
-		{StatusRunning, StatusIdle, true},
-		{StatusRunning, StatusWaitingApproval, true},
-		{StatusRunning, StatusWaitingAnswer, true},
-		{StatusRunning, StatusCompleted, true},
-		{StatusRunning, StatusError, true},
-
-		// WaitingApproval transitions
-		{StatusWaitingApproval, StatusRunning, true},
-		{StatusWaitingApproval, StatusIdle, true},
-		{StatusWaitingApproval, StatusCompleted, true},
-		{StatusWaitingApproval, StatusWaitingAnswer, false},
-
-		// WaitingAnswer transitions
-		{StatusWaitingAnswer, StatusRunning, true},
-		{StatusWaitingAnswer, StatusIdle, true},
-		{StatusWaitingAnswer, StatusCompleted, true},
-		{StatusWaitingAnswer, StatusWaitingApproval, false},
-
-		// Terminal state transitions
-		{StatusCompleted, StatusIdle, true},   // Resume
-		{StatusCompleted, StatusRunning, false},
-		{StatusCompleted, StatusError, true},
-		{StatusError, StatusIdle, true},        // Resume
-		{StatusError, StatusRunning, false},
-
-		// Unmanaged never transitions
-		{StatusUnmanaged, StatusRunning, false},
-		{StatusUnmanaged, StatusCompleted, false},
-	}
-	for _, tt := range tests {
-		got := tt.from.canTransitionTo(tt.to)
-		if got != tt.want {
-			t.Errorf("Status(%v).canTransitionTo(%v) = %v, want %v", tt.from, tt.to, got, tt.want)
-		}
-	}
-}
-
 func TestStatus_NeedsAttention(t *testing.T) {
 	tests := []struct {
 		status Status
@@ -118,63 +65,6 @@ func TestStatus_NeedsAttention(t *testing.T) {
 		if got := tt.status.NeedsAttention(); got != tt.want {
 			t.Errorf("Status(%d).NeedsAttention() = %v, want %v", tt.status, got, tt.want)
 		}
-	}
-}
-
-func TestSessionPhase_String(t *testing.T) {
-	tests := []struct {
-		phase SessionPhase
-		want  string
-	}{
-		{PhaseActive, "Active"},
-		{PhaseArchived, "Archived"},
-		{PhaseExternal, "External"},
-		{SessionPhase(99), "Unknown"},
-	}
-	for _, tt := range tests {
-		if got := tt.phase.String(); got != tt.want {
-			t.Errorf("SessionPhase(%d).String() = %q, want %q", tt.phase, got, tt.want)
-		}
-	}
-}
-
-func TestSession_Phase(t *testing.T) {
-	tests := []struct {
-		name    string
-		status  Status
-		managed bool
-		want    SessionPhase
-	}{
-		{"running managed", StatusRunning, true, PhaseActive},
-		{"idle managed", StatusIdle, true, PhaseActive},
-		{"waiting managed", StatusWaitingApproval, true, PhaseActive},
-		{"idle unmanaged", StatusIdle, false, PhaseActive},       // Idle but not terminal
-		{"completed unmanaged", StatusCompleted, false, PhaseArchived},
-		{"error unmanaged", StatusError, false, PhaseArchived},
-		{"completed still managed", StatusCompleted, true, PhaseActive}, // rare: watchProcess hasn't run yet
-		{"unmanaged", StatusUnmanaged, false, PhaseExternal},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sess := NewSession("/repo", "repo")
-			sess.Status = tt.status
-			if tt.managed {
-				// Simulate a managed session: a running process is attached.
-				// The key invariant is process.Load() != nil ↔ managed.
-				sess.AttachProcess(0)
-			}
-			snap := sess.Snapshot()
-			if snap.Phase() != tt.want {
-				t.Errorf("Phase = %v, want %v", snap.Phase(), tt.want)
-			}
-		})
-	}
-}
-
-func TestTokenUsage_TotalTokens(t *testing.T) {
-	tu := TokenUsage{InputTokens: 100, OutputTokens: 50}
-	if got := tu.TotalTokens(); got != 150 {
-		t.Errorf("TotalTokens() = %d, want 150", got)
 	}
 }
 
@@ -249,23 +139,6 @@ func TestGenerateWorkspaceName(t *testing.T) {
 	}
 }
 
-func TestSession_SetGetStatus(t *testing.T) {
-	sess := NewSession("/repo", "repo")
-
-	sess.SetStatus(StatusWaitingApproval)
-	if got := sess.GetStatus(); got != StatusWaitingApproval {
-		t.Errorf("GetStatus() = %v, want StatusWaitingApproval", got)
-	}
-
-	sess.SetStatus(StatusCompleted)
-	if got := sess.GetStatus(); got != StatusCompleted {
-		t.Errorf("GetStatus() = %v, want StatusCompleted", got)
-	}
-	if sess.FinishedAt == nil {
-		t.Error("expected FinishedAt to be set on completion")
-	}
-}
-
 func TestSession_SetCurrentTool(t *testing.T) {
 	sess := NewSession("/repo", "repo")
 	sess.SetCurrentTool("bash")
@@ -273,20 +146,6 @@ func TestSession_SetCurrentTool(t *testing.T) {
 	snap := sess.Snapshot()
 	if snap.CurrentTool != "bash" {
 		t.Errorf("CurrentTool = %q, want 'bash'", snap.CurrentTool)
-	}
-}
-
-func TestSession_AddTokens(t *testing.T) {
-	sess := NewSession("/repo", "repo")
-	sess.AddTokens(100, 50)
-	sess.AddTokens(200, 100)
-
-	snap := sess.Snapshot()
-	if snap.TokenUsage.InputTokens != 300 {
-		t.Errorf("InputTokens = %d, want 300", snap.TokenUsage.InputTokens)
-	}
-	if snap.TokenUsage.OutputTokens != 150 {
-		t.Errorf("OutputTokens = %d, want 150", snap.TokenUsage.OutputTokens)
 	}
 }
 
@@ -316,7 +175,7 @@ func TestSession_Elapsed_Completed(t *testing.T) {
 func TestSession_Snapshot(t *testing.T) {
 	sess := NewSession("/repo", "my-repo")
 	sess.SetCurrentTool("read")
-	sess.AddTokens(500, 200)
+	sess.TokenUsage = TokenUsage{InputTokens: 500, OutputTokens: 200}
 
 	snap := sess.Snapshot()
 	if snap.ID != sess.ID {
@@ -343,7 +202,7 @@ func TestSession_ConcurrentAccess(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range 100 {
-			sess.AddTokens(1, 1)
+			sess.ApplyFileActivity(time.Now())
 			sess.SetCurrentTool("bash")
 		}
 	}()
@@ -366,32 +225,6 @@ func TestSession_ConcurrentAccess(t *testing.T) {
 	}()
 
 	wg.Wait()
-}
-
-func TestSession_SetStatus_FromHook(t *testing.T) {
-	sess := NewSession("/repo", "repo")
-
-	// Hook 経由のステータス更新も SetStatus を使う
-	sess.SetStatus(StatusWaitingApproval)
-	if got := sess.GetStatus(); got != StatusWaitingApproval {
-		t.Errorf("GetStatus() = %v, want StatusWaitingApproval", got)
-	}
-
-	sess.SetStatus(StatusIdle)
-	if got := sess.GetStatus(); got != StatusIdle {
-		t.Errorf("GetStatus() = %v, want StatusIdle", got)
-	}
-
-	// Completed 経由で FinishedAt が設定されることを確認
-	sess.SetStatus(StatusCompleted)
-	if got := sess.GetStatus(); got != StatusCompleted {
-		t.Errorf("GetStatus() = %v, want StatusCompleted", got)
-	}
-	sess.mu.RLock()
-	if sess.FinishedAt == nil {
-		t.Error("FinishedAt should be set after StatusCompleted")
-	}
-	sess.mu.RUnlock()
 }
 
 func TestEncodePathForDir(t *testing.T) {
@@ -429,26 +262,28 @@ func TestDisplayChannel_String(t *testing.T) {
 
 func TestDisplayChannel_Derivation(t *testing.T) {
 	tests := []struct {
-		name    string
-		managed bool // true → AttachProcess called
-		want    DisplayChannel
+		status          Status
+		wantDisplay     DisplayChannel
+		wantProcessLive bool
 	}{
-		// process attached → tmux owns terminal → DisplayTmux
-		{"managed", true, DisplayTmux},
-		// no process → show structured logs → DisplayJSONL
-		{"unmanaged", false, DisplayJSONL},
+		{StatusIdle, DisplayTmux, true},
+		{StatusRunning, DisplayTmux, true},
+		{StatusWaitingApproval, DisplayTmux, true},
+		{StatusWaitingAnswer, DisplayTmux, true},
+		{StatusCompleted, DisplayJSONL, false},
+		{StatusError, DisplayJSONL, false},
+		{StatusUnmanaged, DisplayJSONL, false},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run(tt.status.ID(), func(t *testing.T) {
 			s := NewSession("/tmp/repo", "repo")
-			if tt.managed {
-				s.AttachProcess(0)
+			s.Status = tt.status
+			if got := s.Snapshot().Display; got != tt.wantDisplay {
+				t.Errorf("Display = %v, want %v", got, tt.wantDisplay)
 			}
-			snap := s.Snapshot()
-			if snap.Display != tt.want {
-				t.Errorf("Display = %v, want %v", snap.Display, tt.want)
+			if got := s.IsProcessAlive(); got != tt.wantProcessLive {
+				t.Errorf("IsProcessAlive = %v, want %v", got, tt.wantProcessLive)
 			}
 		})
 	}
 }
-

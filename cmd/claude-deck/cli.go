@@ -70,7 +70,7 @@ func infoFromSnapshot(s session.Snapshot) SessionInfo {
 		RepoPath:        s.RepoPath,
 		WorkDir:         s.WorkDir(),
 		Status:          s.Status.ID(),
-		ClaudeSessionID: string(s.ClaudeSessionID),
+		ClaudeSessionID: string(s.RuntimeSessionID),
 		SessionChain:    chain,
 		ForkedFrom:      string(s.ForkedFrom),
 	}
@@ -135,11 +135,19 @@ func runCLI(name string, args []string) error {
 		return err
 	}
 
-	// new / close start or stop processes, which needs tmux and the full config.
 	mcfg, err := buildManagerConfig(cfg)
 	if err != nil {
 		return err
 	}
+	if req.Op == "gc" {
+		report, err := session.CollectGarbage(st, mcfg, req.DryRun)
+		if err != nil {
+			return err
+		}
+		return printJSON(infoFromGCReport(report))
+	}
+
+	// new / close start or stop processes, which needs tmux.
 	ctx := context.Background()
 	mgr := session.NewManager(ctx, st, mcfg)
 	mgr.Reload()
@@ -151,12 +159,7 @@ func runCLI(name string, args []string) error {
 		if withWorkspace && !isJJ {
 			return fmt.Errorf("%s は jj リポジトリではないためワークスペースを作れません（--no-workspace で直接起動できます）", req.Dir)
 		}
-		sess, err := mgr.Launch(ctx, session.LaunchIntent{
-			Kind:          session.LaunchNew,
-			RepoPath:      repoPath,
-			WorkingDir:    workingDir,
-			WithWorkspace: withWorkspace,
-		})
+		sess, err := mgr.CreateSession(ctx, repoPath, workingDir, withWorkspace)
 		if err != nil {
 			return err
 		}
@@ -170,12 +173,6 @@ func runCLI(name string, args []string) error {
 			return err
 		}
 		return printJSON(infoFromSnapshot(sess.Snapshot()))
-	case "gc":
-		report, err := mgr.CollectGarbage(req.DryRun)
-		if err != nil {
-			return err
-		}
-		return printJSON(infoFromGCReport(report))
 	default:
 		return fmt.Errorf("unknown command %q", req.Op)
 	}

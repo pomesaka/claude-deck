@@ -1,8 +1,8 @@
 package usage
 
 import (
-	json "encoding/json/v2"
 	"encoding/json/jsontext"
+	json "encoding/json/v2"
 )
 
 // jsonlEntry represents a single line in a Claude Code JSONL file.
@@ -16,11 +16,26 @@ type jsonlEntry struct {
 	Message        *jsonlMessage `json:"message,omitempty"`
 
 	// progress エントリ用 (type: "progress")
-	Data            *jsonlProgressData   `json:"data,omitempty"`
-	ParentToolUseID string               `json:"parentToolUseID,omitempty"`
+	Data            *jsonlProgressData `json:"data,omitempty"`
+	ParentToolUseID string             `json:"parentToolUseID,omitempty"`
 
-	// tool_result エントリ用 (Edit/Write の差分)
-	ToolUseResult *jsonlToolUseResult `json:"toolUseResult,omitempty"`
+	// tool_result エントリ用。toolUseResult() で読む。
+	// WHY 生の値で受ける: toolUseResult はツールによって形が違い、文字列のこともある
+	// （Claude Code 2.1 系の JSONL で確認）。型を決めて受けると、その行全体のデコードが失敗する。
+	ToolUseResult jsontext.Value `json:"toolUseResult,omitempty"`
+}
+
+// toolUseResult returns the structured result of an Edit/Write, or nil when the
+// entry has none or it has another shape.
+func (e *jsonlEntry) toolUseResult() *jsonlToolUseResult {
+	if e.ToolUseResult.Kind() != '{' {
+		return nil
+	}
+	var res jsonlToolUseResult
+	if err := json.Unmarshal(e.ToolUseResult, &res); err != nil {
+		return nil
+	}
+	return &res
 }
 
 // jsonlProgressData holds the data field of a progress entry.
@@ -58,8 +73,8 @@ type jsonlUsage struct {
 
 // jsonlToolUseResult holds the structured result of a tool execution (Edit/Write).
 type jsonlToolUseResult struct {
-	FilePath        string       `json:"filePath"`
-	StructuredPatch []patchHunk  `json:"structuredPatch"`
+	FilePath        string      `json:"filePath"`
+	StructuredPatch []patchHunk `json:"structuredPatch"`
 }
 
 // patchHunk represents a single hunk in a unified diff.

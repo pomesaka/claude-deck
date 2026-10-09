@@ -61,12 +61,6 @@ func (r *Runner) NewSession() error {
 	return err
 }
 
-// KillSession destroys the session and all its windows.
-func (r *Runner) KillSession() error {
-	_, err := r.run("kill-session", "-t", r.sess())
-	return err
-}
-
 // SetOption sets a session-scoped tmux option (e.g., "status" → "off").
 // Use this after NewSession to configure the session appearance.
 func (r *Runner) SetOption(option, value string) error {
@@ -150,17 +144,6 @@ func (r *Runner) PanePID(windowName string) (int, error) {
 		return 0, err
 	}
 	return strconv.Atoi(strings.TrimSpace(out))
-}
-
-// ── I/O ─────────────────────────────────────────────────────────────────────
-
-// SendKeys sends keystrokes to the named window's active pane.
-// This is used by WriteInput in tmux mode; for typical workflows the user
-// interacts directly via the tmux client and this method is rarely called.
-func (r *Runner) SendKeys(windowName, keys string) error {
-	// -l sends keys literally, preventing tmux from interpreting special key names.
-	_, err := r.run("send-keys", "-l", "-t", r.sess()+":"+windowName, keys)
-	return err
 }
 
 // ── Unexported helpers (argument construction, tested via package-level tests) ─

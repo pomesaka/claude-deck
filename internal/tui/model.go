@@ -26,27 +26,12 @@ const (
 	viewSelectRepo
 )
 
-// BackendMode describes the TUI layout mode.
-// Kept as an interface / extension point for future backend implementations.
-type BackendMode int
-
-const (
-	// BackendModeSplit combines tmux hosting with Ghostty split layout:
-	// the list takes full width and cursor navigation drives the right tmux pane
-	// (preview window or session window).
-	BackendModeSplit BackendMode = iota
-)
-
-// IsSplit reports whether the TUI is in Ghostty split layout mode.
-func (m BackendMode) IsSplit() bool { return m == BackendModeSplit }
-
 // Model is the Bubble Tea model for the TUI.
 type Model struct {
-	manager     *session.Manager
-	config      *config.Config
-	ghostty     *ghostty.Launcher
-	ctx         context.Context
-	backendMode BackendMode
+	manager *session.Manager
+	config  *config.Config
+	ghostty *ghostty.Launcher
+	ctx     context.Context
 
 	width  int
 	height int
@@ -134,15 +119,7 @@ type sessionKilledMsg struct {
 }
 
 // NewModel creates the initial TUI model.
-// ModelOptions configures optional behaviour for the main list TUI.
-type ModelOptions struct {
-	// SplitMode は将来の拡張ポイントとして保持。現在は非 Split レイアウトの実装を削除済みのため、
-	// true/false いずれも BackendModeSplit として動作する。
-	// main.go は Ghostty 検出結果を渡しており、将来の別 backend 追加時に参照される。
-	SplitMode bool
-}
-
-func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context, opt ModelOptions) Model {
+func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context) Model {
 	delegate := newRepoDelegate()
 	rl := list.New(nil, delegate, 80, 24)
 	rl.Title = "リポジトリ選択"
@@ -166,9 +143,6 @@ func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context, opt
 		refreshInterval = 5 * time.Second
 	}
 
-	// opt.SplitMode は将来の拡張ポイント。現在は非 Split 実装を削除済みのため
-	// 値に関わらず BackendModeSplit を使用する。
-	_ = opt.SplitMode
 	m := Model{
 		manager:             mgr,
 		config:              cfg,
@@ -177,7 +151,6 @@ func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context, opt
 		repoList:            rl,
 		filterInput:         fi,
 		refreshInterval:     refreshInterval,
-		backendMode:         BackendModeSplit,
 		rightPaneGeneration: &atomic.Uint64{},
 	}
 
@@ -492,8 +465,8 @@ func (m *Model) visibleSessions() []*session.Session {
 	return result
 }
 
-// updateSelected updates m.selectedID based on the current cursor position, triggers
-// JSONL streaming, and returns any tea.Cmd for right-pane switching.
+// updateSelected updates m.selectedID based on the current cursor position and
+// returns any tea.Cmd for right-pane switching.
 // The caller must append the returned cmds to its own cmd batch.
 func (m *Model) updateSelected() []tea.Cmd {
 	oldID := m.selectedID
@@ -510,10 +483,6 @@ func (m *Model) updateSelected() []tea.Cmd {
 	}
 
 	idChanged := m.selectedID != oldID
-	if idChanged {
-		// 選択中のセッションだけ JSONL ストリーミングを開始
-		m.manager.StreamSession(m.selectedID)
-	}
 	// 常に最新 snap を取得する。選択 ID が同じでも display channel が変わる場合
 	// （kill → Completed: DisplayTmux → DisplayJSONL）があるため。
 	m.refreshSelectedSnap()
@@ -528,15 +497,6 @@ func (m *Model) updateSelected() []tea.Cmd {
 	newDisplay := session.DisplayJSONL
 	if snap != nil {
 		newDisplay = snap.Display
-	}
-
-	// DisplayJSONL に遷移したとき（同一セッションのまま kill → Completed など）は
-	// StreamSession を再トリガーする。idChanged=true のケースは上で既に呼んでいるので
-	// idChanged=false のケースだけ対象にする。
-	// 理由: idChanged=true のときに StreamSession を呼んでいる段階では selectedSnap が
-	// まだ更新前（refreshSelectedSnap より前）なので、display 遷移は判定できない。
-	if !idChanged && newDisplay == session.DisplayJSONL && oldDisplay != session.DisplayJSONL {
-		m.manager.StreamSession(sid)
 	}
 
 	// カーソル移動(idChanged)またはセッション状態変化(display変化)で
@@ -567,9 +527,6 @@ func (m *Model) buildPreviewSpecFromSnap(snap session.Snapshot) preview.PreviewS
 		RepoName:         snap.RepoName,
 		WorkspacePath:    snap.WorkspacePath,
 		RuntimeSessionID: snap.RuntimeSessionID,
-		PriorRuntimeIDs:  snap.PriorRuntimeIDs,
-		ClaudeSessionID:  snap.RuntimeSessionID,
-		PriorClaudeIDs:   snap.PriorRuntimeIDs,
 		ClearCount:       snap.ClearCount,
 		Status:           snap.Status.ID(),
 		Display:          snap.Display.String(),

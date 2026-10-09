@@ -113,7 +113,6 @@ func TestInfoFromSnapshot_Lineage(t *testing.T) {
 	info := infoFromSnapshot(session.Snapshot{
 		ID:               "b",
 		RuntimeSessionID: "55555555-bbbb",
-		ClaudeSessionID:  "55555555-bbbb",
 		PriorRuntimeIDs:  []session.RuntimeSessionID{"44444444-bbbb"},
 		ForkedFrom:       "22222222-aaaa",
 	})

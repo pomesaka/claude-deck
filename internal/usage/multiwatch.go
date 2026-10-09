@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -26,7 +25,7 @@ type FileEvent struct {
 // 一括 stat → OnWrite する。これにより高頻度書き込みでも UI 更新が安定する。
 type MultiWatcher struct {
 	baseDir          string
-	layout           TranscriptLayout
+	format           format
 	watcher          *fsnotify.Watcher
 	watched          map[string]bool     // paths currently being watched
 	pending          map[string]struct{} // paths with pending Write events
@@ -38,21 +37,16 @@ type MultiWatcher struct {
 	initialized      bool // true after first refreshWatchList completes
 }
 
-// NewMultiWatcher creates a MultiWatcher that watches JSONL files under baseDir.
-// refreshInterval controls how often the watch list is re-evaluated via glob.
-func NewMultiWatcher(baseDir string, refreshInterval time.Duration) (*MultiWatcher, error) {
-	return NewMultiWatcherForLayout(baseDir, TranscriptClaude, refreshInterval)
-}
-
-// NewMultiWatcherForLayout creates a MultiWatcher for the given transcript layout.
-func NewMultiWatcherForLayout(baseDir string, layout TranscriptLayout, refreshInterval time.Duration) (*MultiWatcher, error) {
+// newMultiWatcher creates a MultiWatcher for the transcripts of format f under
+// baseDir. Use Reader.NewMultiWatcher.
+func newMultiWatcher(baseDir string, f format, refreshInterval time.Duration) (*MultiWatcher, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
 	return &MultiWatcher{
 		baseDir:          baseDir,
-		layout:           layout,
+		format:           f,
 		watcher:          w,
 		watched:          make(map[string]bool),
 		pending:          make(map[string]struct{}),
@@ -139,7 +133,7 @@ func (mw *MultiWatcher) flushPending() {
 			continue
 		}
 
-		sessionID := sessionIDFromPathForLayout(mw.layout, path)
+		sessionID := mw.format.sessionID(path)
 		if mw.OnWrite != nil {
 			mw.OnWrite(FileEvent{
 				SessionID: sessionID,
@@ -156,7 +150,7 @@ func (mw *MultiWatcher) flushPending() {
 // so only the top N files are watched.
 // initialized == true の場合のみ、新規ファイルで OnNewFile を呼ぶ。
 func (mw *MultiWatcher) refreshWatchList() {
-	jsonlFiles := mw.sessionFiles()
+	jsonlFiles := mw.format.files(mw.baseDir)
 
 	type fileEntry struct {
 		path  string
@@ -212,7 +206,7 @@ func (mw *MultiWatcher) refreshWatchList() {
 		// 初回 refresh 時は OnNewFile をスキップ。
 		// 初回のセッション追加は DiscoverExternalSessions に任せる。
 		if mw.initialized && mw.OnNewFile != nil {
-			sessionID := sessionIDFromPathForLayout(mw.layout, e.path)
+			sessionID := mw.format.sessionID(e.path)
 			mw.OnNewFile(FileEvent{
 				SessionID: sessionID,
 				Path:      e.path,
@@ -220,30 +214,4 @@ func (mw *MultiWatcher) refreshWatchList() {
 			})
 		}
 	}
-}
-
-func (mw *MultiWatcher) sessionFiles() []string {
-	switch mw.layout {
-	case TranscriptCodex:
-		files, _ := filepath.Glob(filepath.Join(mw.baseDir, "*", "*", "*", "*.jsonl"))
-		return files
-	default:
-		files, _ := filepath.Glob(filepath.Join(mw.baseDir, "*", "*.jsonl"))
-		return files
-	}
-}
-
-func sessionIDFromPathForLayout(layout TranscriptLayout, path string) string {
-	if layout != TranscriptCodex {
-		return sessionIDFromPath(path)
-	}
-	name := filepath.Base(path)
-	name = strings.TrimSuffix(name, ".jsonl")
-	if rest, ok := strings.CutPrefix(name, "rollout-"); ok {
-		parts := strings.Split(rest, "-")
-		if len(parts) >= 5 {
-			return strings.Join(parts[len(parts)-5:], "-")
-		}
-	}
-	return name
 }

@@ -226,3 +226,80 @@ func TestBeginResume(t *testing.T) {
 		})
 	}
 }
+
+func TestAbortResume(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	r := store.Record{ID: "s", Status: "idle", LaunchingAt: &now}
+	abortResume(&r, now)
+	if r.Status != "completed" || r.FinishedAt == nil || !r.FinishedAt.Equal(now) || r.LaunchingAt != nil {
+		t.Errorf("after abortResume: %+v", r)
+	}
+}
+
+func TestMarkAdopted(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	r := store.Record{ID: "s", Status: "unmanaged"}
+	markAdopted(&r, now)
+	if r.Status != "completed" || r.FinishedAt == nil || !r.FinishedAt.Equal(now) {
+		t.Errorf("after markAdopted: %+v", r)
+	}
+	if err := beginResume(&r, now); err != nil {
+		t.Errorf("beginResume on an adopted row: %v", err)
+	}
+}
+
+func TestReviveForLiveWindow(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	tests := []struct {
+		name        string
+		rec         store.Record
+		wantChanged bool
+		wantStatus  string
+		wantPID     int
+	}{
+		{"completed row is revived", store.Record{ID: "s", Status: "completed", FinishedAt: &now, ClosingAt: &now}, true, "idle", 11},
+		{"error row is revived", store.Record{ID: "s", Status: "error", ErrorMessage: "gone", FinishedAt: &now}, true, "idle", 11},
+		{"running row is left as is", store.Record{ID: "s", Status: "running", PID: 7}, false, "running", 7},
+		{"idle row being launched is left as is", store.Record{ID: "s", Status: "idle", LaunchingAt: &now}, false, "idle", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := tt.rec
+			if got := reviveForLiveWindow(&r, 11); got != tt.wantChanged {
+				t.Fatalf("changed = %v, want %v", got, tt.wantChanged)
+			}
+			if r.Status != tt.wantStatus || r.PID != tt.wantPID {
+				t.Errorf("status=%q pid=%d, want %q %d", r.Status, r.PID, tt.wantStatus, tt.wantPID)
+			}
+			if tt.wantChanged && (r.FinishedAt != nil || r.ErrorMessage != "" || r.ClosingAt != nil || r.LaunchingAt != nil) {
+				t.Errorf("revived row keeps finished fields: %+v", r)
+			}
+		})
+	}
+}
+
+func TestRecordWorkspaceRemoved(t *testing.T) {
+	tests := []struct {
+		name               string
+		atRev, parentRev   string
+		wantAt, wantParent string
+	}{
+		{"revisions read", "at-new", "parent-new", "at-new", "parent-new"},
+		{"revisions unreadable: the older pair is dropped", "", "", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := store.Record{
+				ID: "s", WorkspaceName: "ws", WorkspacePath: "/data/ws",
+				LastJJRevision: "at-old", LastJJParentRevision: "parent-old",
+			}
+			recordWorkspaceRemoved(&r, tt.atRev, tt.parentRev)
+			if r.WorkspaceName != "" || r.WorkspacePath != "" {
+				t.Errorf("workspace not cleared: %+v", r)
+			}
+			if r.LastJJRevision != tt.wantAt || r.LastJJParentRevision != tt.wantParent {
+				t.Errorf("revisions = %q %q, want %q %q", r.LastJJRevision, r.LastJJParentRevision, tt.wantAt, tt.wantParent)
+			}
+		})
+	}
+}

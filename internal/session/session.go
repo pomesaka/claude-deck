@@ -3,10 +3,8 @@ package session
 import (
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
@@ -77,77 +75,6 @@ func (s Status) IsTerminal() bool {
 	return s == StatusCompleted || s == StatusError
 }
 
-// canTransitionTo reports whether a transition from s to next is valid.
-// Invalid transitions are logged but not blocked — this is a diagnostic aid,
-// not a hard gate. The transition table codifies the state diagram in CLAUDE.md.
-func (s Status) canTransitionTo(next Status) bool {
-	if s == next {
-		return true // identity transition is always allowed (idempotent)
-	}
-	switch s {
-	case StatusIdle:
-		// Idle → Running (hook: UserPromptSubmit/PreToolUse), Completed (process exit), Error (directory missing)
-		return next == StatusRunning || next == StatusCompleted || next == StatusError
-	case StatusRunning:
-		// Running → Idle (hook: Stop/PostToolUseFailure/StopFailure), WaitingApproval, WaitingAnswer,
-		//           Completed (process exit), Error
-		return next == StatusIdle || next == StatusWaitingApproval || next == StatusWaitingAnswer ||
-			next == StatusCompleted || next == StatusError
-	case StatusWaitingApproval:
-		// WaitingApproval → Running (approved), Idle (hook stop), Completed (process exit/kill)
-		return next == StatusRunning || next == StatusIdle || next == StatusCompleted || next == StatusError
-	case StatusWaitingAnswer:
-		// WaitingAnswer → Running (answered), Idle (hook stop), Completed (process exit/kill)
-		return next == StatusRunning || next == StatusIdle || next == StatusCompleted || next == StatusError
-	case StatusCompleted:
-		// Terminal state, but Resume resets to Idle via setStatusLocked
-		return next == StatusIdle || next == StatusError
-	case StatusError:
-		// Terminal state, but Resume resets to Idle
-		return next == StatusIdle
-	case StatusUnmanaged:
-		// External sessions don't transition (display-only)
-		return false
-	default:
-		return false
-	}
-}
-
-// SessionPhase represents the high-level lifecycle phase of a session.
-// Status captures fine-grained state (Running/Idle/WaitingApproval/...),
-// while Phase captures the coarse-grained lifecycle stage derived from
-// Status + managed flag. This eliminates scattered "if managed && status != ..."
-// checks across TUI and Manager code.
-type SessionPhase int
-
-const (
-	// PhaseActive means a PTY process is alive and managed by the Manager.
-	PhaseActive SessionPhase = iota
-	// PhaseArchived means the session has finished (Completed or Error).
-	PhaseArchived
-	// PhaseExternal means the session was discovered from JSONL but not launched by claude-deck.
-	PhaseExternal
-)
-
-func (p SessionPhase) String() string {
-	switch p {
-	case PhaseActive:
-		return "Active"
-	case PhaseArchived:
-		return "Archived"
-	case PhaseExternal:
-		return "External"
-	default:
-		return "Unknown"
-	}
-}
-
-// RunningProcess is the sentinel type for an active session process.
-// Stored as an atomic pointer so nil/non-nil atomically signals whether a process is attached.
-// The empty struct avoids per-session heap allocation while preserving the ability to
-// add fields in the future without changing the atomic-pointer contract.
-type RunningProcess struct{}
-
 // DisplayChannel describes what data source should be used to render a
 // session's detail pane. Derived from the session's current state rather
 // than stored — it's a projection, not persisted data.
@@ -193,11 +120,6 @@ type TokenUsage struct {
 	EstimatedCostUSD         float64 `json:"estimated_cost_usd"`
 }
 
-// TotalTokens returns the sum of input and output tokens.
-func (t TokenUsage) TotalTokens() int {
-	return t.InputTokens + t.OutputTokens
-}
-
 // TokenUsageFromStats converts a usage.TokenStats (read from JSONL) to a
 // TokenUsage Value Object. Centralises the field mapping between the two types
 // so callers don't need to know the structural isomorphism.
@@ -211,15 +133,6 @@ func TokenUsageFromStats(s usage.TokenStats) TokenUsage {
 	}
 }
 
-// Add returns a new TokenUsage with input and output tokens incremented.
-// EstimatedCostUSD is not recalculated; use ApplyJSONLTokens (which calls EstimateCost)
-// for authoritative cost tracking.
-func (t TokenUsage) Add(input, output int) TokenUsage {
-	t.InputTokens += input
-	t.OutputTokens += output
-	return t
-}
-
 // EstimateCost calculates an approximate USD cost based on token usage and pricing policy.
 // This places cost calculation in the domain type that best knows its own data,
 // rather than in infrastructure (usage package).
@@ -231,33 +144,15 @@ func (t TokenUsage) EstimateCost(p PricingPolicy) float64 {
 	return cost
 }
 
-// runtimeFields holds high-frequency state that is updated by the JSONL streaming goroutine.
-// rt.mu は sess.mu と独立しているため、JSONL 書き込みと TUI スナップショットが競合しない。
-// Lock ordering: rt.mu と sess.mu は同時に保持しない。
-type runtimeFields struct {
-	mu sync.RWMutex
-
-	JSONLLogEntries []usage.LogEntry // JSONL 由来の構造化ログ（StreamSession で更新）
-}
-
 // Session represents a single agent runtime session tracked by claude-deck.
 //
 // Data sources:
 //   - Store (persisted as JSON): ID, Name, RepoPath, RepoName, WorkspacePath,
 //     WorkspaceName, SessionChain, Status, FinishedAt, PID
 //   - JSONL (runtime primary): Prompt, PermissionMode, StartedAt, TokenUsage
-//   - Runtime only: rt.JSONLLogEntries, CurrentTool
-//
-// Lock ordering (ABBA デッドロック防止):
-//   - rt.mu: JSONL ログ専用
-//   - mu:    その他全フィールド
-//   - rt.mu と sess.mu は同時に保持しない
+//   - Runtime only: CurrentTool
 type Session struct {
 	mu sync.RWMutex
-
-	// rt は JSONL ログなど高頻度更新フィールドをまとめた struct。
-	// 詳細は runtimeFields のコメントを参照。
-	rt runtimeFields
 
 	// --- Persisted in store (claude-deck metadata) ---
 	// Fields marked "immutable after creation" are set once by CreateSession /
@@ -286,12 +181,12 @@ type Session struct {
 	// deck の ID だけではどの文脈から分かれたかが分からなくなる（ADR 012）。
 	ForkedFrom    RuntimeSessionID `json:"forked_from,omitempty"`
 	Status        Status           `json:"status"`
-	FinishedAt    *time.Time         `json:"finished_at,omitempty"`
-	PID           int                `json:"pid,omitempty"`
-	TerminalTitle string             `json:"terminal_title,omitempty"` // OSC 0/2 で設定されたターミナルタイトル（セッション一覧表示用）
-	BookmarkName  string             `json:"bookmark_name,omitempty"`  // jj の最近接ブックマーク名（セッション一覧表示用）
+	FinishedAt    *time.Time       `json:"finished_at,omitempty"`
+	PID           int              `json:"pid,omitempty"`
+	TerminalTitle string           `json:"terminal_title,omitempty"` // OSC 0/2 で設定されたターミナルタイトル（セッション一覧表示用）
+	BookmarkName  string           `json:"bookmark_name,omitempty"`  // jj の最近接ブックマーク名（セッション一覧表示用）
 	// Kill 時に保存した @ / @- の change_id。Resume 時のワークスペース再作成で使う（ADR 009）。
-	// 常にペアで更新すること — setLastJJRevisionsPairLocked() を通じて書き込む。
+	// 常にペアで更新すること。
 	LastJJRevision       string `json:"last_jj_revision,omitempty"`
 	LastJJParentRevision string `json:"last_jj_parent_revision,omitempty"`
 
@@ -304,22 +199,24 @@ type Session struct {
 
 	// --- Runtime fields (not persisted, protected by sess.mu unless noted) ---
 	CurrentTool  string `json:"-"` // パーサー検出中のツール名
-	ErrorMessage string `json:"-"` // パーサーが検知したエラー行
-
-	// process は非 nil の間だけプロセスが生存中であることを表す。
-	// nil = 停止中（Completed/Error/未起動）
-	// non-nil = プロセス生存中（Backend が StartProcess で attach する）
-	// AttachProcess / DetachProcess 以外では直接 Store/Swap しないこと。
-	process atomic.Pointer[RunningProcess]
+	ErrorMessage string `json:"-"` // 終了の理由（store の error_message）
 }
 
-// displayChannel returns the appropriate display data source for this session.
-// Reads process via atomic load; mu need not be held.
-func (s *Session) displayChannel() DisplayChannel {
-	if s.process.Load() == nil {
-		return DisplayJSONL // no active process → show structured logs
+// hasProcessLocked reports whether the session has a running process.
+// WHY Status から導く: プロセスを起動・終了させるのは CLI やペイン内の終了コマンドなど TUI 以外の
+// プロセスのこともあり、TUI はそれを store のステータスでしか知り得ない。
+// Caller must hold s.mu (read).
+func (s *Session) hasProcessLocked() bool {
+	return !s.Status.IsTerminal() && s.Status != StatusUnmanaged
+}
+
+// displayChannelLocked returns the appropriate display data source for this session.
+// Caller must hold s.mu (read).
+func (s *Session) displayChannelLocked() DisplayChannel {
+	if s.hasProcessLocked() {
+		return DisplayTmux // tmux owns the process → user interacts via external terminal
 	}
-	return DisplayTmux // tmux owns the process → user interacts via external terminal
+	return DisplayJSONL // no active process → show structured logs
 }
 
 // Elapsed returns the duration since the session started.
@@ -338,35 +235,6 @@ func (s *Session) Elapsed() time.Duration {
 	return time.Since(s.StartedAt)
 }
 
-// SetStatus updates the session status safely.
-func (s *Session) SetStatus(status Status) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.setStatusLocked(status)
-}
-
-// setStatusLocked updates status under an already-held write lock.
-// FinishedAt は Completed/Error 時のみ自動設定される。
-// 不正な遷移はデバッグログに記録するが、ブロックはしない（診断用）。
-func (s *Session) setStatusLocked(status Status) {
-	if !s.Status.canTransitionTo(status) {
-		debuglog.Printf("[session:%s] unexpected transition %s → %s", s.ID, s.Status, status)
-	}
-	s.Status = status
-	if status == StatusCompleted || status == StatusError {
-		now := time.Now()
-		s.FinishedAt = &now
-	}
-}
-
-// SetErrorStatus updates the session to error state with a reason message.
-func (s *Session) SetErrorStatus(msg string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.setStatusLocked(StatusError)
-	s.ErrorMessage = msg
-}
-
 // GetStatus returns the current session status safely.
 func (s *Session) GetStatus() Status {
 	s.mu.RLock()
@@ -381,54 +249,11 @@ func (s *Session) SetCurrentTool(tool string) {
 	s.CurrentTool = tool
 }
 
-// AttachProcess records that a process has started for this session.
-// Called by backends (tmuxBackend) before the exit-watcher goroutine starts.
-// Must NOT be called with mu held — this method acquires mu internally,
-// so calling with mu already held would self-deadlock.
-func (s *Session) AttachProcess(pid int) {
-	s.mu.Lock()
-	if pid > 0 {
-		s.PID = pid
-	}
-	// Store process sentinel under mu so PID and process pointer are set atomically.
-	// A concurrent Snapshot() or DetachProcess() cannot observe PID≠0 with process=nil.
-	s.process.Store(&RunningProcess{})
-	s.mu.Unlock()
-}
-
-// DetachProcess clears the running process context.
-// Called by Manager when a process exits.
-// mu is not required: atomic.Pointer.Store provides the necessary atomicity.
-// Unlike AttachProcess (which updates both PID and process under mu for consistency),
-// DetachProcess only clears the process sentinel — PID is intentionally left intact
-// for post-exit identification.
-func (s *Session) DetachProcess() {
-	s.process.Store(nil)
-}
-
-// IsProcessAlive reports whether a tmux process is currently attached to this session.
-// Thread-safe: uses atomic load, no lock required.
+// IsProcessAlive reports whether the session has a running process.
 func (s *Session) IsProcessAlive() bool {
-	return s.process.Load() != nil
-}
-
-// AddTokens updates token usage safely.
-func (s *Session) AddTokens(input, output int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.TokenUsage = s.TokenUsage.Add(input, output)
-}
-
-// GetStructuredLogs returns a copy of the JSONL-derived structured log entries.
-func (s *Session) GetStructuredLogs() []usage.LogEntry {
-	s.rt.mu.RLock()
-	defer s.rt.mu.RUnlock()
-	if len(s.rt.JSONLLogEntries) == 0 {
-		return nil
-	}
-	entries := make([]usage.LogEntry, len(s.rt.JSONLLogEntries))
-	copy(entries, s.rt.JSONLLogEntries)
-	return entries
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.hasProcessLocked()
 }
 
 // Snapshot is a read-only copy of session state, safe to use without locks.
@@ -443,24 +268,12 @@ type Snapshot struct {
 	// RuntimeSessionIDs contains all historical runtime session IDs except the current one,
 	// in chronological order. Populated from SessionChain[:-1].
 	PriorRuntimeIDs []RuntimeSessionID
-	// ClaudeSessionID is retained for compatibility with UI/preview code that
-	// has not yet been renamed.
-	//
-	// Deprecated: use RuntimeSessionID.
-	ClaudeSessionID RuntimeSessionID
-	// Deprecated: use PriorRuntimeIDs.
-	PriorClaudeIDs []RuntimeSessionID
 	// ForkedFrom is the runtime session ID this session was forked from, or "".
 	ForkedFrom RuntimeSessionID
 	// ClearCount is the number of /clear (or compact) operations performed in
 	// this session. 0 means the original session; 1 means cleared once, etc.
 	// Derived from len(SessionChain) - 1.
-	ClearCount int
-	// HasProcess is true while a process is attached to this session.
-	// It becomes false when watchProcess detects exit and clears Session.process.
-	// Used by Phase() to distinguish "terminal status but process still running"
-	// (rare race window) from "truly finished".
-	HasProcess     bool
+	ClearCount     int
 	Display        DisplayChannel
 	Status         Status
 	Prompt         string
@@ -474,26 +287,6 @@ type Snapshot struct {
 	TerminalTitle  string
 	BookmarkName   string
 	Elapsed        time.Duration
-}
-
-// Phase returns the high-level lifecycle phase derived from Status and HasProcess.
-// This is always consistent with the snapshot's other fields — no separate Phase
-// field is stored, eliminating the risk of stale derived state.
-//
-//   - StatusUnmanaged           → PhaseExternal  (external/discovered sessions)
-//   - IsTerminal() && !HasProcess → PhaseArchived (finished; no process attached)
-//   - otherwise                 → PhaseActive
-//
-// HasProcess correctly handles the rare race where Status is terminal but watchProcess
-// hasn't detached the process yet — such sessions remain PhaseActive.
-func (s Snapshot) Phase() SessionPhase {
-	if s.Status == StatusUnmanaged {
-		return PhaseExternal
-	}
-	if s.Status.IsTerminal() && !s.HasProcess {
-		return PhaseArchived
-	}
-	return PhaseActive
 }
 
 // WorkDir returns the effective working directory for this session.
@@ -535,12 +328,9 @@ func (s *Session) Snapshot() Snapshot {
 		SubProjectDir:    s.SubProjectDir,
 		RuntimeSessionID: s.CurrentRuntimeID(),
 		PriorRuntimeIDs:  s.PriorRuntimeIDs(),
-		ClaudeSessionID:  s.CurrentRuntimeID(),
-		PriorClaudeIDs:   s.PriorRuntimeIDs(),
 		ForkedFrom:       s.ForkedFrom,
-		ClearCount:      max(0, len(s.SessionChain)-1),
-		HasProcess:       s.process.Load() != nil,
-		Display:          s.displayChannel(),
+		ClearCount:       max(0, len(s.SessionChain)-1),
+		Display:          s.displayChannelLocked(),
 		Status:           s.Status,
 		Prompt:           s.Prompt,
 		PermissionMode:   s.PermissionMode,
@@ -566,13 +356,6 @@ func (s *Session) CurrentRuntimeID() RuntimeSessionID {
 	return s.SessionChain[len(s.SessionChain)-1]
 }
 
-// CurrentClaudeID returns the active runtime session ID, or "" if none.
-//
-// Deprecated: use CurrentRuntimeID.
-func (s *Session) CurrentClaudeID() RuntimeSessionID {
-	return s.CurrentRuntimeID()
-}
-
 // ChainIDs returns a copy of all runtime session IDs in this session's chain,
 // from oldest to newest. The last element is the current active ID.
 // Thread-safe; acquires mu for reading.
@@ -596,41 +379,6 @@ func (s *Session) PriorRuntimeIDs() []RuntimeSessionID {
 	prior := make([]RuntimeSessionID, len(s.SessionChain)-1)
 	copy(prior, s.SessionChain[:len(s.SessionChain)-1])
 	return prior
-}
-
-// PriorClaudeIDs returns all historical runtime session IDs excluding the current one.
-//
-// Deprecated: use PriorRuntimeIDs.
-func (s *Session) PriorClaudeIDs() []RuntimeSessionID {
-	return s.PriorRuntimeIDs()
-}
-
-// appendToChainLocked appends newID to SessionChain under an already-held write lock.
-// No-op if newID is empty or already the current (last) ID.
-func (s *Session) appendToChainLocked(newID RuntimeSessionID) {
-	if newID == "" {
-		return
-	}
-	if s.CurrentRuntimeID() == newID {
-		return
-	}
-	s.SessionChain = append(s.SessionChain, newID)
-}
-
-// setLastJJRevisionsPairLocked sets LastJJRevision and LastJJParentRevision as an atomic pair.
-// Both fields must always be updated together (see ADR 009 for invariant rationale).
-// Caller must hold mu.Lock().
-func (s *Session) setLastJJRevisionsPairLocked(atRev, parentRev string) {
-	s.LastJJRevision = atRev
-	s.LastJJParentRevision = parentRev
-}
-
-// popChainLocked removes the last entry from SessionChain under an already-held write lock.
-// Used to revert a /clear when the new session has no conversation.
-func (s *Session) popChainLocked() {
-	if len(s.SessionChain) > 0 {
-		s.SessionChain = s.SessionChain[:len(s.SessionChain)-1]
-	}
 }
 
 // getName returns the session name under lock for sorting.

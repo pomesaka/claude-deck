@@ -14,16 +14,9 @@ var (
 	colorWarning     = lipgloss.Color("#F59E0B") // amber
 	colorDanger      = lipgloss.Color("#EF4444") // red
 	colorBgSelected  = lipgloss.Color("#313244") // selected bg
-	colorBorder      = lipgloss.Color("#45475A") // border
 	colorBorderFocus = lipgloss.Color("#7C3AED") // focused border
 	colorText        = lipgloss.Color("#CDD6F4") // light text
 	colorTextDim     = lipgloss.Color("#6C7086") // dim text
-
-	// Header
-	headerStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(colorPrimary).
-			Padding(0, 1)
 
 	// Session list styles
 	sessionListStyle = lipgloss.NewStyle().
@@ -51,11 +44,6 @@ var (
 	footerStyle = lipgloss.NewStyle().
 			Foreground(colorTextDim).
 			Padding(0, 1)
-
-	// Input
-	inputPromptStyle = lipgloss.NewStyle().
-				Foreground(colorPrimary).
-				Bold(true)
 
 	// Token display
 	tokenStyle = lipgloss.NewStyle().
@@ -100,15 +88,9 @@ func InitStyles(theme config.ThemeConfig) {
 	colorWarning = lipgloss.Color(theme.Warning)
 	colorDanger = lipgloss.Color(theme.Danger)
 	colorBgSelected = lipgloss.Color(theme.BgSelected)
-	colorBorder = lipgloss.Color(theme.Border)
 	colorBorderFocus = lipgloss.Color(theme.BorderFocus)
 	colorText = lipgloss.Color(theme.Text)
 	colorTextDim = lipgloss.Color(theme.TextDim)
-
-	headerStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(colorPrimary).
-		Padding(0, 1)
 
 	sessionListStyle = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -133,10 +115,6 @@ func InitStyles(theme config.ThemeConfig) {
 	footerStyle = lipgloss.NewStyle().
 		Foreground(colorTextDim).
 		Padding(0, 1)
-
-	inputPromptStyle = lipgloss.NewStyle().
-		Foreground(colorPrimary).
-		Bold(true)
 
 	tokenStyle = lipgloss.NewStyle().
 		Foreground(colorSecondary)

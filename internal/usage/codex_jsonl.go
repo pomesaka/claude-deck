@@ -4,8 +4,8 @@ import (
 	"bufio"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
-	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -111,7 +111,35 @@ type codexResponseItem struct {
 	Summary   jsontext.Value `json:"summary"`
 }
 
-func (r *Reader) extractCodexInfoQuick(path string, mtime time.Time) *SessionInfo {
+// codexFormat reads Codex CLI transcripts:
+// <baseDir>/YYYY/MM/DD/rollout-<timestamp>-<session UUID>.jsonl.
+type codexFormat struct{}
+
+func (codexFormat) files(baseDir string) []string {
+	files, _ := filepath.Glob(filepath.Join(baseDir, "*", "*", "*", "*.jsonl"))
+	return files
+}
+
+// sessionID returns the UUID at the end of the file name (its last five
+// dash-separated parts), or the whole name when it is not a rollout file.
+func (codexFormat) sessionID(path string) string {
+	name := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	if rest, ok := strings.CutPrefix(name, "rollout-"); ok {
+		parts := strings.Split(rest, "-")
+		if len(parts) >= 5 {
+			return strings.Join(parts[len(parts)-5:], "-")
+		}
+	}
+	return name
+}
+
+func (codexFormat) userMessageMarker() []byte { return []byte(`"type":"user_message"`) }
+
+func (codexFormat) logLine(s *LogStreamer, line []byte) bool {
+	return processCodexEntry(line, &s.entries)
+}
+
+func (c codexFormat) quickInfo(path string, mtime time.Time) *SessionInfo {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -119,7 +147,7 @@ func (r *Reader) extractCodexInfoQuick(path string, mtime time.Time) *SessionInf
 	defer f.Close()
 
 	info := SessionInfo{
-		SessionID:    r.sessionIDFromPath(path),
+		SessionID:    c.sessionID(path),
 		LastActivity: mtime,
 	}
 
@@ -137,7 +165,7 @@ func (r *Reader) extractCodexInfoQuick(path string, mtime time.Time) *SessionInf
 				}
 			}
 		}
-		r.accumulateCodexEntry(&info, &entry)
+		accumulateCodexEntry(&info, &entry)
 		if info.CWD != "" && info.Prompt != "" && !info.StartedAt.IsZero() {
 			break
 		}
@@ -149,22 +177,18 @@ func (r *Reader) extractCodexInfoQuick(path string, mtime time.Time) *SessionInf
 	return &info
 }
 
-func (r *Reader) extractCodexInfo(path string) *SessionInfo {
+func (c codexFormat) info(path string) *SessionInfo {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
 	defer f.Close()
 
-	info := SessionInfo{SessionID: r.sessionIDFromPath(path)}
-	dec := jsontext.NewDecoder(f)
-	for {
+	info := SessionInfo{SessionID: c.sessionID(path)}
+	scanLines(f, func(line []byte) bool {
 		var entry codexEntry
-		if err := json.UnmarshalDecode(dec, &entry); err != nil {
-			if err == io.EOF {
-				break
-			}
-			continue
+		if err := json.Unmarshal(line, &entry); err != nil {
+			return true // skip malformed lines
 		}
 		if entry.Timestamp != "" {
 			if t, err := time.Parse(time.RFC3339Nano, entry.Timestamp); err == nil {
@@ -176,8 +200,9 @@ func (r *Reader) extractCodexInfo(path string) *SessionInfo {
 				}
 			}
 		}
-		r.accumulateCodexEntry(&info, &entry)
-	}
+		accumulateCodexEntry(&info, &entry)
+		return true
+	})
 	if info.CWD == "" {
 		return nil
 	}
@@ -186,7 +211,7 @@ func (r *Reader) extractCodexInfo(path string) *SessionInfo {
 	return &info
 }
 
-func (r *Reader) accumulateCodexEntry(info *SessionInfo, entry *codexEntry) {
+func accumulateCodexEntry(info *SessionInfo, entry *codexEntry) {
 	switch entry.Type {
 	case "session_meta":
 		var meta codexSessionMeta
@@ -240,16 +265,11 @@ func (r *Reader) accumulateCodexEntry(info *SessionInfo, entry *codexEntry) {
 	}
 }
 
-func (r *Reader) readCodexTokensByID(sessionID string) *TokenStats {
-	path := r.ResolveSessionPath(sessionID)
-	if path == "" {
-		return nil
-	}
-	return r.aggregateCodexFile(path)
-}
-
-func (r *Reader) aggregateCodexFile(path string) *TokenStats {
-	info := r.extractCodexInfo(path)
+// tokens reads the whole transcript: Codex reports running totals, so the last
+// token_count event is the session's usage. The session ID is the one the
+// transcript names, not the caller's.
+func (c codexFormat) tokens(path, _ string) *TokenStats {
+	info := c.info(path)
 	if info == nil {
 		return nil
 	}
@@ -366,14 +386,7 @@ func firstLine(text string) string {
 	return first
 }
 
-func (r *Reader) ReadRuntimeActivity(path string) RuntimeActivity {
-	if r.layout != TranscriptCodex {
-		return RuntimeActivity{}
-	}
-	return r.readCodexRuntimeActivity(path)
-}
-
-func (r *Reader) readCodexRuntimeActivity(path string) RuntimeActivity {
+func (c codexFormat) runtimeActivity(path string) RuntimeActivity {
 	f, err := os.Open(path)
 	if err != nil {
 		return RuntimeActivity{}
@@ -398,7 +411,7 @@ func (r *Reader) readCodexRuntimeActivity(path string) RuntimeActivity {
 		// Drop a possibly partial first line.
 	}
 
-	activity := RuntimeActivity{SessionID: r.sessionIDFromPath(path)}
+	activity := RuntimeActivity{SessionID: c.sessionID(path)}
 	for scanner.Scan() {
 		next, ok := codexRuntimeActivityFromLine(scanner.Bytes())
 		if ok {

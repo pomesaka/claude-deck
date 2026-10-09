@@ -32,8 +32,8 @@ type LogEntry struct {
 
 // ResolveSessionPath returns the JSONL file path for a session ID, or "" if not found.
 func (r *Reader) ResolveSessionPath(sessionID string) string {
-	for _, path := range r.sessionFiles() {
-		if r.sessionIDFromPath(path) == sessionID {
+	for _, path := range r.format.files(r.baseDir) {
+		if r.format.sessionID(path) == sessionID {
 			return path
 		}
 	}

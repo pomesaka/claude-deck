@@ -89,10 +89,6 @@ type Manager struct {
 	config   ManagerConfig
 	onChange func(changed map[DeckSessionID]bool)
 
-	// stream guards the active JSONL streaming goroutine.
-	// See streamState in manager_jsonl.go for invariants and lock ordering.
-	stream streamState
-
 	// RefreshFromJSONL の並行実行ガード
 	refreshing atomic.Bool
 
@@ -148,14 +144,20 @@ func NewManager(ctx context.Context, st *store.Store, cfg ManagerConfig) *Manage
 	return m
 }
 
-// jj returns the configured jj Runner, falling back to a zero-value Runner
+// jjRunner returns the configured jj Runner, falling back to a zero-value Runner
 // (which defaults to "jj" executable).
-func (m *Manager) jj() *jj.Runner {
-	if m.config.JJ != nil {
-		return m.config.JJ
+func (c ManagerConfig) jjRunner() *jj.Runner {
+	if c.JJ != nil {
+		return c.JJ
 	}
 	return &jj.Runner{}
 }
+
+func (m *Manager) jj() *jj.Runner { return m.config.jjRunner() }
+
+// ws returns the workspaces of this Manager's data directory.
+// WHY 毎回組み立てる: テストが Manager を作った後で config の関数を差し替える。
+func (m *Manager) ws() workspaces { return newWorkspaces(m.config) }
 
 func (m *Manager) runtime() agentruntime.Runtime {
 	if m.config.AgentRuntime != nil {
@@ -267,25 +269,6 @@ func (m *Manager) StartNotifyLoop(ctx context.Context) {
 	}()
 }
 
-// Launch starts a session based on the given LaunchIntent.
-// This is the unified entry point for all session launch operations (New, Resume, Fork).
-// Returns the session (new or existing) and any error.
-func (m *Manager) Launch(ctx context.Context, intent LaunchIntent) (*Session, error) {
-	switch intent.Kind {
-	case LaunchNew:
-		return m.CreateSession(ctx, intent.RepoPath, intent.WorkingDir, intent.WithWorkspace)
-	case LaunchResume:
-		if err := m.ResumeSession(ctx, intent.SessionID); err != nil {
-			return nil, err
-		}
-		return m.GetSession(intent.SessionID), nil
-	case LaunchFork:
-		return m.ForkSession(ctx, intent.SessionID)
-	default:
-		return nil, fmt.Errorf("unknown launch kind: %v", intent.Kind)
-	}
-}
-
 // computeActualWorkDir は wsPath と subProjectDir からプロセスの作業ディレクトリを算出する。
 // subProjectDir が空のときは wsPath をそのまま返す。
 func computeActualWorkDir(wsPath, subProjectDir string) string {
@@ -356,7 +339,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	var actualWorkDir string
 	if withWorkspace {
 		wsName := sess.Name
-		wsPath, err := m.createWorkspace(repoPath, wsName, jj.WorkspaceOptions{})
+		wsPath, err := m.ws().create(repoPath, wsName, jj.WorkspaceOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("creating jj workspace: %w", err)
 		}
@@ -385,7 +368,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	spec := m.startSpec(agentruntime.LaunchNew, "", actualWorkDir, sess.Name, repoPath)
 	if err := m.startNewSession(sess, actualWorkDir, spec); err != nil {
 		if withWorkspace {
-			m.discardWorkspace(repoPath, sess.Name)
+			m.ws().discard(repoPath, sess.Name)
 		}
 		return nil, err
 	}
@@ -425,8 +408,8 @@ func (m *Manager) ResolveJSONLPaths(sid DeckSessionID) (current string, prior []
 		return "", nil
 	}
 	sess.mu.RLock()
-	csID := sess.CurrentClaudeID()
-	priorIDs := sess.PriorClaudeIDs()
+	csID := sess.CurrentRuntimeID()
+	priorIDs := sess.PriorRuntimeIDs()
 	sess.mu.RUnlock()
 
 	current = m.usage.ResolveSessionPath(string(csID))
@@ -436,15 +419,6 @@ func (m *Manager) ResolveJSONLPaths(sid DeckSessionID) (current string, prior []
 		}
 	}
 	return current, prior
-}
-
-// MarkExited records that the session's process has ended. The pane's exit
-// command calls it through `claude-deck hook exited`, and the TUI calls it for
-// sessions whose window is gone.
-func (m *Manager) MarkExited(sessionID DeckSessionID) error {
-	err := MarkExited(m.store, m.usage, sessionID)
-	m.Reload()
-	return err
 }
 
 // markVanished marks the session exited if, read again inside the transaction,
@@ -518,12 +492,9 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 	fail := func(cause error, markError bool) error {
 		if _, err := m.store.Update(string(sessionID), func(r *store.Record) error {
 			now := time.Now()
-			r.LaunchingAt = nil
+			abortResume(r, now)
 			if markError {
 				setError(r, cause.Error(), now)
-			} else {
-				r.Status = StatusCompleted.ID()
-				r.FinishedAt = &now
 			}
 			return nil
 		}); err != nil {
@@ -542,7 +513,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 	// CreateWorkspaceAt が jj edit <@> → jj new <@-> → jj new trunk() の順で試みる。
 	wsPath := rec.WorkspacePath
 	if wsPath == "" && rec.RepoPath != "" && rec.Name != "" {
-		newWsPath, err := m.recreateWorkspace(rec.RepoPath, rec.Name, rec.SubProjectDir, rec.LastJJRevision, rec.LastJJParentRevision)
+		newWsPath, err := m.ws().recreate(rec.RepoPath, rec.Name, rec.SubProjectDir, rec.LastJJRevision, rec.LastJJParentRevision)
 		if err != nil {
 			debuglog.Printf("[ResumeSession] workspace recreate failed, falling back to repo: %v", err)
 			wsPath = rec.RepoPath
@@ -603,9 +574,7 @@ func (m *Manager) adoptExternal(sessionID DeckSessionID) error {
 	if status != StatusUnmanaged {
 		return nil
 	}
-	now := time.Now()
-	rec.Status = StatusCompleted.ID()
-	rec.FinishedAt = &now
+	markAdopted(&rec, time.Now())
 	return m.store.Tx(func(tx *store.Tx) error {
 		if _, err := tx.Get(rec.ID); err == nil {
 			return nil
@@ -628,7 +597,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	}
 
 	srcSess.mu.RLock()
-	srcClaudeID := srcSess.CurrentClaudeID()
+	srcClaudeID := srcSess.CurrentRuntimeID()
 	repoPath := srcSess.RepoPath
 	srcSubProjectDir := srcSess.SubProjectDir
 	srcSess.mu.RUnlock()
@@ -649,7 +618,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	sess := NewSession(repoPath, repoName)
 
 	wsName := sess.Name
-	wsPath, err := m.createWorkspace(repoPath, wsName, jj.WorkspaceOptions{})
+	wsPath, err := m.ws().create(repoPath, wsName, jj.WorkspaceOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("creating jj workspace: %w", err)
 	}
@@ -663,184 +632,10 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 
 	spec := m.startSpec(agentruntime.LaunchFork, srcClaudeID, actualWorkDir, sess.Name, repoPath)
 	if err := m.startNewSession(sess, actualWorkDir, spec); err != nil {
-		m.discardWorkspace(repoPath, wsName)
+		m.ws().discard(repoPath, wsName)
 		return nil, fmt.Errorf("starting forked session: %w", err)
 	}
 	return m.GetSession(sess.ID), nil
-}
-
-// RemoveSession removes a deck session from the manager and store, but keeps
-// Claude Code JSONL files and jj workspace intact. Use for cleaning up duplicate
-// deck sessions without losing Claude Code data.
-func (m *Manager) RemoveSession(sessionID DeckSessionID) error {
-	m.mu.RLock()
-	_, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("session not found: %s", sessionID)
-	}
-
-	if m.backend.IsActive(sessionID) {
-		return fmt.Errorf("cannot remove running session (kill it first)")
-	}
-
-	// oldSessionIDs には登録しない。deck メタデータだけ削除し JSONL は残すため、
-	// 次回の DiscoverExternalSessions で外部セッションとして再発見されるのが正しい動作。
-	if warnings := m.removeSessionCore(sessionID); len(warnings) > 0 {
-		debuglog.Printf("[RemoveSession] cleanup warnings: %s", strings.Join(warnings, "; "))
-	}
-	m.notifyChange(sessionID)
-	return nil
-}
-
-// DeleteSession removes a session from the manager, store, and Claude Code JSONL.
-// Running sessions must be killed first.
-// Returns a warning message (non-empty if any cleanup step had issues) and an error.
-func (m *Manager) DeleteSession(sessionID DeckSessionID) (warning string, err error) {
-	m.mu.RLock()
-	sess, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok {
-		return "", fmt.Errorf("session not found: %s", sessionID)
-	}
-
-	if m.backend.IsActive(sessionID) {
-		return "", fmt.Errorf("cannot delete running session (kill it first)")
-	}
-
-	sess.mu.RLock()
-	csID := sess.CurrentClaudeID()
-	wsName := sess.WorkspaceName
-	repoPath := sess.RepoPath
-	sess.mu.RUnlock()
-
-	var warnings []string
-	if w := m.cleanupJSONL(csID); w != "" {
-		warnings = append(warnings, w)
-	}
-	wsRootPath := ""
-	if wsName != "" && repoPath != "" {
-		wsRootPath = filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
-	}
-	if w := m.cleanupWorkspace(repoPath, wsName, wsRootPath); w != "" {
-		warnings = append(warnings, w)
-	}
-	warnings = append(warnings, m.removeSessionCore(sessionID)...)
-
-	m.notifyChange(sessionID)
-	return strings.Join(warnings, "; "), nil
-}
-
-// removeSessionCore performs the shared cleanup for both RemoveSession and DeleteSession:
-// stops any active stream, removes from the sessions map, and deletes from the store.
-// Returns any warnings encountered (typically store delete failures).
-func (m *Manager) removeSessionCore(sessionID DeckSessionID) []string {
-	m.stopActiveStream(sessionID)
-
-	m.mu.Lock()
-	delete(m.sessions, sessionID)
-	m.mu.Unlock()
-
-	if storeErr := m.store.Delete(string(sessionID)); storeErr != nil {
-		return []string{fmt.Sprintf("ストア削除失敗: %v", storeErr)}
-	}
-	return nil
-}
-
-// cleanupJSONL deletes Claude Code JSONL files for the given session ID.
-// Returns a warning string if deletion failed, or "" on success/skip.
-func (m *Manager) cleanupJSONL(csID ClaudeSessionID) string {
-	if csID == "" {
-		return ""
-	}
-	if err := m.usage.DeleteSessionFiles(string(csID)); err != nil {
-		return fmt.Sprintf("JSONL削除失敗: %v", err)
-	}
-	return ""
-}
-
-// cleanupWorkspace runs jj workspace forget and removes the workspace directory.
-// wsRootPath is the workspace root directory to delete (DataDir/workspace/<encoded>/<name>).
-// It may differ from sess.WorkspacePath, which can point to a subproject subdirectory.
-// Returns a warning string if any operation failed, or "" on success/skip.
-func (m *Manager) cleanupWorkspace(repoPath, wsName, wsRootPath string) string {
-	if wsName == "" || repoPath == "" {
-		return ""
-	}
-	var warnings []string
-	// jj ワークスペースを forget してディレクトリを削除する。
-	// Kill 時にも呼ばれる（resume 時は recreateWorkspace で再作成される）。
-	if err := m.jj().ForgetWorkspace(repoPath, wsName); err != nil {
-		// forget 失敗でもディレクトリ削除は続行する（jj が既に forget 済みの場合など）
-		warnings = append(warnings, fmt.Sprintf("workspace forget失敗: %v", err))
-	}
-	if wsRootPath != "" {
-		// 安全ガード: DataDir/workspace/ 配下のパスのみ削除する。
-		// symlink (macOS: /var → /private/var) を解決してからプレフィックスを比較する。
-		resolved := wsRootPath
-		if r, err := filepath.EvalSymlinks(wsRootPath); err == nil {
-			resolved = r
-		}
-		base := filepath.Join(m.config.DataDir, "workspace") + string(filepath.Separator)
-		if resolvedBase, err := filepath.EvalSymlinks(filepath.Join(m.config.DataDir, "workspace")); err == nil {
-			base = resolvedBase + string(filepath.Separator)
-		}
-		if strings.HasPrefix(resolved, base) {
-			if err := os.RemoveAll(wsRootPath); err != nil {
-				warnings = append(warnings, fmt.Sprintf("workspace ディレクトリ削除失敗: %v", err))
-			}
-		}
-	}
-	return strings.Join(warnings, "; ")
-}
-
-// workspaceRoot returns where the jj workspace named wsName of repoPath lives.
-func (m *Manager) workspaceRoot(repoPath, wsName string) string {
-	return filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
-}
-
-// createWorkspace creates the jj workspace wsName of repoPath with the project's
-// extra symlinks, marks it trusted for the runtime, and returns its root.
-// opts.ExtraSymlinks is filled in here.
-func (m *Manager) createWorkspace(repoPath, wsName string, opts jj.WorkspaceOptions) (string, error) {
-	wsPath := m.workspaceRoot(repoPath, wsName)
-	if m.config.WorkspaceSymlinksFunc != nil {
-		opts.ExtraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
-	}
-	debuglog.Printf("[createWorkspace] name=%q path=%q", wsName, wsPath)
-	if err := m.jj().CreateWorkspaceAt(repoPath, wsName, wsPath, opts); err != nil {
-		return "", err
-	}
-	if m.config.TrustWorkspaceFunc != nil {
-		// 失敗しても起動は続ける。trust ダイアログが出るだけで、利用者がその場で承認できる。
-		if err := m.config.TrustWorkspaceFunc(wsPath); err != nil {
-			debuglog.Printf("[createWorkspace] trusting %q failed: %v", wsPath, err)
-		}
-	}
-	return wsPath, nil
-}
-
-// discardWorkspace removes a workspace created for a session that failed to start.
-func (m *Manager) discardWorkspace(repoPath, wsName string) {
-	wsRootPath := m.workspaceRoot(repoPath, wsName)
-	if w := m.cleanupWorkspace(repoPath, wsName, wsRootPath); w != "" {
-		debuglog.Printf("[discardWorkspace] %s", w)
-	}
-}
-
-// recreateWorkspace creates a new jj workspace for a session whose workspace was deleted.
-// atRev/parentRev は Kill 時に保存した @ / @- の change_id（ADR 009）。
-// Returns the effective work directory (wsPath/subProjectDir if subProjectDir is set).
-func (m *Manager) recreateWorkspace(repoPath, sessName, subProjectDir, atRev, parentRev string) (string, error) {
-	debuglog.Printf("[recreateWorkspace] repoPath=%q sessName=%q atRev=%q parentRev=%q", repoPath, sessName, atRev, parentRev)
-	wsPath, err := m.createWorkspace(repoPath, sessName, jj.WorkspaceOptions{AtRev: atRev, ParentRev: parentRev})
-	if err != nil {
-		return "", fmt.Errorf("recreating jj workspace: %w", err)
-	}
-	if subProjectDir != "" {
-		return filepath.Join(wsPath, subProjectDir), nil
-	}
-	return wsPath, nil
 }
 
 // Kill forcefully terminates a session and cleans up its workspace directory.
@@ -883,28 +678,12 @@ func (m *Manager) Kill(sessionID DeckSessionID) error {
 		return err
 	}
 
-	// ワークスペースディレクトリを削除して disk を回収する。
-	// node_modules 等の依存ファイルがワークスペースごとに複製されるため、
-	// プロセス終了時に即座にクリーンアップする。
-	// resume 時は recreateWorkspace で新規ワークスペースが作られる。
+	// ワークスペースを消してディスクを回収する（node_modules などがワークスペースごとに複製される）。
+	// resume のときに作り直す。
 	var atRev, parentRev string
-	var revErr error
-	if rec.WorkspaceName != "" && rec.RepoPath != "" {
-		wsRootPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(rec.RepoPath), rec.WorkspaceName)
-		// GetWorkspaceRevisions は cleanupWorkspace（jj workspace forget）より前に呼ぶこと。
-		// workspace forget 後は @ の change_id が取得できない場合があるため順序依存がある。
-		// @ が空の場合 workspace forget で abandon されるため、@- も fallback として記録する。
-		// 注意: StopProcess は SIGTERM を送るだけでプロセス終了を待機しない。jj log が
-		// Claude Code の jj 操作と競合しうるが、cleanupWorkspace の jj workspace forget も
-		// 同じ前提で動作しており（既存の設計上の制約）、revision 取得を先に行っても
-		// リスクプロファイルは変わらない。
-		atRev, parentRev, revErr = m.jj().GetWorkspaceRevisions(wsRootPath)
-		if revErr != nil {
-			debuglog.Printf("[Kill] GetWorkspaceRevisions failed: %v", revErr)
-		}
-		if w := m.cleanupWorkspace(rec.RepoPath, rec.WorkspaceName, wsRootPath); w != "" {
-			debuglog.Printf("[Kill] workspace cleanup: %s", w)
-		}
+	removeWorkspace := rec.WorkspaceName != "" && rec.RepoPath != ""
+	if removeWorkspace {
+		atRev, parentRev = m.ws().remove(rec.RepoPath, rec.WorkspaceName)
 	}
 
 	return endClose(func(tx *store.Tx, r *store.Record) error {
@@ -913,24 +692,11 @@ func (m *Manager) Kill(sessionID DeckSessionID) error {
 			return err
 		}
 		applyExited(r, others, m.usage.HasConversation, time.Now())
-		if rec.WorkspaceName != "" && rec.RepoPath != "" {
-			r.WorkspaceName = ""
-			r.WorkspacePath = ""
-		}
-		// 取得失敗時（とワークスペースなしのとき）は古い revision が誤って resume に使われないようクリアする。
-		// ADR 009: 2 つは常にペアで更新する。
-		if revErr == nil && rec.WorkspaceName != "" {
-			r.LastJJRevision, r.LastJJParentRevision = atRev, parentRev
-		} else {
-			r.LastJJRevision, r.LastJJParentRevision = "", ""
+		if removeWorkspace {
+			recordWorkspaceRemoved(r, atRev, parentRev)
 		}
 		return nil
 	})
-}
-
-// HasActiveProcess returns true if the session has a live process.
-func (m *Manager) HasActiveProcess(sessionID DeckSessionID) bool {
-	return m.backend.IsActive(sessionID)
 }
 
 // GetSession returns a session by ID.

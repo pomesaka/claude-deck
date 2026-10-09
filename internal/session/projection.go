@@ -6,39 +6,15 @@ import (
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 )
 
-// DataSource identifies where a session field update originates from.
-// This type documents the "projection" rules: which source owns which fields.
-//
-// Session state is projected (assembled) from multiple sources:
+// Session state is projected (assembled) from several sources:
 //
 //	Store  → ID, Name, RepoPath, RepoName, WorkspacePath, WorkspaceName,
-//	         SubProjectDir, SessionChain, Status, FinishedAt, PID, BookmarkName
+//	         SubProjectDir, SessionChain, Status, FinishedAt, PID
 //	JSONL  → Prompt, PermissionMode, StartedAt, LastActivity, TokenUsage
-//	Hook   → Status (transitions), SessionChain (append on /clear)
+//	jj     → BookmarkName
 //
-// The Apply* methods below encapsulate these projection rules so that callers
-// (Manager, file watchers, hook processors) don't need to know which fields
-// to update — they just call the appropriate Apply method with the source data.
-type DataSource int
-
-const (
-	SourceStore DataSource = iota
-	SourceJSONL
-	SourceHook
-)
-
-func (d DataSource) String() string {
-	switch d {
-	case SourceStore:
-		return "Store"
-	case SourceJSONL:
-		return "JSONL"
-	case SourceHook:
-		return "Hook"
-	default:
-		return "Unknown"
-	}
-}
+// The Apply* methods below are the only places the JSONL and jj fields are
+// written; the store fields are written by applyControlRecordLocked.
 
 // JSONLTokenData holds token usage data extracted from JSONL files.
 // Used by ApplyJSONLTokens to update session token state.

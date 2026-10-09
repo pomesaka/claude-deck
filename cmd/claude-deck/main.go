@@ -167,7 +167,7 @@ func run() error {
 	}
 
 	// Create and run TUI
-	model := tui.NewModel(mgr, cfg, ctx, tui.ModelOptions{SplitMode: splitMode})
+	model := tui.NewModel(mgr, cfg, ctx)
 	p := tea.NewProgram(model)
 
 	// rate_limits ファイルを監視し、更新があれば TUI に通知する。

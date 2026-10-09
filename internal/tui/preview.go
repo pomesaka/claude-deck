@@ -48,8 +48,6 @@ func listenStream(ch <-chan []usage.LogEntry) tea.Cmd {
 // previewStreamer streams JSONL log entries for a given spec in a background goroutine.
 // Each call to Start cancels the previous goroutine and allocates a fresh output channel.
 // The goroutine closes its channel on exit, which unblocks any waiting listenStream Cmd.
-//
-// This is the preview-local equivalent of Manager.StreamSession, with no Manager dependency.
 type previewStreamer struct {
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -117,10 +115,9 @@ func (ps *previewStreamer) run(ctx context.Context, spec preview.PreviewSpec, ou
 	}
 
 	// Build prefix entries from /clear history (oldest first).
-	// Uses the same algorithm as Manager.StreamSession.
 	var prefixEntries []usage.LogEntry
 	for i := len(spec.PriorJSONLPaths) - 1; i >= 0; i-- {
-		prev := newPreviewLogStreamer(spec.TranscriptLayout, spec.PriorJSONLPaths[i])
+		prev := usage.NewLogStreamerFor(spec.TranscriptLayout, spec.PriorJSONLPaths[i])
 		prev.ReadAll()
 		prefixEntries = append(prev.Entries(), prefixEntries...)
 		if len(prefixEntries) >= usage.MaxEntries {
@@ -145,7 +142,7 @@ func (ps *previewStreamer) run(ctx context.Context, spec preview.PreviewSpec, ou
 	}
 
 	// Phase 1: tail-read the current file for instant display.
-	s := newPreviewLogStreamer(spec.TranscriptLayout, spec.JSONLPath)
+	s := usage.NewLogStreamerFor(spec.TranscriptLayout, spec.JSONLPath)
 	fileSize := s.ReadTail(512 * 1024) // 512KB
 	if ctx.Err() != nil {
 		return
@@ -164,7 +161,7 @@ func (ps *previewStreamer) run(ctx context.Context, spec preview.PreviewSpec, ou
 			return
 		}
 		// Error — restart from scratch after a brief pause.
-		s = newPreviewLogStreamer(spec.TranscriptLayout, spec.JSONLPath)
+		s = usage.NewLogStreamerFor(spec.TranscriptLayout, spec.JSONLPath)
 		fileSize = s.ReadTail(512 * 1024)
 		if ctx.Err() != nil {
 			return
@@ -176,13 +173,6 @@ func (ps *previewStreamer) run(ctx context.Context, spec preview.PreviewSpec, ou
 		case <-time.After(time.Second):
 		}
 	}
-}
-
-func newPreviewLogStreamer(layout, path string) *usage.LogStreamer {
-	if layout == "codex" {
-		return usage.NewCodexLogStreamer(path)
-	}
-	return usage.NewLogStreamer(path)
 }
 
 // ── PreviewModel ──────────────────────────────────────────────────────────────
@@ -409,11 +399,7 @@ func (m PreviewModel) renderHeader(innerWidth int) []string {
 	h = append(h, titleStyle.Render(truncate(title, innerWidth)))
 	h = append(h, dimStyle.Render(truncate(fmt.Sprintf("   パス: %s", m.spec.WorkspacePath), innerWidth)))
 
-	runtimeID := m.spec.RuntimeSessionID
-	if runtimeID == "" {
-		runtimeID = m.spec.ClaudeSessionID
-	}
-	idLine := fmt.Sprintf("   ID: %s  Runtime: %s", m.spec.DeckSessionID, runtimeID)
+	idLine := fmt.Sprintf("   ID: %s  Runtime: %s", m.spec.DeckSessionID, m.spec.RuntimeSessionID)
 	if m.spec.ClearCount > 0 {
 		idLine += fmt.Sprintf("  (/clear×%d)", m.spec.ClearCount)
 	}

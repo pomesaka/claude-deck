@@ -145,7 +145,7 @@ func TestCreateSession_WritesStoreBeforeReturning(t *testing.T) {
 	if r.PID != be.windows[sess.ID] || r.PID == 0 {
 		t.Errorf("PID = %d, want the window PID %d", r.PID, be.windows[sess.ID])
 	}
-	if !sess.Snapshot().HasProcess {
+	if !sess.IsProcessAlive() {
 		t.Error("in-memory session has no process after create")
 	}
 
@@ -213,6 +213,31 @@ func TestKill(t *testing.T) {
 	}
 	if got := m.GetSession(sess.ID).GetStatus(); got != StatusCompleted {
 		t.Errorf("in-memory status = %v, want Completed", got)
+	}
+}
+
+// A session closed earlier has no workspace left; closing it again must not
+// drop the revisions the first close saved for resume (ADR 009).
+func TestKill_AlreadyClosedKeepsSavedRevisions(t *testing.T) {
+	m, _ := newTestManager(t)
+	finished := time.Now().Add(-time.Hour)
+	if err := m.store.Insert(store.Record{
+		ID: "closed", Name: "abcd1234", RepoPath: t.TempDir(),
+		Status: StatusCompleted.ID(), FinishedAt: &finished,
+		LastJJRevision: "at-rev", LastJJParentRevision: "parent-rev",
+	}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	if err := m.Kill("closed"); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	r := mustGet(t, m.store, "closed")
+	if r.LastJJRevision != "at-rev" || r.LastJJParentRevision != "parent-rev" {
+		t.Errorf("revisions = %q %q, want at-rev parent-rev", r.LastJJRevision, r.LastJJParentRevision)
+	}
+	if r.Status != StatusCompleted.ID() || !r.FinishedAt.Equal(finished) || r.ClosingAt != nil {
+		t.Errorf("after second Kill: status=%q finished=%v closing=%v", r.Status, r.FinishedAt, r.ClosingAt)
 	}
 }
 
@@ -320,8 +345,8 @@ func TestReload_FollowsOtherProcesses(t *testing.T) {
 	m.Reload()
 
 	snap := m.GetSession(sess.ID).Snapshot()
-	if snap.Status != StatusWaitingApproval || snap.ClaudeSessionID != "claude-1" {
-		t.Errorf("after reload: status=%v claude=%q", snap.Status, snap.ClaudeSessionID)
+	if snap.Status != StatusWaitingApproval || snap.RuntimeSessionID != "claude-1" {
+		t.Errorf("after reload: status=%v claude=%q", snap.Status, snap.RuntimeSessionID)
 	}
 	if m.GetSession("ext") != nil {
 		t.Error("external session for a Claude ID now owned by a deck session was kept")
@@ -550,7 +575,7 @@ func TestPruneOldSessions_DiscardsWorkspace(t *testing.T) {
 			jjCalls := useFakeJJ(t, m, tt.jjLogFails)
 
 			repo := t.TempDir()
-			wsRoot := m.workspaceRoot(repo, "ws")
+			wsRoot := m.ws().root(repo, "ws")
 			if err := os.MkdirAll(wsRoot, 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -695,7 +720,7 @@ func TestCollectGarbage(t *testing.T) {
 			jjCalls := useFakeJJ(t, m, tt.jjLogFails)
 
 			repo := t.TempDir()
-			repoDir := filepath.Dir(m.workspaceRoot(repo, "x"))
+			repoDir := filepath.Dir(m.ws().root(repo, "x"))
 			// owned: a closed session's row has this name. orphan: a jj workspace with no row.
 			// plain: no row and not a jj workspace. fresh: no row yet, just created.
 			for _, name := range []string{"owned", "orphan", "plain", "fresh"} {
@@ -733,7 +758,7 @@ func TestCollectGarbage(t *testing.T) {
 				return len(forgotten), nil
 			}
 
-			report, err := m.CollectGarbage(tt.dryRun)
+			report, err := CollectGarbage(m.store, m.config, tt.dryRun)
 			if err != nil {
 				t.Fatalf("CollectGarbage: %v", err)
 			}

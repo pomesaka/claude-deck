@@ -74,7 +74,7 @@ func TestCodexLogStreamer(t *testing.T) {
 {"timestamp":"2026-05-23T05:34:24.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}
 `)
 
-	s := NewCodexLogStreamer(path)
+	s := newLogStreamer(codexFormat{}, path)
 	s.ReadAll()
 	entries := s.Entries()
 	if len(entries) != 3 {

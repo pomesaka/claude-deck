@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/pomesaka/claude-deck/internal/debuglog"
@@ -11,75 +10,11 @@ import (
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
-// streamState guards the active JSONL streaming goroutine.
-// Invariant: at most one session is streamed at a time.
-// Separated from Manager.mu so streaming switches don't contend with
-// high-frequency sessions-map reads.
-// Lock order: acquire streamState.mu independently of Manager.mu (never hold both).
-//
-// Callers of StreamSession and stopActiveStream are expected to be the TUI
-// Update goroutine (single-threaded) and the hook-processor goroutine (also
-// single-threaded).  The mutex protects against these two callers racing,
-// not against high-concurrency from many goroutines.
-type streamState struct {
-	mu     sync.Mutex
-	id     DeckSessionID
-	cancel context.CancelFunc
-}
-
-// isCurrent reports whether id is the currently active stream.
-func (ss *streamState) isCurrent(id DeckSessionID) bool {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	return ss.id == id
-}
-
-// stop cancels the current stream and clears state.
-func (ss *streamState) stop() {
-	ss.mu.Lock()
-	if ss.cancel != nil {
-		ss.cancel()
-		ss.cancel = nil
-		ss.id = ""
-	}
-	ss.mu.Unlock()
-}
-
-// stopIfSame cancels the stream only if it matches id.
-func (ss *streamState) stopIfSame(id DeckSessionID) {
-	ss.mu.Lock()
-	if ss.id == id && ss.cancel != nil {
-		ss.cancel()
-		ss.cancel = nil
-		ss.id = ""
-	}
-	ss.mu.Unlock()
-}
-
-// set activates a new stream for id with the given cancel function.
-func (ss *streamState) set(id DeckSessionID, cancel context.CancelFunc) {
-	ss.mu.Lock()
-	ss.id = id
-	ss.cancel = cancel
-	ss.mu.Unlock()
-}
-
-// clearIfCurrent clears stream state if it still matches id.
-// Called by the goroutine on exit to avoid clearing a successor stream.
-func (ss *streamState) clearIfCurrent(id DeckSessionID) {
-	ss.mu.Lock()
-	if ss.id == id {
-		ss.cancel = nil
-		ss.id = ""
-	}
-	ss.mu.Unlock()
-}
-
 // StartFileWatcher creates a MultiWatcher for JSONL files and starts it
 // in a background goroutine. Write events are coalesced (2秒間隔) して
 // LastActivity を更新。新規ファイルは 30 秒間隔の re-glob で発見する。
 func (m *Manager) StartFileWatcher(ctx context.Context) error {
-	mw, err := usage.NewMultiWatcherForLayout(m.usage.BaseDir(), m.usage.Layout(), 30*time.Second)
+	mw, err := m.usage.NewMultiWatcher(30 * time.Second)
 	if err != nil {
 		return err
 	}
@@ -102,7 +37,7 @@ func (m *Manager) handleFileWrite(ev usage.FileEvent) {
 	debuglog.Printf("[filewrite] ev.SessionID=%s modTime=%s sessions=%d", ev.SessionID, ev.ModTime.Format("15:04:05"), len(sessions))
 	for _, s := range sessions {
 		s.mu.RLock()
-		csID := s.CurrentClaudeID()
+		csID := s.CurrentRuntimeID()
 		s.mu.RUnlock()
 
 		if string(csID) == ev.SessionID {
@@ -185,122 +120,6 @@ func (m *Manager) applyRuntimeRateLimits(limits *usage.RuntimeRateLimits) {
 	}
 }
 
-// StreamSession starts JSONL streaming for the given session (detail pane selection).
-// 前回のストリーミングがあれば停止し、新しいセッションのストリーミングを開始する。
-// 同じセッションが既にストリーム中なら何もしない。
-func (m *Manager) StreamSession(sessionID DeckSessionID) {
-	if m.stream.isCurrent(sessionID) {
-		return
-	}
-	// 前のストリームを停止（streamState.stop が不変条件「ゼロか一つ」を維持する）
-	m.stream.stop()
-
-	if sessionID == "" {
-		return
-	}
-
-	m.mu.RLock()
-	sess, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok {
-		return
-	}
-
-	sess.mu.RLock()
-	csID := sess.CurrentClaudeID()
-	priorIDs := sess.PriorClaudeIDs()
-	sess.mu.RUnlock()
-
-	if csID == "" {
-		return
-	}
-
-	path := m.usage.ResolveSessionPath(string(csID))
-	if path == "" {
-		return
-	}
-
-	// 旧セッションの JSONL パスを事前解決（パス解決のみでディスク I/O なし）
-	// SessionChain の全履歴を古い順に prefix として読み込む
-	var priorPaths []string
-	for _, id := range priorIDs {
-		if p := m.usage.ResolveSessionPath(string(id)); p != "" {
-			priorPaths = append(priorPaths, p)
-		}
-	}
-
-	ctx, cancel := context.WithCancel(m.ctx)
-	m.stream.set(sessionID, cancel)
-
-	go func() {
-		defer m.stream.clearIfCurrent(sessionID)
-
-		// 旧セッションのログエントリを goroutine 内で読み込む。
-		// ReadAll() はディスク I/O を伴うため、TUI メインループのブロックを防ぐために
-		// goroutine 内で実行する。新しい順（逆順）に読み込み、MaxEntries に達した
-		// 時点で打ち切ることで /clear が多数回行われた場合の不要な I/O を防ぐ。
-		var prefixEntries []usage.LogEntry
-		for i := len(priorPaths) - 1; i >= 0; i-- {
-			prev := m.usage.NewLogStreamer(priorPaths[i])
-			prev.ReadAll()
-			prefixEntries = append(prev.Entries(), prefixEntries...)
-			if len(prefixEntries) >= usage.MaxEntries {
-				break
-			}
-		}
-		if len(prefixEntries) > usage.MaxEntries {
-			prefixEntries = prefixEntries[len(prefixEntries)-usage.MaxEntries:]
-		}
-
-		onChange := func(entries []usage.LogEntry) {
-			merged := entries
-			if len(prefixEntries) > 0 {
-				merged = make([]usage.LogEntry, 0, len(prefixEntries)+len(entries))
-				merged = append(merged, prefixEntries...)
-				merged = append(merged, entries...)
-				// MaxEntries は末尾優先で cap
-				if len(merged) > usage.MaxEntries {
-					merged = merged[len(merged)-usage.MaxEntries:]
-				}
-			}
-			sess.rt.mu.Lock()
-			sess.rt.JSONLLogEntries = merged
-			sess.rt.mu.Unlock()
-			m.notifyChange(sessionID)
-		}
-
-		// Phase 1: 末尾読み込みで即座に表示
-		s := m.usage.NewLogStreamer(path)
-		fileSize := s.ReadTail(512 * 1024) // 512KB
-		onChange(s.Entries())
-
-		// Phase 2: fileSize 以降をストリーミング（新規書き込み検知）
-		for {
-			err := s.RunFrom(ctx, fileSize, onChange)
-			if ctx.Err() != nil {
-				return
-			}
-			if err == nil {
-				return
-			}
-			// エラー時は最初からやり直し
-			s = m.usage.NewLogStreamer(path)
-			fileSize = s.ReadTail(512 * 1024)
-			onChange(s.Entries())
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(time.Second):
-			}
-		}
-	}()
-}
-
-// stopActiveStream cancels the current streaming goroutine if it matches the given session.
-func (m *Manager) stopActiveStream(sessionID DeckSessionID) {
-	m.stream.stopIfSame(sessionID)
-}
-
 // HydrateFromJSONL reads Claude Code JSONL files and populates
 // JSONL-derived fields for sessions.
 // セッション数は DiscoverExternalSessions のページネーションで段階的に増えるため、
@@ -379,7 +198,7 @@ func (m *Manager) refreshBookmarks() {
 // ここではトークン数だけを軽量スキャンで更新する。
 func (m *Manager) hydrateSession(sess *Session) {
 	sess.mu.RLock()
-	csID := sess.CurrentClaudeID()
+	csID := sess.CurrentRuntimeID()
 	sess.mu.RUnlock()
 
 	if csID == "" {

@@ -179,6 +179,47 @@ func beginResume(r *store.Record, now time.Time) error {
 	return nil
 }
 
+// abortResume returns a row whose resume could not start a process to Completed.
+func abortResume(r *store.Record, now time.Time) {
+	r.LaunchingAt = nil
+	r.Status = StatusCompleted.ID()
+	r.FinishedAt = &now
+}
+
+// markAdopted turns the row built from an external session into a finished deck
+// session, so beginResume accepts it.
+func markAdopted(r *store.Record, now time.Time) {
+	r.Status = StatusCompleted.ID()
+	r.FinishedAt = &now
+}
+
+// reviveForLiveWindow sets a finished row back to Idle because its tmux window,
+// running as pid, is alive. A row that is not finished is left as is.
+func reviveForLiveWindow(r *store.Record, pid int) (changed bool) {
+	status, ok := StatusFromID(r.Status)
+	if !ok || !status.IsTerminal() {
+		return false
+	}
+	r.Status = StatusIdle.ID()
+	r.FinishedAt = nil
+	r.ErrorMessage = ""
+	r.ClosingAt = nil
+	finishLaunch(r, pid)
+	return true
+}
+
+// recordWorkspaceRemoved clears the workspace a close has just removed and
+// records where its working copy was, for the resume to recreate it (ADR 009).
+// atRev and parentRev are both empty when they could not be read: an older pair
+// must not be used for a workspace that has moved on since.
+// WHY 消したときだけ呼ぶ: ワークスペースの無い行（すでに close 済み）をもう一度 close しても
+// 保存済みの位置は変わらない。そこで空を書くと、resume が trunk() からの作り直しになる。
+func recordWorkspaceRemoved(r *store.Record, atRev, parentRev string) {
+	r.WorkspaceName = ""
+	r.WorkspacePath = ""
+	r.LastJJRevision, r.LastJJParentRevision = atRev, parentRev
+}
+
 // setError marks the row as failed with a reason.
 func setError(r *store.Record, msg string, now time.Time) {
 	r.Status = StatusError.ID()

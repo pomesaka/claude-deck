@@ -29,7 +29,7 @@ func TestNewReader_DefaultDir(t *testing.T) {
 	}
 }
 
-func TestReadSessionByID(t *testing.T) {
+func TestReadTokensByID(t *testing.T) {
 	r, baseDir := setupTestReader(t)
 	projDir := filepath.Join(baseDir, "project1")
 
@@ -39,7 +39,7 @@ func TestReadSessionByID(t *testing.T) {
 `
 	writeJSONL(t, projDir, "sess-001.jsonl", jsonl)
 
-	stats := r.ReadSessionByID("sess-001")
+	stats := r.ReadTokensByID("sess-001")
 	if stats == nil {
 		t.Fatal("expected non-nil stats")
 	}
@@ -66,9 +66,9 @@ func TestReadSessionByID(t *testing.T) {
 	}
 }
 
-func TestReadSessionByID_NotFound(t *testing.T) {
+func TestReadTokensByID_NotFound(t *testing.T) {
 	r, _ := setupTestReader(t)
-	stats := r.ReadSessionByID("nonexistent")
+	stats := r.ReadTokensByID("nonexistent")
 	if stats != nil {
 		t.Error("expected nil for non-existent session")
 	}
@@ -113,37 +113,35 @@ func TestReadSessionInfoByID(t *testing.T) {
 	}
 }
 
-func TestReadSessionByWorkDir(t *testing.T) {
-	r, baseDir := setupTestReader(t)
-	projDir := filepath.Join(baseDir, "project1")
-
-	jsonl := `{"type":"user","sessionId":"sess-003","cwd":"/home/user/myrepo","timestamp":"2026-02-26T10:00:00Z","message":{"role":"user","content":"test"}}
-{"type":"assistant","sessionId":"sess-003","timestamp":"2026-02-26T10:00:01Z","message":{"role":"assistant","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
-`
-	writeJSONL(t, projDir, "sess-003.jsonl", jsonl)
-
-	stats := r.ReadSessionByWorkDir("/home/user/myrepo")
-	if stats == nil {
-		t.Fatal("expected non-nil stats")
+// toolUseResult is a string for some tools. Reading must neither stop at such a
+// line nor lose what follows it.
+func TestReadSessionInfoByID_ToolUseResultShapes(t *testing.T) {
+	const (
+		user      = `{"type":"user","cwd":"/repo","timestamp":"2026-02-26T10:00:00Z","message":{"role":"user","content":"go"}}`
+		assistant = `{"type":"assistant","timestamp":"2026-02-26T10:00:02Z","message":{"role":"assistant","model":"m","usage":{"input_tokens":7,"output_tokens":3}}}`
+	)
+	tests := []struct {
+		name   string
+		result string
+	}{
+		{"string", `{"type":"user","timestamp":"2026-02-26T10:00:01Z","toolUseResult":"Error: denied","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]}}`},
+		{"object", `{"type":"user","timestamp":"2026-02-26T10:00:01Z","toolUseResult":{"filePath":"a.go","structuredPatch":[]},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]}}`},
+		{"array", `{"type":"user","timestamp":"2026-02-26T10:00:01Z","toolUseResult":[{"type":"text","text":"ok"}],"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]}}`},
+		{"malformed line", `{"type":"user","toolUseResult":`},
 	}
-	if stats.InputTokens != 100 {
-		t.Errorf("InputTokens = %d, want 100", stats.InputTokens)
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, baseDir := setupTestReader(t)
+			writeJSONL(t, filepath.Join(baseDir, "p"), "s.jsonl", user+"\n"+tt.result+"\n"+assistant+"\n")
 
-func TestReadSessionByWorkDir_SubDir(t *testing.T) {
-	r, baseDir := setupTestReader(t)
-	projDir := filepath.Join(baseDir, "project1")
-
-	jsonl := `{"type":"user","sessionId":"sess-004","cwd":"/home/user/myrepo","timestamp":"2026-02-26T10:00:00Z","message":{"role":"user","content":"test"}}
-{"type":"assistant","sessionId":"sess-004","timestamp":"2026-02-26T10:00:01Z","message":{"role":"assistant","usage":{"input_tokens":50,"output_tokens":25,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
-`
-	writeJSONL(t, projDir, "sess-004.jsonl", jsonl)
-
-	// Should match when searching for a subdirectory of the CWD
-	stats := r.ReadSessionByWorkDir("/home/user/myrepo/workspace-1")
-	if stats == nil {
-		t.Fatal("expected match for subdirectory")
+			info := r.ReadSessionInfoByID("s")
+			if info == nil {
+				t.Fatal("expected non-nil info")
+			}
+			if info.Tokens.InputTokens != 7 || info.Tokens.OutputTokens != 3 {
+				t.Errorf("tokens after the tool result = %d/%d, want 7/3", info.Tokens.InputTokens, info.Tokens.OutputTokens)
+			}
+		})
 	}
 }
 
@@ -182,25 +180,6 @@ func TestListAllSessions_SkipsSubagents(t *testing.T) {
 	}
 	if results[0].SessionID != "main" {
 		t.Errorf("expected 'main' session, got %q", results[0].SessionID)
-	}
-}
-
-func TestPathMatches(t *testing.T) {
-	tests := []struct {
-		cwd     string
-		workDir string
-		want    bool
-	}{
-		{"/home/user/repo", "/home/user/repo", true},
-		{"/home/user/repo", "/home/user/repo/sub", true},
-		{"/home/user/repo", "/home/user/repo-other", false},
-		{"/home/user/repo", "/other/path", false},
-	}
-	for _, tt := range tests {
-		got := pathMatches(tt.cwd, tt.workDir)
-		if got != tt.want {
-			t.Errorf("pathMatches(%q, %q) = %v, want %v", tt.cwd, tt.workDir, got, tt.want)
-		}
 	}
 }
 

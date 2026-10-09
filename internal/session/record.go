@@ -35,7 +35,7 @@ func (s *Session) recordLocked() store.Record {
 		SubProjectDir:            s.SubProjectDir,
 		SessionChain:             chain,
 		ForkedFrom:               string(s.ForkedFrom),
-		Status:                 s.Status.ID(),
+		Status:                   s.Status.ID(),
 		FinishedAt:               copyTimePtr(s.FinishedAt),
 		PID:                      s.PID,
 		ErrorMessage:             s.ErrorMessage,
@@ -72,10 +72,7 @@ func newSessionFromRecord(r store.Record) *Session {
 // applyControlRecordLocked copies the fields that any process may write
 // (CLI, hook commands, the pane's exit command) from the store row.
 // Caller must hold s.mu (write) or own s exclusively.
-// Returns true when the current Claude session ID changed (e.g. after /clear).
-func (s *Session) applyControlRecordLocked(r store.Record) (chainHeadChanged bool) {
-	before := s.CurrentClaudeID()
-
+func (s *Session) applyControlRecordLocked(r store.Record) {
 	s.Name = r.Name
 	s.WorkspacePath = r.WorkspacePath
 	s.WorkspaceName = r.WorkspaceName
@@ -94,15 +91,6 @@ func (s *Session) applyControlRecordLocked(r store.Record) (chainHeadChanged boo
 	s.ErrorMessage = r.ErrorMessage
 	s.LastJJRevision = r.LastJJRevision
 	s.LastJJParentRevision = r.LastJJParentRevision
-
-	// WHY process をステータスから導く: プロセスを起動・終了させるのは CLI やペイン内の終了コマンドなど
-	// TUI 以外のプロセスのこともあり、TUI はそれを store のステータスでしか知り得ない。
-	if s.Status.IsTerminal() || s.Status == StatusUnmanaged {
-		s.process.Store(nil)
-	} else {
-		s.process.Store(&RunningProcess{})
-	}
-	return s.CurrentClaudeID() != before
 }
 
 // applyProjectionRecordLocked copies the fields the TUI projects from JSONL

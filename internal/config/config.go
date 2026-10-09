@@ -50,7 +50,6 @@ type ThemeConfig struct {
 	Warning         string `toml:"warning"`
 	Danger          string `toml:"danger"`
 	BgSelected      string `toml:"bg_selected"`
-	Border          string `toml:"border"`
 	BorderFocus     string `toml:"border_focus"`
 	Text            string `toml:"text"`
 	TextDim         string `toml:"text_dim"`
@@ -108,31 +107,18 @@ type GhosttyConfig struct {
 }
 
 // TmuxConfig holds settings for the tmux process management backend.
-// tmux is the only supported backend; the Enabled field is retained for
-// backwards compatibility with existing config files but has no effect.
 type TmuxConfig struct {
-	// Enabled is a no-op legacy field. tmux is always the backend; this field
-	// is preserved so existing config files with `enabled = false` do not error.
-	// See ADR-007 for why PTY/BackendMode was removed.
-	Enabled bool `toml:"enabled"`
 	// Command is the tmux binary path; defaults to "tmux".
 	Command string `toml:"command"`
 	// SessionName is the tmux session name; defaults to "claude-deck".
 	SessionName string `toml:"session_name"`
 }
 
-// KeybindConfig allows overriding default keybindings.
+// KeybindConfig overrides the keys that can be rebound. The other keys are fixed
+// (internal/tui/keys.go).
 type KeybindConfig struct {
-	NewSession string `toml:"new_session"`
-	Approve    string `toml:"approve"`
-	Deny       string `toml:"deny"`
-	Reply      string `toml:"reply"`
-	Prompt     string `toml:"prompt"`
-	OpenTerm   string `toml:"open_term"`
-	Fork       string `toml:"fork"`
-	Kill       string `toml:"kill"`
-	Quit       string `toml:"quit"`
-	Help       string `toml:"help"`
+	OpenTerm string `toml:"open_term"`
+	Fork     string `toml:"fork"`
 }
 
 // DefaultConfigDir returns the default configuration directory.
@@ -164,16 +150,8 @@ func Default() *Config {
 			DeckWidth: 400,
 		},
 		Keybinds: KeybindConfig{
-			NewSession: "n",
-			Approve:    "a",
-			Deny:       "d",
-			Reply:      "r",
-			Prompt:     "p",
-			OpenTerm:   "t",
-			Fork:       "f",
-			Kill:       "x",
-			Quit:       "q",
-			Help:       "?",
+			OpenTerm: "t",
+			Fork:     "f",
 		},
 		Theme: ThemeConfig{
 			Primary:         "#7C3AED",
@@ -182,7 +160,6 @@ func Default() *Config {
 			Warning:         "#F59E0B",
 			Danger:          "#EF4444",
 			BgSelected:      "#313244",
-			Border:          "#45475A",
 			BorderFocus:     "#7C3AED",
 			Text:            "#CDD6F4",
 			TextDim:         "#6C7086",

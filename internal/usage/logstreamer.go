@@ -3,7 +3,6 @@ package usage
 import (
 	"bufio"
 	"context"
-	json "encoding/json/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +12,7 @@ import (
 // Use Run for blocking event-driven streaming, or ReadAll for one-shot reads.
 type LogStreamer struct {
 	path      string
-	layout    TranscriptLayout
+	format    format
 	entries   []LogEntry
 	toolIndex map[string]int
 	depth     int // サブエージェントの再帰深度（0=親）
@@ -23,30 +22,25 @@ type LogStreamer struct {
 	inlinedAgents map[string]bool // 既にインライン展開済みのエージェント
 }
 
-// NewLogStreamer creates a streamer for the given JSONL file path.
+// NewLogStreamer creates a streamer for a Claude Code JSONL file.
 func NewLogStreamer(path string) *LogStreamer {
+	return newLogStreamer(claudeFormat{}, path)
+}
+
+// NewLogStreamerFor creates a streamer for a transcript of the given runtime
+// provider (config.toml runtime.provider).
+func NewLogStreamerFor(provider, path string) *LogStreamer {
+	return newLogStreamer(formatFor(provider), path)
+}
+
+func newLogStreamer(f format, path string) *LogStreamer {
 	return &LogStreamer{
 		path:          path,
-		layout:        TranscriptClaude,
+		format:        f,
 		toolIndex:     make(map[string]int),
 		agentMap:      make(map[string]string),
 		inlinedAgents: make(map[string]bool),
 	}
-}
-
-// NewCodexLogStreamer creates a streamer for Codex transcript JSONL.
-func NewCodexLogStreamer(path string) *LogStreamer {
-	s := NewLogStreamer(path)
-	s.layout = TranscriptCodex
-	return s
-}
-
-// NewLogStreamer creates a streamer that matches this Reader's transcript layout.
-func (r *Reader) NewLogStreamer(path string) *LogStreamer {
-	if r.layout == TranscriptCodex {
-		return NewCodexLogStreamer(path)
-	}
-	return NewLogStreamer(path)
 }
 
 // MaxEntries is the maximum number of log entries to keep. Override from config before use.
@@ -72,15 +66,7 @@ func (s *LogStreamer) ReadAll() {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
-		if s.layout == TranscriptCodex {
-			processCodexEntry(scanner.Bytes(), &s.entries)
-			continue
-		}
-		var entry jsonlEntry
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
-			continue // skip malformed lines
-		}
-		s.processEntry(&entry)
+		s.format.logLine(s, scanner.Bytes())
 	}
 }
 
@@ -115,15 +101,7 @@ func (s *LogStreamer) ReadTail(tailBytes int64) int64 {
 	}
 
 	for scanner.Scan() {
-		if s.layout == TranscriptCodex {
-			processCodexEntry(scanner.Bytes(), &s.entries)
-			continue
-		}
-		var entry jsonlEntry
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
-			continue
-		}
-		s.processEntry(&entry)
+		s.format.logLine(s, scanner.Bytes())
 	}
 	return fileSize
 }
@@ -146,17 +124,7 @@ func (s *LogStreamer) RunFrom(ctx context.Context, offset int64, onChange func([
 	scanner := bufio.NewScanner(tr)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
-		if s.layout == TranscriptCodex {
-			if processCodexEntry(scanner.Bytes(), &s.entries) && onChange != nil {
-				onChange(s.Entries())
-			}
-			continue
-		}
-		var entry jsonlEntry
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
-			continue // skip malformed lines
-		}
-		if s.processEntry(&entry) && onChange != nil {
+		if s.format.logLine(s, scanner.Bytes()) && onChange != nil {
 			onChange(s.Entries())
 		}
 	}
@@ -192,8 +160,8 @@ func (s *LogStreamer) processEntry(entry *jsonlEntry) bool {
 		if isToolResult(content) {
 			markToolResults(content, s.entries, s.toolIndex)
 			// toolUseResult に structuredPatch があれば diff エントリを追加
-			if entry.ToolUseResult != nil && len(entry.ToolUseResult.StructuredPatch) > 0 {
-				s.entries = append(s.entries, makeDiffEntry(entry.ToolUseResult))
+			if res := entry.toolUseResult(); res != nil && len(res.StructuredPatch) > 0 {
+				s.entries = append(s.entries, makeDiffEntry(res))
 			}
 			return true
 		}

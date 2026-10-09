@@ -131,7 +131,7 @@ func (m *Manager) Reload() {
 		}
 	}
 
-	var chainChanged, removed []DeckSessionID
+	var removed []DeckSessionID
 	m.mu.Lock()
 	for id, sess := range m.sessions {
 		r, inStore := byID[id]
@@ -139,9 +139,7 @@ func (m *Manager) Reload() {
 		sess.mu.Lock()
 		switch {
 		case inStore:
-			if sess.applyControlRecordLocked(r) {
-				chainChanged = append(chainChanged, id)
-			}
+			sess.applyControlRecordLocked(r)
 		case sess.Status == StatusUnmanaged:
 			// 外部セッションは、同じ Claude セッションを deck セッションが持つようになったら消す
 			// （hook で ID が届く前に discovery が外部セッションとして取り込んでいた場合）。
@@ -167,23 +165,6 @@ func (m *Manager) Reload() {
 	}
 	m.mu.Unlock()
 
-	for _, id := range removed {
-		m.stopActiveStream(id)
-	}
-	// /clear で現在の Claude セッション ID が変わったら、ログを新しいセッションのものに切り替える。
-	for _, id := range chainChanged {
-		sess := m.GetSession(id)
-		if sess == nil {
-			continue
-		}
-		sess.rt.mu.Lock()
-		sess.rt.JSONLLogEntries = nil
-		sess.rt.mu.Unlock()
-		if m.stream.isCurrent(id) {
-			m.stopActiveStream(id)
-			m.StreamSession(id)
-		}
-	}
 	m.notifyChange()
 }
 
@@ -294,16 +275,9 @@ func (m *Manager) ReconcileTmux() {
 	} else {
 		for id, pid := range live {
 			if _, err := m.store.Update(string(id), func(r *store.Record) error {
-				status, ok := StatusFromID(r.Status)
-				if !ok || !status.IsTerminal() {
-					return nil
+				if before := r.Status; reviveForLiveWindow(r, pid) {
+					debuglog.Printf("[ReconcileTmux] window alive but status=%s, reset to Idle session=%s", before, id)
 				}
-				debuglog.Printf("[ReconcileTmux] window alive but status=%s, resetting to Idle session=%s", status, id)
-				r.Status = StatusIdle.ID()
-				r.FinishedAt = nil
-				r.ErrorMessage = ""
-				r.ClosingAt = nil
-				finishLaunch(r, pid)
 				return nil
 			}); err != nil && !errors.Is(err, store.ErrNotFound) {
 				debuglog.Printf("[ReconcileTmux] %s: %v", id, err)
@@ -408,181 +382,8 @@ func (m *Manager) pruneOldSessions() {
 	// 行を消したプロセスだけが後片付けをする。jj とファイルの操作は時間がかかるので、
 	// トランザクションの外で行う。
 	for _, r := range pruned {
-		m.discardPruned(r, kept)
+		m.ws().discardPruned(r, kept)
 	}
-}
-
-// discardPruned removes what a pruned session left behind: its jj workspace, if
-// it still has one, and the runtime's records about the workspace directory.
-// A pruned session is gone from the list and cannot be resumed, so nothing
-// would ever remove them otherwise.
-func (m *Manager) discardPruned(r store.Record, kept []store.Record) {
-	if r.RepoPath == "" || r.Name == "" {
-		return
-	}
-	// ワークスペースの名前はセッション名と同じ（CreateSession / ResumeSession）。
-	// 同じ名前の行が残っているなら、そのワークスペースはまだ使われうるので触らない
-	// （JSON の store 時代の重複行が該当する）。
-	for _, k := range kept {
-		if k.RepoPath == r.RepoPath && k.Name == r.Name {
-			debuglog.Printf("[discardPruned] %s: workspace %q still belongs to %s", r.ID, r.Name, k.ID)
-			return
-		}
-	}
-	wsRoot := m.workspaceRoot(r.RepoPath, r.Name)
-
-	// WorkspaceName が空の行は、close でワークスペースを消してある。
-	if r.WorkspaceName != "" {
-		if _, err := os.Stat(wsRoot); err == nil {
-			// 編集途中のファイルを snapshot で @ に取り込んでから forget する（GetNearestBookmark の WHY NOT 参照）。
-			// WHY 失敗したら消さない: snapshot できていない変更は、ディレクトリを消すと取り戻せない。
-			// 行はもう無いので、消さなかったワークスペースは手で片付けることになる。
-			atRev, parentRev, err := m.jj().GetWorkspaceRevisions(wsRoot)
-			if err != nil {
-				debuglog.Printf("[discardPruned] %s: keeping workspace %s, snapshot failed: %v", r.ID, wsRoot, err)
-				return
-			}
-			debuglog.Printf("[discardPruned] %s: removing workspace %s (@=%s @-=%s)", r.ID, wsRoot, atRev, parentRev)
-		}
-		if w := m.cleanupWorkspace(r.RepoPath, r.Name, wsRoot); w != "" {
-			debuglog.Printf("[discardPruned] %s: workspace cleanup: %s", r.ID, w)
-		}
-	}
-
-	if m.config.ForgetProjectsFunc != nil {
-		below := wsRoot + string(filepath.Separator)
-		match := func(dir string) bool { return dir == wsRoot || strings.HasPrefix(dir, below) }
-		if _, err := m.config.ForgetProjectsFunc(match, false); err != nil {
-			debuglog.Printf("[discardPruned] %s: forgetting %s: %v", r.ID, wsRoot, err)
-		}
-	}
-}
-
-// gcMinAge is how long a workspace directory must have existed before
-// CollectGarbage may remove it.
-// WHY: CreateSession はワークスペースを作ってから store に行を入れる。その間に別プロセスの gc が
-// 動くと、行がまだ無いワークスペースを持ち主なしと判定してしまう。
-const gcMinAge = time.Hour
-
-// GCReport is what CollectGarbage removed, or with DryRun would remove.
-type GCReport struct {
-	DryRun bool
-	// Workspaces are the workspace directories no store row owns.
-	Workspaces []GCWorkspace
-	// ForgottenProjects counts the runtime's records about workspaces that are gone.
-	ForgottenProjects int
-}
-
-// GCWorkspace is one workspace directory CollectGarbage removed.
-type GCWorkspace struct {
-	Path string
-	// Warning is set when the removal was incomplete (jj forget or the delete failed).
-	Warning string
-}
-
-// CollectGarbage removes what no session owns any more: workspace directories
-// without a store row, and the runtime's records about workspaces that are gone.
-// Prune does this for the sessions it deletes; this catches what is left when a
-// prune was interrupted or kept a workspace it could not snapshot.
-//
-// A workspace is owned when a row has its repository and name, finished or not:
-// a closed session is resumed into the same directory.
-func (m *Manager) CollectGarbage(dryRun bool) (GCReport, error) {
-	recs, err := m.store.List()
-	if err != nil {
-		return GCReport{}, err
-	}
-	owned := make(map[string]bool, len(recs))
-	for _, r := range recs {
-		if r.RepoPath != "" && r.Name != "" {
-			owned[m.workspaceRoot(r.RepoPath, r.Name)] = true
-		}
-	}
-
-	base := filepath.Join(m.config.DataDir, "workspace")
-	report := GCReport{DryRun: dryRun}
-	removing := make(map[string]bool)
-	now := time.Now()
-	repoDirs, err := os.ReadDir(base)
-	if err != nil && !os.IsNotExist(err) {
-		return GCReport{}, err
-	}
-	for _, repoDir := range repoDirs {
-		if !repoDir.IsDir() {
-			continue
-		}
-		wsDirs, err := os.ReadDir(filepath.Join(base, repoDir.Name()))
-		if err != nil {
-			return GCReport{}, err
-		}
-		for _, wsDir := range wsDirs {
-			wsRoot := filepath.Join(base, repoDir.Name(), wsDir.Name())
-			if !wsDir.IsDir() || owned[wsRoot] {
-				continue
-			}
-			if info, err := wsDir.Info(); err != nil || now.Sub(info.ModTime()) < gcMinAge {
-				continue
-			}
-			ws := GCWorkspace{Path: wsRoot}
-			if !dryRun {
-				ws.Warning = m.removeOrphanWorkspace(wsRoot, wsDir.Name())
-			}
-			removing[wsRoot] = true
-			report.Workspaces = append(report.Workspaces, ws)
-		}
-	}
-
-	if m.config.ForgetProjectsFunc != nil {
-		// 記録のキーは、ワークスペースのルートか、その配下のディレクトリ（サブプロジェクト）。
-		match := func(dir string) bool {
-			rel, ok := strings.CutPrefix(dir, base+string(filepath.Separator))
-			if !ok {
-				return false
-			}
-			parts := strings.SplitN(rel, string(filepath.Separator), 3)
-			if len(parts) < 2 {
-				return false
-			}
-			wsRoot := filepath.Join(base, parts[0], parts[1])
-			if owned[wsRoot] {
-				return false
-			}
-			if removing[wsRoot] {
-				return true
-			}
-			_, err := os.Stat(wsRoot)
-			return os.IsNotExist(err)
-		}
-		n, err := m.config.ForgetProjectsFunc(match, dryRun)
-		if err != nil {
-			return report, err
-		}
-		report.ForgottenProjects = n
-	}
-	return report, nil
-}
-
-// removeOrphanWorkspace removes a workspace directory that no store row owns.
-// Returns a warning when the removal was incomplete.
-func (m *Manager) removeOrphanWorkspace(wsRoot, wsName string) string {
-	if _, err := os.Stat(filepath.Join(wsRoot, ".jj")); err != nil {
-		// jj のワークスペースになっていないディレクトリ（作成の途中で止まったものなど）。
-		// ここで jj を呼ぶと、jj は親ディレクトリを辿って別のリポジトリを操作しうる。
-		if err := os.RemoveAll(wsRoot); err != nil {
-			return fmt.Sprintf("workspace ディレクトリ削除失敗: %v", err)
-		}
-		return ""
-	}
-	// WHY snapshot に失敗しても消す（discardPruned は消さない）: gc は、snapshot できずに残った
-	// ワークスペースを片付ける手段でもある。ここで止めると、作業コピーが stale なワークスペースを
-	// 消す方法が無くなる。
-	if atRev, parentRev, err := m.jj().GetWorkspaceRevisions(wsRoot); err != nil {
-		debuglog.Printf("[removeOrphanWorkspace] %s: snapshot failed, removing anyway: %v", wsRoot, err)
-	} else {
-		debuglog.Printf("[removeOrphanWorkspace] %s: @=%s @-=%s", wsRoot, atRev, parentRev)
-	}
-	// 行が無いのでリポジトリのパスは分からない。jj はワークスペースの中からでも forget できる。
-	return m.cleanupWorkspace(wsRoot, wsName, wsRoot)
 }
 
 // recordSortTime mirrors Session.sortTime for store rows.

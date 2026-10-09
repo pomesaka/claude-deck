@@ -23,7 +23,7 @@ func TestMultiWatcher_WriteEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mw, err := NewMultiWatcher(baseDir, 10*time.Second)
+	mw, err := NewReader(baseDir).NewMultiWatcher(10 * time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestMultiWatcher_CoalescesMultipleWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mw, err := NewMultiWatcher(baseDir, 10*time.Second)
+	mw, err := NewReader(baseDir).NewMultiWatcher(10 * time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestMultiWatcher_NewFileDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mw, err := NewMultiWatcher(baseDir, 150*time.Millisecond)
+	mw, err := NewReader(baseDir).NewMultiWatcher(150 * time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestMultiWatcher_InitialRefreshSkipsOnNewFile(t *testing.T) {
 		}
 	}
 
-	mw, err := NewMultiWatcher(baseDir, 10*time.Second)
+	mw, err := NewReader(baseDir).NewMultiWatcher(10 * time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestMultiWatcher_ExcludesSubagents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mw, err := NewMultiWatcher(baseDir, 200*time.Millisecond)
+	mw, err := NewReader(baseDir).NewMultiWatcher(200 * time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +316,7 @@ func TestMultiWatcher_ExcludesSubagents(t *testing.T) {
 func TestMultiWatcher_ContextCancel(t *testing.T) {
 	baseDir := t.TempDir()
 
-	mw, err := NewMultiWatcher(baseDir, time.Hour)
+	mw, err := NewReader(baseDir).NewMultiWatcher(time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,15 +353,15 @@ func TestMultiWatcher_CodexLayoutSessionID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mw, err := NewMultiWatcherForLayout(baseDir, TranscriptCodex, time.Hour)
+	mw, err := NewCodexReader(baseDir).NewMultiWatcher(time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	files := mw.sessionFiles()
+	files := mw.format.files(mw.baseDir)
 	if len(files) != 1 {
 		t.Fatalf("len(files) = %d, want 1", len(files))
 	}
-	if got := sessionIDFromPathForLayout(TranscriptCodex, files[0]); got != sessionID {
+	if got := mw.format.sessionID(files[0]); got != sessionID {
 		t.Fatalf("sessionID = %q, want %q", got, sessionID)
 	}
 }
