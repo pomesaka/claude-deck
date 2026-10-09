@@ -74,6 +74,12 @@ func TestParseCLIArgs(t *testing.T) {
 			args:    []string{"exited", "--session", "abc"},
 			want:    cliRequest{Op: "hook", HookEvent: "exited", Session: "abc"},
 		},
+		{
+			name:    "hook rate-limits",
+			command: "hook",
+			args:    []string{"rate-limits", `[{"kind":"five_hour","percentUsed":12}]`, "--session", "abc"},
+			want:    cliRequest{Op: "hook", HookEvent: "rate-limits", RateLimits: `[{"kind":"five_hour","percentUsed":12}]`, Session: "abc"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -119,6 +125,8 @@ func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 		{name: "hook status unknown status", command: "hook", args: []string{"status", "busy", "--session", "abc"}},
 		{name: "hook status completed", command: "hook", args: []string{"status", "completed", "--session", "abc"}},
 		{name: "hook without session", command: "hook", args: []string{"exited"}},
+		{name: "hook rate-limits without JSON", command: "hook", args: []string{"rate-limits"}},
+		{name: "hook rate-limits with invalid JSON", command: "hook", args: []string{"rate-limits", "five_hour=12", "--session", "abc"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

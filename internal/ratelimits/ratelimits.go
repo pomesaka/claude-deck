@@ -1,13 +1,16 @@
-// Package ratelimits watches the rate-limits.json file written by the claude-deck
-// statusline script and provides Claude.ai subscription rate limit data.
+// Package ratelimits keeps the subscription rate limits in DataDir/rate-limits.json
+// and tells the TUI when they change.
 //
 // Data flow:
-//  1. Claude Code invokes DataDir/statusline.sh after each assistant message
-//  2. The script writes {rate_limits: ...} JSON to DataDir/rate-limits.json
+//  1. A session reports its limits: the deck-status plugin on Claude Code's
+//     session.measure (`claude-deck hook rate-limits`), the JSONL reader for Codex
+//  2. Save() writes them to DataDir/rate-limits.json
 //  3. Watch() detects the write via fsnotify and calls onUpdate
 //
-// Rate limit data is only available for Pro/Max subscribers and only after the
-// first API response in a session; callers must handle the zero Status gracefully.
+// The limits belong to the account, so every session writes the same file and
+// the last report wins. Rate limit data is only available for Pro/Max
+// subscribers and only after the first API response in a session; callers must
+// handle the zero Status gracefully.
 package ratelimits
 
 import (
@@ -30,7 +33,7 @@ type Window struct {
 	ResetsAt time.Time
 }
 
-// Status holds rate limit data from the Claude Code statusline JSON.
+// Status holds the rate limit windows of the account.
 type Status struct {
 	FiveHour          Window
 	FiveHourAvailable bool
@@ -38,7 +41,36 @@ type Status struct {
 	SevenDayAvailable bool
 }
 
-// rateLimitsFile mirrors the JSON written by the statusline script.
+// measuredWindow mirrors one element of `rateLimits` as the deck-status plugin
+// receives it on session.measure (SessionRateLimit in the Mods API).
+type measuredWindow struct {
+	Kind        string    `json:"kind"`
+	PercentUsed float64   `json:"percentUsed"`
+	ResetsAt    time.Time `json:"resetsAt,omitzero"`
+}
+
+// ParseMeasured reads the JSON array of windows the deck-status plugin passes
+// on. Kinds other than five_hour and seven_day (a gateway's spend_limit) are
+// dropped: the TUI has no gauge for them.
+func ParseMeasured(data []byte) (Status, error) {
+	var windows []measuredWindow
+	if err := json.Unmarshal(data, &windows); err != nil {
+		return Status{}, fmt.Errorf("parsing rate limits: %w", err)
+	}
+	var s Status
+	for _, w := range windows {
+		window := Window{UsedPct: w.PercentUsed, ResetsAt: w.ResetsAt}
+		switch w.Kind {
+		case "five_hour":
+			s.FiveHour, s.FiveHourAvailable = window, true
+		case "seven_day":
+			s.SevenDay, s.SevenDayAvailable = window, true
+		}
+	}
+	return s, nil
+}
+
+// rateLimitsFile is the JSON kept in rate-limits.json.
 type rateLimitsFile struct {
 	RateLimits *rateLimitsPayload `json:"rate_limits"`
 }
@@ -178,7 +210,7 @@ func Watch(ctx context.Context, dataDir string, onUpdate func(Status)) error {
 					}
 				}
 
-				// The statusline script writes atomically via tmp→mv, so a Create event
+				// Save writes atomically via tmp→rename, so a Create event
 				// on the target path means the file is already fully written and safe to read.
 				if isOurFile && (event.Has(fsnotify.Write) || event.Has(fsnotify.Create)) {
 					s := Load(dataDir)

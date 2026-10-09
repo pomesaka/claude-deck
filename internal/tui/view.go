@@ -387,7 +387,7 @@ func (m Model) renderFooter() string {
 const usageGaugeWidth = 10
 
 // renderRateLimits renders gauge bars for Claude.ai rate limit windows.
-// Data is provided by the claude-deck statusline script via rate-limits.json.
+// Data is what the sessions reported to rate-limits.json (package ratelimits).
 // Returns empty string when no data is available (API users, before first response).
 func (m Model) renderRateLimits() string {
 	s := m.rateLimitsStatus

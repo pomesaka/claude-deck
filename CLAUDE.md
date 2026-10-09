@@ -148,7 +148,7 @@ store と tmux を直接操作するので、TUI が起動していなくても�
 | `claude-deck close <ID\|NAME>` | `x` |
 | `claude-deck gc [--dry-run]` | なし。どのセッションのものでもないワークスペースと、消えたワークスペースについての `~/.claude.json` の登録を消す |
 
-内部用に `claude-deck hook status|session-start|exited --session <ID>` がある。deck-status プラグインとウィンドウのコマンドが呼ぶもので、手で実行するものではない。
+内部用に `claude-deck hook status|session-start|exited|rate-limits --session <ID>` がある。deck-status プラグインとウィンドウのコマンドが呼ぶもので、手で実行するものではない。
 
 `x` と `close` は store の `closing_at` で複数プロセスの同時 close を防ぐ（2 分でタイムアウト）。
 
@@ -159,6 +159,7 @@ store と tmux を直接操作するので、TUI が起動していなくても�
 ~/.local/share/claude-deck/
   deck.db                             セッションメタデータ（SQLite）
   plugin/                             deck-status プラグイン（起動時にバイナリから書き出す）
+  rate-limits.json                    アカウントのレート制限（セッションが報告する）
   workspace/<encoded-repo>/<name>/    jj ワークスペース
   debug.log                           デバッグログ
 ~/.claude/projects/<project>/<uuid>.jsonl   Claude Code JSONL
@@ -182,7 +183,7 @@ codex = "codex"
 
 ### deck-status プラグイン
 
-`deckmod/` の Claude Code プラグイン（Mods の function hook）が、セッションのステータスと `/clear` を `claude-deck hook` 経由で store に書く。
+`deckmod/` の Claude Code プラグイン（Mods の function hook）が、セッションのステータスと `/clear` を `claude-deck hook` 経由で store に書く。アカウントのレート制限も同じ経路で受け取り、`{DataDir}/rate-limits.json` に書く（[ADR-013](docs/adr/013-rate-limits-from-plugin.md)）。
 
 - バイナリに埋め込まれ、claude-deck の起動時に `{DataDir}/plugin/` へ書き出される（内容が同じファイルは書き換えない）
 - claude-deck が起動する全セッションに `--plugin-dir {DataDir}/plugin` を渡す。ユーザーがプラグインを別途インストールする必要はない

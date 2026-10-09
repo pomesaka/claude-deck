@@ -9,9 +9,11 @@ claude-deck が読み書き・作成・削除する外部データの一覧と�
 | `~/.local/share/claude-deck/deck.db` | セッションメタデータ（SQLite） | claude-deck |
 | `~/.local/share/claude-deck/workspace/<encoded-repo>/<name>/` | jj ワークスペースディレクトリ | claude-deck |
 | `~/.local/share/claude-deck/plugin/` | deck-status プラグイン（バイナリから書き出す） | claude-deck |
+| `~/.local/share/claude-deck/rate-limits.json` | アカウントのレート制限（5 時間枠と 7 日枠）。セッションが報告するたびに上書きする | claude-deck |
 | `~/.local/share/claude-deck/debug.log` | デバッグログ（`CLAUDE_DECK_DEBUG=1` 時のみ） | claude-deck |
 | `~/.claude/projects/<project>/<uuid>.jsonl` | 会話履歴・トークン使用量 | **Claude Code**（deck は読み取り専用） |
 | `~/.claude.json` | Claude Code の設定。`projects[<パス>].hasTrustDialogAccepted` が trust の登録 | **Claude Code**（deck はデータディレクトリと、作ったワークスペースの trust 登録だけを足す） |
+| `~/.claude/settings.json` | 利用者の Claude Code の設定 | **利用者**（deck は書かない。以前の版が `statusLine` に入れたラッパーを、起動時に一度だけ元に戻す。[ADR 013](adr/013-rate-limits-from-plugin.md)） |
 
 `deck.db` は TUI、CLI サブコマンド、hook コマンドが共有する。初回オープン時に旧形式の `sessions/*.json` があれば取り込み、`sessions.migrated-<timestamp>` に改名する。
 

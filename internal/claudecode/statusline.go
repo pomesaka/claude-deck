@@ -1,149 +1,198 @@
 package claudecode
 
 import (
-	json "encoding/json/v2"
+	"bytes"
 	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
-// statuslineScriptContent returns the shell script that Claude Code invokes for
-// each statusline update. The script extracts rate_limits from the JSON sent via
-// stdin and writes it atomically to dataDir/rate-limits.json for claude-deck to read.
+// statusLineChain matches the line of the wrapper script that hands the input
+// on to the status line command the user had configured before the wrapper.
+var statusLineChain = regexp.MustCompile(`(?m)^printf '%s' "\$input" \| '(.+)'$`)
+
+// RestoreStatusLine undoes what claude-deck used to do to the user's status
+// line: it had put a wrapper script (dataDir/statusline.sh) under "statusLine"
+// in ~/.claude/settings.json to read the rate limits. The deck-status plugin
+// reports them now (ADR-013), so the setting goes back to the command the
+// wrapper chained to, or away when there was none, and the script is removed.
 //
-// Paths are embedded directly (no shell variables) so the script works even if
-// the XDG environment differs between Claude Code's launch context and claude-deck.
+// Does nothing once the script is gone.
 //
-// If prevCmd is non-empty, the script chains to it and passes its stdout through,
-// preserving any existing statusLine display output.
-//
-// Returns an error if any path contains a single quote, which cannot be safely
-// embedded in a single-quoted shell argument.
-func statuslineScriptContent(dataDir, prevCmd string) (string, error) {
-	out := filepath.Join(dataDir, "rate-limits.json")
-	tmp := out + ".tmp"
-
-	for _, p := range []string{out, tmp, prevCmd} {
-		if strings.Contains(p, "'") {
-			return "", fmt.Errorf("path contains single quote and cannot be safely embedded in shell script: %q", p)
-		}
-	}
-
-	// %%s in fmt.Sprintf becomes %s in the script (used by shell printf).
-	script := fmt.Sprintf(`#!/bin/sh
-# claude-deck statusline wrapper — managed by claude-deck, do not edit
-input=$(cat)
-printf '%%s' "$input" | jq -c '{rate_limits: .rate_limits}' \
-  > '%s' 2>/dev/null \
-  && mv '%s' '%s' 2>/dev/null
-`, tmp, tmp, out)
-
-	if prevCmd != "" {
-		// Chain to the previously configured statusLine command so its display
-		// output (shown in Claude Code's status bar) is preserved.
-		script += fmt.Sprintf("printf '%%s' \"$input\" | '%s'\n", prevCmd)
-	}
-	return script, nil
-}
-
-// statusLineConfig mirrors the {"type":"command","command":"..."} object that
-// Claude Code expects under the "statusLine" key in settings.json.
-type statusLineConfig struct {
-	Type    string `json:"type"`
-	Command string `json:"command"`
-}
-
-// SetupStatuslineHook writes the statusline wrapper script to dataDir and
-// registers it in ~/.claude/settings.json under the "statusLine" key
-// (camelCase, object form — the format recognised by Claude Code ≥ 2.1.80).
-//
-// If settings.json already has a "statusLine" command that is NOT our script,
-// the existing command is embedded in our wrapper so its display output is
-// preserved (chain mode).  If it already points to our script, this is a no-op.
-//
-// The legacy lowercase "statusline" string key (written by older claude-deck
-// versions) is removed if present.
-func SetupStatuslineHook(dataDir string) error {
-	scriptPath := filepath.Clean(filepath.Join(dataDir, "statusline.sh"))
-
+// FIXME: 古い版を使っていた全部のマシンでこの版を一度起動し終えたら、このファイルと
+// main.go の呼び出しを削除する（ADR-013 の「悪い点」も直す）。
+func RestoreStatusLine(dataDir string) error {
 	settPath, err := claudeSettingsPath()
 	if err != nil {
 		return fmt.Errorf("resolving settings path: %w", err)
 	}
+	return restoreStatusLine(settPath, dataDir)
+}
 
-	data, err := os.ReadFile(settPath)
+func restoreStatusLine(settPath, dataDir string) error {
+	scriptPath := filepath.Clean(filepath.Join(dataDir, "statusline.sh"))
+	script, err := os.ReadFile(scriptPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading statusline script: %w", err)
+	}
+	var prevCmd string
+	if m := statusLineChain.FindSubmatch(script); m != nil {
+		prevCmd = string(m[1])
+	}
+
+	settings, err := os.ReadFile(settPath)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("reading settings: %w", err)
 	}
-
-	var settings map[string]jsontext.Value
-	if len(data) > 0 {
-		if err := json.Unmarshal(data, &settings); err != nil {
+	if err == nil {
+		restored, changed, err := unhookStatusLine(settings, scriptPath, prevCmd)
+		if err != nil {
 			return fmt.Errorf("parsing settings: %w", err)
 		}
-	}
-	if settings == nil {
-		settings = make(map[string]jsontext.Value)
-	}
-
-	// Parse existing statusLine config once; use filepath.Clean for comparison
-	// to tolerate trailing slashes, symlinks, and similar path variations.
-	var existingCmd string
-	if existing, ok := settings["statusLine"]; ok {
-		var sl statusLineConfig
-		if json.Unmarshal(existing, &sl) == nil && sl.Type == "command" {
-			existingCmd = sl.Command
+		if changed {
+			if err := replaceFile(settPath, restored); err != nil {
+				return fmt.Errorf("writing settings: %w", err)
+			}
 		}
 	}
-	if filepath.Clean(expandHome(existingCmd)) == scriptPath {
-		return nil // already configured to our script
-	}
 
-	// Chain to the existing command (if any) to preserve its display output.
-	// filepath.Clean normalises the path before embedding it in the script.
-	var prevCmd string
-	if existingCmd != "" {
-		prevCmd = filepath.Clean(expandHome(existingCmd))
+	if err := os.Remove(scriptPath); err != nil {
+		return fmt.Errorf("removing statusline script: %w", err)
 	}
+	return nil
+}
 
-	// Write (or refresh) the wrapper script.
-	content, err := statuslineScriptContent(dataDir, prevCmd)
+// unhookStatusLine returns settings with "statusLine" pointing at prevCmd
+// instead of scriptPath, or without "statusLine" when prevCmd is empty. Settings
+// whose status line is not scriptPath come back unchanged.
+//
+// WHY バイト列の差し替え: settings.json は利用者が手で書き、dotfiles のリポジトリで管理していることもある。
+// map に読んで書き戻すと、キーの順序と整形が変わる。
+func unhookStatusLine(settings []byte, scriptPath, prevCmd string) ([]byte, bool, error) {
+	top, err := objectMembers(settings)
 	if err != nil {
-		return fmt.Errorf("building statusline script: %w", err)
+		return nil, false, err
 	}
-	if err := os.WriteFile(scriptPath, []byte(content), 0o755); err != nil {
-		return fmt.Errorf("writing statusline script: %w", err)
+	i := memberIndex(top, "statusLine")
+	if i < 0 {
+		return settings, false, nil
 	}
-
-	// Register under the correct camelCase key.
-	cfgJSON, err := json.Marshal(statusLineConfig{Type: "command", Command: scriptPath})
+	statusLine := settings[top[i].valStart:top[i].valEnd]
+	inner, err := objectMembers(statusLine)
 	if err != nil {
-		return fmt.Errorf("marshaling statusLine config: %w", err)
+		return settings, false, nil // not the object form: not ours
 	}
-	settings["statusLine"] = jsontext.Value(cfgJSON)
+	j := memberIndex(inner, "command")
+	if j < 0 {
+		return settings, false, nil
+	}
+	var command string
+	if err := json.Unmarshal(statusLine[inner[j].valStart:inner[j].valEnd], &command); err != nil {
+		return settings, false, nil
+	}
+	if filepath.Clean(expandHome(command)) != scriptPath {
+		return settings, false, nil
+	}
 
-	// Remove the legacy lowercase key written by older versions.
-	delete(settings, "statusline")
-
-	out, err := json.Marshal(settings, jsontext.WithIndent("  "))
+	if prevCmd == "" {
+		from, to := top[i].keyStart, top[i].valEnd
+		switch {
+		case i+1 < len(top):
+			to = top[i+1].keyStart
+		case i > 0:
+			from = top[i-1].valEnd
+		}
+		return splice(settings, from, to, nil), true, nil
+	}
+	quoted, err := json.Marshal(prevCmd)
 	if err != nil {
-		return fmt.Errorf("marshaling settings: %w", err)
+		return nil, false, err
 	}
+	base := top[i].valStart
+	return splice(settings, base+inner[j].valStart, base+inner[j].valEnd, quoted), true, nil
+}
 
-	if err := os.MkdirAll(filepath.Dir(settPath), 0o755); err != nil {
-		return fmt.Errorf("creating settings dir: %w", err)
-	}
-	settTmp := settPath + ".tmp"
-	if err := os.WriteFile(settTmp, out, 0o644); err != nil {
-		return fmt.Errorf("writing settings tmp: %w", err)
-	}
-	if err := os.Rename(settTmp, settPath); err != nil {
-		_ = os.Remove(settTmp)
-		return fmt.Errorf("replacing settings: %w", err)
-	}
+// member is where one member of a JSON object sits in its text.
+type member struct {
+	name                       string
+	keyStart, valStart, valEnd int
+}
 
+// objectMembers returns the members of the JSON object in data, in order.
+func objectMembers(data []byte) ([]member, error) {
+	dec := jsontext.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.ReadToken()
+	if err != nil {
+		return nil, err
+	}
+	if tok.Kind() != '{' {
+		return nil, fmt.Errorf("not a JSON object")
+	}
+	var members []member
+	for dec.PeekKind() != '}' {
+		key, err := dec.ReadValue()
+		if err != nil {
+			return nil, err
+		}
+		var m member
+		if err := json.Unmarshal(key, &m.name); err != nil {
+			return nil, err
+		}
+		m.keyStart = int(dec.InputOffset()) - len(key)
+		val, err := dec.ReadValue()
+		if err != nil {
+			return nil, err
+		}
+		m.valEnd = int(dec.InputOffset())
+		m.valStart = m.valEnd - len(val)
+		members = append(members, m)
+	}
+	return members, nil
+}
+
+func memberIndex(members []member, name string) int {
+	for i, m := range members {
+		if m.name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func splice(data []byte, from, to int, with []byte) []byte {
+	out := make([]byte, 0, len(data)-(to-from)+len(with))
+	out = append(out, data[:from]...)
+	out = append(out, with...)
+	return append(out, data[to:]...)
+}
+
+// replaceFile writes data over the file at path through a temporary file.
+func replaceFile(path string, data []byte) error {
+	// WHY EvalSymlinks: settings.json は dotfiles のリポジトリへの symlink のことがある。
+	// リンクのパスに rename すると、リンクが通常のファイルに置き換わる。
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return err
+	}
+	tmp := target + ".tmp"
+	if err := os.WriteFile(tmp, data, info.Mode().Perm()); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
 	return nil
 }
 

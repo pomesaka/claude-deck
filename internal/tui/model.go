@@ -91,7 +91,7 @@ type Model struct {
 	selectedSnap   *session.Snapshot // snapshot for the selected session (nil = no selection)
 	attentionCount int               // sessions with Status.NeedsAttention() == true
 
-	// rate limits data from Claude Code statusline (Pro/Max subscribers only)
+	// rate limits the sessions reported (Pro/Max subscribers only)
 	rateLimitsStatus ratelimits.Status
 
 	// rightPaneGeneration is shared with pane-switch Cmds so stale switches cannot
@@ -203,8 +203,8 @@ func metadataTickCmd(interval time.Duration) tea.Cmd {
 	})
 }
 
-// RateLimitsUpdatedMsg is sent when the rate-limits.json file is updated by the
-// claude-deck statusline script. main.go injects this via p.Send().
+// RateLimitsUpdatedMsg is sent when a session's report updates the
+// rate-limits.json file. main.go injects this via p.Send().
 type RateLimitsUpdatedMsg struct {
 	Status ratelimits.Status
 }

@@ -100,10 +100,10 @@ func run() error {
 			fmt.Fprintf(os.Stderr, "warning: trust setup: %v\n", err)
 		}
 
-		// Claude Code の statusline スクリプトを配置し ~/.claude/settings.json に登録する。
-		// スクリプトは各アシスタントメッセージ後に rate_limits データを DataDir に書き出す。
-		if err := claudecode.SetupStatuslineHook(cfg.DataDir); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: statusline setup: %v\n", err)
+		// 以前の版が ~/.claude/settings.json の statusLine に入れたラッパーを外す。
+		// レート制限は deck-status プラグインが報告する（ADR-013）。
+		if err := claudecode.RestoreStatusLine(cfg.DataDir); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: statusline restore: %v\n", err)
 		}
 	}
 

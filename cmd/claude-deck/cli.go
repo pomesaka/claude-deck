@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/pomesaka/claude-deck/internal/config"
+	"github.com/pomesaka/claude-deck/internal/ratelimits"
 	"github.com/pomesaka/claude-deck/internal/session"
 	"github.com/pomesaka/claude-deck/internal/store"
 	"github.com/pomesaka/claude-deck/internal/usage"
@@ -28,6 +29,7 @@ type cliRequest struct {
 	Status          string
 	ClaudeSessionID string
 	Source          string
+	RateLimits      string // JSON, as ratelimits.ParseMeasured reads it
 }
 
 // cliCommands are the subcommands. Each one works on the store directly, so the
@@ -113,7 +115,7 @@ func runCLI(name string, args []string) error {
 
 	switch req.Op {
 	case "hook":
-		return runHook(req, st)
+		return runHook(req, st, cfg.DataDir)
 	case "list":
 		snaps, err := session.ListStored(st)
 		if err != nil {
@@ -269,6 +271,7 @@ const (
 	hookStatus       = "status"
 	hookSessionStart = "session-start"
 	hookExited       = "exited"
+	hookRateLimits   = "rate-limits"
 )
 
 // hookStatuses are the statuses a hook may report. Completed and Error come from
@@ -283,7 +286,7 @@ var hookStatuses = map[string]bool{
 // parseHookArgs parses `hook <event> [args] --session ID`. These are called by
 // the deck-status plugin and by the pane's exit command, not by people.
 func parseHookArgs(args []string) (cliRequest, error) {
-	usage := "Usage: claude-deck hook status <running|idle|waiting_approval|waiting_answer> | session-start --claude-session-id ID --source SOURCE | exited  [--session DECK_ID]"
+	usage := "Usage: claude-deck hook status <running|idle|waiting_approval|waiting_answer> | session-start --claude-session-id ID --source SOURCE | exited | rate-limits <JSON>  [--session DECK_ID]"
 	if len(args) == 0 {
 		return cliRequest{}, fmt.Errorf("hook: missing event\n%s", usage)
 	}
@@ -306,6 +309,15 @@ func parseHookArgs(args []string) (cliRequest, error) {
 		args = args[1:]
 	case hookExited:
 		args = args[1:]
+	case hookRateLimits:
+		if len(args) < 2 {
+			return cliRequest{}, fmt.Errorf("hook rate-limits: missing JSON\n%s", usage)
+		}
+		req.RateLimits = args[1]
+		if _, err := ratelimits.ParseMeasured([]byte(req.RateLimits)); err != nil {
+			return cliRequest{}, fmt.Errorf("hook rate-limits: %w", err)
+		}
+		args = args[2:]
 	default:
 		return cliRequest{}, fmt.Errorf("hook: unknown event %q\n%s", req.HookEvent, usage)
 	}
@@ -321,9 +333,15 @@ func parseHookArgs(args []string) (cliRequest, error) {
 	return req, nil
 }
 
-func runHook(req cliRequest, st *store.Store) error {
+func runHook(req cliRequest, st *store.Store, dataDir string) error {
 	id := session.DeckSessionID(req.Session)
 	switch req.HookEvent {
+	case hookRateLimits:
+		status, _ := ratelimits.ParseMeasured([]byte(req.RateLimits)) // validated in parseHookArgs
+		if !status.FiveHourAvailable && !status.SevenDayAvailable {
+			return nil // nothing the TUI shows: keep the last reading
+		}
+		return ratelimits.Save(dataDir, status)
 	case hookStatus:
 		status, _ := session.StatusFromID(req.Status) // validated in parseHookArgs
 		return session.RecordHookStatus(st, id, status)

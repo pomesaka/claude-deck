@@ -135,4 +135,14 @@ export const register: Register = on => {
     }
     return next(e)
   })
+
+  // The rate limits are the account's, not the session's: every deck session
+  // reports them to the one file the TUI watches, and the last report wins.
+  // The JSON is read by ratelimits.ParseMeasured in Go.
+  on('session.measure', async ($, e, next) => {
+    if (e.changed.includes('rateLimits') && e.rateLimits.length > 0) {
+      await deck($, ['rate-limits', JSON.stringify(e.rateLimits)])
+    }
+    return next(e)
+  })
 }

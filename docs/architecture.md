@@ -48,7 +48,7 @@ store の初回オープン時に、旧形式の `{DataDir}/sessions/*.json` が
 main() → run()
   1. debuglog.Init()
   2. config.Load() → Config (TOML)
-  3. claudecode.EnsureDataDirTrusted(), SetupStatuslineHook()
+  3. claudecode.EnsureDataDirTrusted(), RestoreStatusLine()  ← 後者は以前の版が入れた statusLine を元に戻す（ADR-013）
   4. session.OpenStore(dataDir)          ← deck.db を開く（旧 JSON の取り込み含む）
   5. buildManagerConfig()                ← deckmod.Install(dataDir/plugin)
   6. session.NewManager(ctx, store, cfg)
