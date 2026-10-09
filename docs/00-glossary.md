@@ -41,11 +41,11 @@ Claude Code 側が割り振る UUID。`/clear` のたびに新しい ID が生�
 
 | 値 | 意味 | 遷移先 |
 |----|------|--------|
-| Idle | PTY 起動済みだが Claude が処理中でない | Running, Completed, Error |
-| Running | スピナー検知中 (Claude が思考/実行中) | Idle, Waiting*, Completed, Error |
-| WaitingApproval | ツール承認待ち (Hook Notification) | Running, Idle, Completed, Error |
-| WaitingAnswer | ユーザー質問待ち (Hook Notification) | Running, Idle, Completed, Error |
-| Completed | プロセス正常終了 | Idle (Resume 経由) |
+| Idle | プロセス起動済みだが Claude が処理中でない (Hook turn.complete) | Running, Completed, Error |
+| Running | Claude が思考/実行中 (Hook turn.start / tool.call) | Idle, Waiting*, Completed, Error |
+| WaitingApproval | ツール承認待ち (Hook PermissionRequest) | Running, Idle, Completed, Error |
+| WaitingAnswer | ユーザー質問待ち (Hook PermissionRequest / AskUserQuestion の tool.call) | Running, Idle, Completed, Error |
+| Completed | プロセス終了 (ウィンドウのコマンドの `hook exited` / close / ウィンドウ消失の検知) | Idle (Resume 経由) |
 | Error | プロセス異常終了 / ディレクトリ消失 | Idle (Resume 経由) |
 | Unmanaged | JSONL から発見された外部セッション | (遷移なし) |
 
@@ -101,14 +101,13 @@ detail pane に何を表示するかの投影。RunningProcess から導出さ�
 
 ### DataSource
 
-Session の状態を構成する4つのデータソース。各ソースが Session の特定のフィールドを「所有」する。
+Session の状態を構成する3つのデータソース。各ソースが Session の特定のフィールドを「所有」する。
 
 | ソース | 所有フィールド | 更新タイミング |
 |--------|---------------|---------------|
-| **Store** | ID, Name, RepoPath, SessionChain, Status, PID, BookmarkName, LastJJRevision, LastJJParentRevision | セッション作成・更新時に JSON 永続化 |
+| **Store** | ID, Name, RepoPath, SessionChain, Status, PID, BookmarkName, LastJJRevision, LastJJParentRevision | 信頼できる唯一の情報源。TUI・CLI・hook コマンドが SQLite に書き、TUI は `Reload` で読む |
 | **JSONL** | Prompt, PermissionMode, StartedAt, LastActivity, TokenUsage | Claude Code が JSONL に書き込み時 |
-| **Hook** | Status 遷移, SessionChain 追加 | Claude Code フックイベント発火時 |
-| **PTY** | LogLines, CurrentTool, Status (Running via spinner) | PTY 出力受信時 |
+| **Hook** | Status 遷移, SessionChain 追加 | deck-status プラグインが `claude-deck hook` で store に書く。TUI が `WatchStore` で検知する |
 
 **型**: `session.DataSource`
 
@@ -188,17 +187,11 @@ PTY プロセスのライフサイクル (起動・停止・I/O・リサイズ) 
 
 ## インフラ
 
-### Hook
+### deck-status プラグイン
 
-Claude Code のプラグインシステム。SessionStart, SessionEnd, Notification, Stop の4種のイベントを JSONL ファイルに書き出す。claude-deck はこれを監視して Status 遷移や SessionChain 更新を行う。
+claude-deck が起動する全セッションに `--plugin-dir` で渡す Claude Code プラグイン（`deckmod/`）。Claude Code のイベントを受けて `claude-deck hook` を実行し、Status 遷移と SessionChain 更新を store に書く。ユーザーが別途インストールする必要はない。
 
-**関連**: `internal/hooks/`, `session.hookProcessor`
-
-### hookProcessor
-
-SessionEnd → SessionStart のペアリングを行うシングルスレッド状態機械。`/clear` 時に旧 ID → 新 ID の紐付けを確立する。ロック不要 (event watcher goroutine のみがアクセス)。
-
-**型**: `session.hookProcessor`
+**関連**: `deckmod/`, [hooks.md](hooks.md)
 
 ### JSONL
 
@@ -208,7 +201,7 @@ Claude Code が `~/.claude/projects/<project>/<uuid>.jsonl` に書き出すセ�
 
 ### Store
 
-claude-deck 固有のメタデータ永続化。`~/.local/share/claude-deck/sessions/<id>.json` に Session の Store 所有フィールドを書き出す。JSONL が「Claude Code の記録」、Store は「deck の記録」。
+claude-deck 固有のメタデータ永続化。`~/.local/share/claude-deck/deck.db`（SQLite）に deck セッションを 1 行ずつ持つ。JSONL が「Claude Code の記録」、Store は「deck の記録」で、deck セッションの信頼できる唯一の情報源。外部セッション (Unmanaged) は持たない。
 
 **関連**: `internal/store/`
 

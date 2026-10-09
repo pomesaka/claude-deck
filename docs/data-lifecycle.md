@@ -6,11 +6,13 @@ claude-deck が読み書き・作成・削除する外部データの一覧と�
 
 | パス | 内容 | 所有者 |
 |------|------|--------|
-| `~/.local/share/claude-deck/sessions/<id>.json` | セッションメタデータ | claude-deck |
+| `~/.local/share/claude-deck/deck.db` | セッションメタデータ（SQLite） | claude-deck |
 | `~/.local/share/claude-deck/workspace/<encoded-repo>/<name>/` | jj ワークスペースディレクトリ | claude-deck |
-| `~/.local/share/claude-deck/claude-deck-events.jsonl` | フックイベントログ | claude-deck（hooks 経由） |
+| `~/.local/share/claude-deck/plugin/` | deck-status プラグイン（バイナリから書き出す） | claude-deck |
 | `~/.local/share/claude-deck/debug.log` | デバッグログ（`CLAUDE_DECK_DEBUG=1` 時のみ） | claude-deck |
 | `~/.claude/projects/<project>/<uuid>.jsonl` | 会話履歴・トークン使用量 | **Claude Code**（deck は読み取り専用） |
+
+`deck.db` は TUI、CLI サブコマンド、hook コマンドが共有する。初回オープン時に旧形式の `sessions/*.json` があれば取り込み、`sessions.migrated-<timestamp>` に改名する。
 
 `<encoded-repo>` はリポジトリの絶対パスを `-` で繋いだ文字列（例: `-Users-pomesaka-github.com-Accel-Hack-ADeT`）。
 
@@ -20,7 +22,7 @@ claude-deck が読み書き・作成・削除する外部データの一覧と�
 
 **作成:**
 ```
-~/.local/share/claude-deck/sessions/<new-id>.json        # メタデータ新規作成
+deck.db                                                  # セッションの行を挿入
 ~/.local/share/claude-deck/workspace/<encoded>/<name>/
   ├─ .jj/                                               # jj workspace add
   ├─ .git → <repo>/.git                                 # symlink（colocated repos のみ）
@@ -33,7 +35,7 @@ claude-deck が読み書き・作成・削除する外部データの一覧と�
 
 **作成:**
 ```
-~/.local/share/claude-deck/sessions/<new-id>.json
+deck.db                                                  # セッションの行を挿入
 ~/.claude/projects/.../<uuid>.jsonl
 ```
 ワークスペースディレクトリは作られない。`WorkspacePath` はリポジトリルートを指す。
@@ -46,7 +48,7 @@ claude-deck が読み書き・作成・削除する外部データの一覧と�
 ```
 # recreateWorkspace が走る
 ~/.local/share/claude-deck/workspace/<encoded>/<name>/   # 再作成
-~/.local/share/claude-deck/sessions/<id>.json            # WorkspaceName/Path を更新
+deck.db                                                  # 行の WorkspaceName/Path を更新
 ~/.claude/projects/.../<uuid>.jsonl                      # Claude Code が追記
 ```
 ワークスペース再作成時の開始 revision は `LastJJRevision → LastJJParentRevision → trunk()` の優先順で使われる（ADR 009 参照）。
@@ -55,12 +57,14 @@ claude-deck が読み書き・作成・削除する外部データの一覧と�
 
 **作成:**
 ```
-~/.local/share/claude-deck/sessions/<new-id>.json        # 新セッションのメタデータ
+deck.db                                                  # 新セッションの行を挿入
 ~/.local/share/claude-deck/workspace/<encoded>/<new-name>/
 ~/.claude/projects/.../<new-uuid>.jsonl                  # Claude Code が作成
 ```
 
 ### `x` — プロセス終了（Kill）
+
+`claude-deck close` も同じ処理を実行する。
 
 **削除:**
 ```
@@ -74,7 +78,8 @@ jj workspace forget <name>    # jj のワークスペース一覧から除去
 
 **更新（persist）:**
 ```
-~/.local/share/claude-deck/sessions/<id>.json
+deck.db の行
+  ClosingAt = <時刻>               # 処理中に立て、完了時にクリア
   WorkspaceName = ""             # クリア
   WorkspacePath = ""             # クリア
   Status = Completed

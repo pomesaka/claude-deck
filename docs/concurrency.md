@@ -99,13 +99,25 @@ sess.FinishedAt = nil
 sess.mu.Unlock()
 ```
 
+## プロセス間の排他
+
+deck セッションの状態は複数のプロセス（TUI、CLI、hook コマンド、ウィンドウの終了コマンド）が書く。排他は SQLite に任せる。
+
+- 書き込みはすべて `BEGIN IMMEDIATE` のトランザクション内で「読んで、変えて、書く」。同時に書くプロセスは `busy_timeout`（5 秒）の範囲で順番を待つ
+- 状態遷移の規則は `transitions.go` の純関数で、トランザクション内で行に適用する。二重 close や二重 resume は、遷移関数が前提の状態（`closing_at` が空、終了済み）を確かめて失敗することで防ぐ
+- `closing_at` は close 中のセッションの印で、2 分でタイムアウトする。close の途中でプロセスが落ちても、後から close できる
+- `Manager.reloadMu` が `Reload` を直列化する。`WatchStore` と各操作の直後の `Reload` が同時に走っても、メモリの投影は 1 つずつ更新される
+- `launching_at` は起動中のセッションの印で、2 分でタイムアウトする。起動中の行は、ウィンドウがまだ無くても終了扱いにせず、close もできない
+- ウィンドウの一覧と store を読む順序は判定ごとに決めている。終了扱いにするときは store を先に読み、トランザクション内で行を読み直してから書く。孤立ウィンドウを消すときはウィンドウを先に読む（行は必ずウィンドウより先に作られるので、後から読んだ store に含まれる）
+
+`PRAGMA data_version` は接続ごとの値で、自分以外の接続がコミットしたときだけ変わる。`Store` は専用の接続で読む。
+
 ## Background Goroutine 一覧
 
 | goroutine | 起動元 | 終了条件 | 役割 |
 |-----------|--------|----------|------|
-| watchProcess | CreateSession / ResumeSession | proc.Done() | プロセス終了監視 |
 | StartNotifyLoop | main | ctx.Done() | dirty flag → onChange (60fps) |
-| StartEventWatcher | main | ctx.Done() | フックイベント監視 |
+| WatchStore | main | ctx.Done() | `data_version` を 200ms ごとに見て、変化したら `Reload` |
 | MultiWatcher.Run | main | ctx.Done() | JSONL ファイル変更監視 |
 | StreamSession | updateSelected | cancel() | JSONL リアルタイム読み込み |
 | HydrateFromJSONL | main (init) | 完了 | 起動時トークン補完 |
@@ -115,7 +127,7 @@ sess.mu.Unlock()
 ```
 main の ctx (signal: SIGINT/SIGTERM)
   ├→ Manager.ctx (全 goroutine の親)
-  │    ├→ WatchEvents goroutine
+  │    ├→ WatchStore goroutine
   │    ├→ MultiWatcher.Run goroutine
   │    └→ NotifyLoop goroutine
   │

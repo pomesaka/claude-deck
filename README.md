@@ -62,20 +62,9 @@ cd sandbox/claude-deck
 GOEXPERIMENT=jsonv2 go build -o claude-deck ./cmd/claude-deck
 ```
 
-### Plugin setup
+### Status tracking
 
-claude-deck uses a [Claude Code plugin](https://code.claude.com/docs/en/plugins) to track session status (running, waiting for approval, idle). Install it from the marketplace:
-
-```
-/plugin marketplace add pomesaka/claude-deck
-/plugin install claude-deck
-```
-
-Or for local development, use `--plugin-dir`:
-
-```bash
-claude --plugin-dir /path/to/claude-deck/plugin
-```
+claude-deck tracks session status (running, waiting for approval, idle) with the `deck-status` plugin embedded in the binary. On startup it is written to `~/.local/share/claude-deck/plugin/` and passed to every Claude Code session claude-deck launches with `--plugin-dir`. No separate install is needed.
 
 ### First run
 
@@ -186,7 +175,6 @@ workspace_symlinks = [".env", ".env.local", "secrets/"]
 - **macOS / Linux only** — PTY management uses Unix-specific APIs. Windows is not supported.
 - **Ghostty-specific** — The `t` key terminal launch assumes Ghostty. Other terminals can be used manually.
 - **Single machine** — Sessions are local. No remote or Docker-based background execution yet.
-- **Claude Code hooks** — claude-deck registers hooks in `~/.claude/settings.json` on first launch. Existing hooks are preserved but check for conflicts if you use custom hooks.
 
 ## Architecture
 
@@ -195,15 +183,15 @@ cmd/claude-deck/main.go   Entry point
 internal/
   session/       Session lifecycle management (Manager)
   tui/           Bubble Tea TUI (Model, View, Keys)
-  pty/           PTY process management (claude CLI wrapper)
-  hooks/         Claude Code hook event integration
+  tmux/          tmux window management
   usage/         JSONL parsing, streaming, token aggregation
   config/        TOML configuration
-  store/         Session metadata persistence (JSON)
+  store/         Session metadata persistence (SQLite)
   ghostty/       Ghostty terminal launcher
   jj/            Jujutsu workspace management
   claudecode/    Claude Code path resolution & trust settings
   debuglog/      Debug logging
+deckmod/         deck-status Claude Code plugin (embedded)
 ```
 
 See [docs/architecture.md](docs/architecture.md) for details.
@@ -213,7 +201,8 @@ See [docs/architecture.md](docs/architecture.md) for details.
 ```
 ~/.config/claude-deck/config.toml          Configuration
 ~/.local/share/claude-deck/
-  sessions/                                Session JSON metadata
+  deck.db                                  Session metadata (SQLite)
+  plugin/                                  deck-status plugin
   workspace/<encoded-repo>/<name>/         jj workspaces
   debug.log                                Debug log
 ~/.claude/projects/<project>/<uuid>.jsonl  Claude Code JSONL (read by claude-deck)

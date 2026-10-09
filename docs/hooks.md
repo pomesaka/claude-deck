@@ -1,116 +1,52 @@
-# Claude Code フック連携
+# deck-status プラグイン
 
 ## 仕組み
 
-Claude Code は `~/.claude/settings.json` の hooks 設定に基づいて、
-セッションイベント発生時にシェルコマンドを実行する。
+`deckmod/` の Claude Code プラグイン `deck-status` が、Claude Code のイベントを受けて `claude-deck hook ...` を実行し、store（`deck.db`）を直接書く。TUI は store の変更を `PRAGMA data_version` で検知して表示を更新する。TUI が起動していなくても store には書かれる。
 
-claude-deck は jq コマンドで stdin JSON からフィールドを抽出し、
-`CLAUDE_DECK_SESSION_ID` 環境変数を注入して JSONL ファイルに追記する。
+- プラグインは Mods の function hook モジュール（`deckmod/hooks/register.ts`）
+- バイナリに埋め込まれ、起動時に `{DataDir}/plugin/` へ書き出される
+- claude-deck が起動する全セッションに `--plugin-dir {DataDir}/plugin` を渡す
+- プラグインは環境変数 `CLAUDE_DECK_BIN` と `CLAUDE_DECK_SESSION_ID` が両方あるセッションでだけ動く。claude-deck 以外で起動した Claude Code では何もしない
+- `claude-deck hook` の失敗は握りつぶす。ステータスの報告に失敗しても、ユーザーのターンや承認の流れは止めない
+- 呼び出しは直列化する。ほぼ同時に続けて発火するイベントが、古い状態で新しい状態を上書きしないようにするため
+- 直前に書けたステータスと同じなら書かない。`tool.call` はツールごとに発火し、書き込みのたびにプロセスが起動して TUI が再描画されるため。書き込みに失敗したときは記録しないので、次の同じステータスで書き直す
 
-```json
-{
-  "hooks": {
-    "SessionStart": [{"type": "command", "command": "jq -c '{...}' >> '<events-path>'"}],
-    "SessionEnd":   [...],
-    "Notification":  [...],
-    "Stop":          [...]
-  }
-}
-```
+deck ID は環境変数から取るので、Claude Code のセッション ID との突き合わせは要らない。
 
-## イベント種別
+## イベントとステータスの対応
 
-### SessionStart
+| Claude Code のイベント | store への書き込み | 備考 |
+|---|---|---|
+| `classic.SessionStart`（`agent_id` なし） | `hook session-start --claude-session-id <id> --source <source>` | SessionChain を更新する |
+| `turn.start` | `hook status running` | サブエージェントの実行では発火しないので、メインループの開始を表す |
+| `tool.call`（メイン） | `running`（待ち状態のときは変えない）。`AskUserQuestion` のときは `waiting_answer`。実行中のツール呼び出しがすべて返ったら `running` | `next(e)` は承認ダイアログと質問への回答を待つので、返った時点でユーザーが答えている。並行して走る別の呼び出しの承認ダイアログが開いている間は、待ち状態を消さない |
+| `tool.call`（サブエージェント） | 実行中のツール呼び出しがすべて返り、直前が `waiting_approval` / `waiting_answer` なら `running` | サブエージェントの承認ダイアログもユーザーを待たせる |
+| `classic.PermissionRequest` | `waiting_approval`。`AskUserQuestion` のときは `waiting_answer` | サブエージェントでも書く |
+| `turn.complete`（メイン） | `idle` | 拒否・中断・API エラーでも発火する |
 
-```json
-{
-  "session_id": "UUID",
-  "source": "startup" | "resume" | "clear" | "compact",
-  "claude_deck_session_id": "DECK_SESSION_ID"
-}
-```
+終了は別経路で、プラグインは関与しない（[ウィンドウの終了検知](architecture.md#プロセス終了の検知)）。
 
-- `startup`: claude CLI 起動時（一時的な ID が割り当てられる）
-- `resume`: `--resume` で既存セッション復元時（正しい ID に上書き）
-- `clear`: `/clear` 後に新セッション開始時
-- `compact`: コンテキストコンパクション後
+### SessionStart の source
 
-**注意**: `--resume` 起動時は `startup` → `resume` の順で2つ発火する。
-`resume` の session_id が正しい ID なので、startup の ID は上書きされる。
+`applySessionStart`（`internal/session/transitions.go`）が source ごとに SessionChain を更新する。
 
-### SessionEnd
+| source | 動作 |
+|---|---|
+| `startup` / `resume` / `fork` | SessionChain が空のときだけ ID を追加する。再開では、チェーンの末尾と同じ ID が届くので無視する |
+| `clear` / `compact` | 末尾と異なる ID なら追加する |
 
-```json
-{
-  "session_id": "UUID",
-  "reason": "clear" | ...,
-  "claude_deck_session_id": "DECK_SESSION_ID"
-}
-```
+## なぜ Stop でなく turn.complete か
 
-`/clear` 時のみ発火を確認。`reason` で識別。
+承認ダイアログで拒否したターンは、`Stop`・`PermissionDenied`・`PostToolUseFailure` のどれも発火しない。`Stop` で Idle に戻すと、拒否後のセッションが Waiting のまま残る。`turn.complete` は拒否・中断・API エラーのどれでも発火する（Claude Code 2.1.287 で確認、ADR-011）。
 
-### Notification
+## なぜ tool.check の ask でなく PermissionRequest か
 
-```json
-{
-  "session_id": "UUID",
-  "notification_type": "permission_prompt" | "elicitation_dialog" | "idle_prompt"
-}
-```
+auto モードでは `tool.check` が ask を返しても承認ダイアログを出さずに実行される。ダイアログが出たときだけ `PermissionRequest` が発火する（Claude Code 2.1.287 で確認、ADR-011）。
 
-- `permission_prompt`: ツール実行の承認待ち
-- `elicitation_dialog`: ユーザーへの質問待ち
-- `idle_prompt`: 入力待ち（タスク完了後）
+## ステータス更新のルール
 
-### Stop
+`applyHookStatus` が store の行に適用する。
 
-```json
-{
-  "session_id": "UUID"
-}
-```
-
-Claude Code がタスクを完了して入力待ちに戻った時。
-
-## ペアリングメカニズム
-
-`/clear` や `compact` では SessionEnd → SessionStart のペアで発火する。
-ペアリングは `CLAUDE_DECK_SESSION_ID` をキーに行う。
-
-```
-pendingEndEvents map[string]*hooks.Event  // key = ClaudeDeckSessionID
-
-SessionEnd 受信:
-  pendingEndEvents[ev.ClaudeDeckSessionID] = &ev
-
-SessionStart (source=clear/compact) 受信:
-  pendEnd = pendingEndEvents[ev.ClaudeDeckSessionID]
-  delete(pendingEndEvents, ev.ClaudeDeckSessionID)
-  → oldCSID = pendEnd.SessionID
-  → newCSID = ev.SessionID
-  → セッションの ClaudeSessionID を更新
-```
-
-## フック設定の管理
-
-### EnsureHooks
-
-起動時に `~/.claude/settings.json` を読み込み、フック設定を追加/更新。
-
-- 初回: 既存設定をバックアップ (.bak)
-- 既存フック: claude-deck のフックを末尾に追加（他ツールのフックは保持）
-- 更新検知: イベントファイルパスが変わった場合に更新
-
-### イベントファイル
-
-`~/.local/share/claude-deck/claude-deck-events.jsonl`
-
-起動時に truncate して古いイベントを破棄。
-WatchEvents が fsnotify でファイル変更を監視し、新しい行のみ処理。
-
-### truncate 後のオフセットリセット
-
-ファイルが truncate された場合（サイズ < 現在のオフセット）、
-オフセットを 0 にリセットして先頭から再読み込みする。
+- 終了済み（Completed / Error）と外部セッション（Unmanaged）には適用しない。終了の記録より後に届いた hook が、セッションを生き返らせないようにするため
+- 現在のステータスと同じなら何もしない

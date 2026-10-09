@@ -7,12 +7,12 @@
 │ claude-deck Session                                  │
 │  ID: "81f7f486f1df6345"  (deck 内部、不変)           │
 │                                                      │
-│  ClaudeSessionID: "fbbc0487-..."  (Claude Code UUID) │
-│  PreviousClaudeSessionID: "0c0a0bb5-..." (旧 UUID)  │
+│  SessionChain: ["0c0a0bb5-...", "fbbc0487-..."]      │
+│    (Claude Code UUID の履歴、古い順。末尾が現在)     │
 │                                                      │
 │  環境変数: CLAUDE_DECK_SESSION_ID=81f7f486f1df6345   │
 └─────────────────────────────────────────────────────┘
-         ↕ (フックイベントで紐付け)
+         ↕ (環境変数の deck ID で store の行を特定)
 ┌─────────────────────────────────────────────────────┐
 │ Claude Code Session                                  │
 │  session_id: "fbbc0487-..."                          │
@@ -20,67 +20,39 @@
 └─────────────────────────────────────────────────────┘
 ```
 
+deck-status プラグインは `CLAUDE_DECK_SESSION_ID` を使って `claude-deck hook session-start --session <ID>` を実行する。Claude Code のセッション ID を知らなくても、store の行を直接特定できる。
+
 ## /clear による ID 変遷
 
 ```
 初期状態:
-  ClaudeSessionID = "aaa"
-  PreviousClaudeSessionID = ""
+  SessionChain = ["aaa"]
 
-/clear 実行:
-  ClaudeSessionID = "bbb"         ← 新しい UUID
-  PreviousClaudeSessionID = "aaa" ← 旧 UUID を保存
-  oldSessionIDs["aaa"] = true     ← Discovery で除外
+/clear 実行 (SessionStart source=clear, session_id="bbb"):
+  SessionChain = ["aaa", "bbb"]    ← 末尾に追加
 
-プロセス終了 (bbb の JSONL が空):
-  → "bbb" に会話データがない = resume 不可
-  → ClaudeSessionID = "aaa" に revert
-  → PreviousClaudeSessionID = ""
+プロセス終了 (bbb の JSONL に会話がない):
+  → "bbb" は resume 不可
+  → SessionChain = ["aaa"]         ← 末尾を外す
 ```
 
-## 重複防止メカニズム
+末尾を外す処理は `applyExited` が行う。ただし、外した後の末尾 ("aaa") を別の deck セッションが持っているときは外さない。
 
-### 問題
+## 重複防止
 
-`/clear` 後に `oldSessionIDs` が失われると（再起動等）、
-Discovery が旧 ID を外部セッションとして再インポートし、
-2つの deck セッションが同じ Claude Code セッションを指す。
+同じ Claude Code セッションを 2 つの deck セッションが指さないようにする。
 
-### 防御層
+- Discovery は、追跡中の全セッションの SessionChain（過去の ID を含む）を known として扱い、`/clear` 前の ID を外部セッションとして取り込まない。SessionChain は store に保存されるので、再起動しても残る
+- `Reload` は、外部セッション（メモリのみ）の SessionChain の ID を deck セッションが持つようになったら、その外部セッションを消す。hook で ID が届く前に Discovery が取り込んでいた場合に起こる
+- `LoadExisting` は、同じ ID を持つ deck セッションが store に複数あれば、SessionChain が長いほうを残して他を削除する
+- `applyExited` は、上記のとおり他セッションと ID が衝突する巻き戻しをしない
 
-1. **LoadExisting**: ストアから `PreviousClaudeSessionID` を `oldSessionIDs` に復元
-2. **Discovery known セット**: `ClaudeSessionID` と `PreviousClaudeSessionID` の両方をチェック
-3. **handleNewFile**: 同上
-4. **watchProcess revert**: `isClaudeIDClaimed()` で他セッションとの衝突をチェック
+## SessionStart の source
 
-### oldSessionIDs の永続性
+`applySessionStart` の動作。
 
-`oldSessionIDs` は runtime map（永続化されない）。
-代わりに各セッションの `PreviousClaudeSessionID` がストアに永続化され、
-`LoadExisting` 時にマップを再構築する。
-
-## Discovery の除外ロジック
-
-```go
-// known に含まれるものは除外
-known[s.ClaudeSessionID] = true
-known[s.PreviousClaudeSessionID] = true
-
-// oldSessionIDs (旧 ID) も除外
-for id := range m.oldSessionIDs {
-    known[id] = true
-}
-```
-
-## --resume 時のイベントシーケンス
-
-```
-claude --resume fbbc0487-...
-  → SessionStart {session_id: "transient-uuid", source: "startup"}
-    deck: ClaudeSessionID = "transient-uuid" (一時的)
-  → SessionStart {session_id: "fbbc0487-...", source: "resume"}
-    deck: ClaudeSessionID = "fbbc0487-..." (正しい ID で上書き)
-```
-
-startup の一時 ID は resume イベントで即座に正しい ID に上書きされるため、
-通常は問題にならない。
+| source | 動作 |
+|---|---|
+| `startup` / `resume` / `fork` | SessionChain が空のときだけ ID を追加する。再開で届く ID はチェーンの末尾と同じなので無視する |
+| `clear` / `compact` | 末尾と異なる ID なら追加する |
+| その他 | 無視する |

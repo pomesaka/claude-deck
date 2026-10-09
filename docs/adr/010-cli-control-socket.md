@@ -2,7 +2,7 @@
 
 ## ステータス
 
-Accepted
+Superseded by [ADR-011](011-store-as-source-of-truth.md)
 
 ## コンテキスト
 

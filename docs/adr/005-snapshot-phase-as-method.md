@@ -44,3 +44,5 @@ func (s Snapshot) Phase() SessionPhase {
 **Phase フィールドを存続させる**: リスクが低く変更コストがゼロだが、「フィールドだけ古い」可能性を残す設計上の負債を積み続ける。
 
 **Hosting == HostExternal を proxy として使う**: `IsTerminal() && Hosting == HostExternal` で Phase を導出する案。tmux ホストの生きたプロセスが StatusCompleted になる稀なレース（watchProcess 着火前）でフィールドが PhaseArchived になる誤りが生じる。
+
+NOTE: ADR-011 で `watchProcess` を削除し、`process` は store から読み込むたびにステータスから導出するようになった（`applyControlRecordLocked`）。本文のレースは現在の実装では起きない。`Phase()` の導出式は変わっていない。

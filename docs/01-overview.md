@@ -16,7 +16,7 @@ claude-deck は **複数の Claude Code セッションを一括管理する TUI
 │                     claude-deck                          │
 │                  (TUI ダッシュボード)                      │
 │                                                          │
-│  セッション一覧 / detail pane / PTY 入力                  │
+│  セッション一覧 / detail pane                             │
 └────┬─────────┬──────────┬──────────┬─────────────────────┘
      │         │          │          │
      ▼         ▼          ▼          ▼
@@ -25,7 +25,7 @@ claude-deck は **複数の Claude Code セッションを一括管理する TUI
 │  Code   │ │(VCS) │ │(端末)  │ │ システム   │
 │  CLI    │ │      │ │        │ │            │
 └─────────┘ └──────┘ └────────┘ └────────────┘
-  PTY/Hook    Workspace  外部端末    JSONL/Store
+  tmux/Hook   Workspace  外部端末    JSONL/Store
   プロセス管理  作成/削除   起動       読み書き
 ```
 
@@ -33,40 +33,41 @@ claude-deck は **複数の Claude Code セッションを一括管理する TUI
 
 | 外部システム | claude-deck との関係 |
 |-------------|---------------------|
-| **Claude Code CLI** | PTY プロセスとして起動・管理。Hook イベントで状態変化を通知される。JSONL ログから対話履歴とトークン使用量を読み取る |
+| **Claude Code CLI** | tmux ウィンドウで起動する。deck-status プラグイン（`--plugin-dir` で渡す）が `claude-deck hook` を実行して状態変化を store に書く。JSONL ログから対話履歴とトークン使用量を読み取る |
 | **jj (Jujutsu)** | セッションごとに隔離されたワークスペースを作成。ブックマーク名をセッションラベルに使用 |
 | **Ghostty** | 外部ターミナルウィンドウの起動。将来的に detail pane の外部ホスティングに使用予定 |
-| **ファイルシステム** | JSONL ログ監視 (fsnotify)、Hook イベントファイル監視、Store 永続化 |
+| **ファイルシステム** | JSONL ログ監視 (fsnotify)、Store（SQLite `deck.db`）の読み書きと変更監視 |
 
 ## C4 Container: プロセスとデータストア
 
 ```
-┌─ claude-deck プロセス ─────────────────────────────────────────────┐
-│                                                                    │
-│  ┌──────────┐    ┌───────────────────────────────────────┐        │
-│  │   TUI    │◄───│  Session Manager                      │        │
-│  │ (Bubble  │    │  ┌──────────┐  ┌──────────────────┐   │        │
-│  │   Tea)   │    │  │ Session  │  │ ProcessSupervisor│   │        │
-│  │          │    │  │ (N 個)   │  │ (PTY lifecycle)  │   │        │
-│  │ Snapshot │    │  └──────────┘  └──────────────────┘   │        │
-│  │ で読む   │    │  ┌──────────────┐  ┌──────────────┐   │        │
-│  └──────────┘    │  │hookProcessor │  │ FileWatcher  │   │        │
-│                  │  │(Event対応)   │  │ (JSONL監視)  │   │        │
-│                  │  └──────────────┘  └──────────────┘   │        │
-│                  └───────────────────────────────────────┘        │
-└──────────────────────────────────────────────────────────────────┘
+┌─ claude-deck TUI プロセス ───────────────────────────────┐
+│  ┌──────────┐    ┌───────────────────────────────┐      │
+│  │   TUI    │◄───│  Session Manager              │      │
+│  │ (Bubble  │    │  sessions = store の投影      │      │
+│  │   Tea)   │    │  ┌─────────────┐ ┌──────────┐ │      │
+│  │ Snapshot │    │  │ WatchStore  │ │FileWatcher│ │      │
+│  │ で読む   │    │  │(data_version)│ │(JSONL監視)│ │      │
+│  └──────────┘    │  └─────────────┘ └──────────┘ │      │
+│                  └───────────────────────────────┘      │
+└─────────────────────────────────────────────────────────┘
 
-┌─ Claude Code プロセス (N 個) ────┐
-│  PTY 接続 ←→ ProcessSupervisor   │
-│  Hook イベント → hookProcessor    │
-│  JSONL 書き込み → FileWatcher     │
-└──────────────────────────────────┘
+┌─ claude-deck CLI / hook プロセス（短命） ───────────────┐
+│  new / list / close / hook status|session-start|exited  │
+│  store を直接読み書きする。new / close は tmux も操作    │
+└─────────────────────────────────────────────────────────┘
+
+┌─ Claude Code プロセス (N 個、tmux ウィンドウ内) ────────┐
+│  deck-status プラグイン → claude-deck hook ...           │
+│  終了後に同じペインで claude-deck hook exited            │
+│  JSONL 書き込み → FileWatcher                            │
+└─────────────────────────────────────────────────────────┘
 
 ┌─ データストア ───────────────────┐
 │  ~/.claude/projects/**/*.jsonl   │  Claude Code が書く (一次データ)
 │  ~/.local/share/claude-deck/     │
-│    sessions/*.json               │  claude-deck が書く (メタデータ)
-│    claude-deck-events.jsonl      │  Hook イベントログ
+│    deck.db                       │  SQLite。deck セッションの信頼できる唯一の情報源
+│    plugin/                       │  deck-status プラグイン
 └──────────────────────────────────┘
 ```
 
@@ -74,36 +75,30 @@ claude-deck は **複数の Claude Code セッションを一括管理する TUI
 
 | 経路 | 手段 | 方向 |
 |------|------|------|
-| claude-deck → Claude Code | PTY stdin | コマンド送信 |
-| Claude Code → claude-deck | PTY stdout | 出力キャプチャ (スピナー検知含む) |
-| Claude Code → claude-deck | Hook JSONL | Status 遷移、SessionChain 更新 |
+| claude-deck → Claude Code | tmux ウィンドウの作成・削除 | 起動・終了 |
+| Claude Code → store | deck-status プラグインが `claude-deck hook` を実行 | Status 遷移、SessionChain 更新 |
+| ペインのシェル → store | claude 終了後に `claude-deck hook exited` を実行 | Completed の記録 |
+| CLI → store | `claude-deck new / list / close` | セッションの作成・一覧・close |
+| store → TUI | `PRAGMA data_version` を 200ms ごとに確認して `Reload` | 他プロセスの書き込みの反映 |
 | Claude Code → ファイル | JSONL 書き込み | 対話履歴・トークン記録 |
 | ファイル → claude-deck | fsnotify | JSONL 変更通知、外部セッション発見 |
 
 ## データフロー
 
-Session の状態は4つのデータソースから投影 (projection) される。
+Session の状態は3つのデータソースから投影 (projection) される。
 
 ```
                     ┌───────────────────────────────────────┐
-                    │            Session                    │
+                    │            Session (メモリ)           │
                     │                                       │
-  PTY 出力 ────────►│ IngestPTYOutput()                     │
-  (バイナリ)        │   → PTYDisplay.Write() → displayCache │
-                    │   → LogLines 追記                     │
-                    │   → スピナー検知 → Status=Running     │
-                    │                                       │
-  Hook イベント ───►│ handleHookEvent()                     │
-  (JSONL)          │   → Status 遷移                       │
-                    │   → SessionChain 更新 (/clear)        │
+  Store ──────────►│ Reload()                              │
+  (deck.db)        │   → ID, Name, Status, SessionChain,   │
+  hook/CLI が書く  │     PID, ワークスペース               │
                     │                                       │
   JSONL ファイル ──►│ ApplyJSONLTokens()                    │
   (Claude ログ)    │   → TokenUsage, Prompt, StartedAt     │
                     │ ApplyFileActivity()                   │
                     │   → LastActivity                      │
-                    │                                       │
-  Store ──────────►│ LoadExisting()                        │
-  (deck JSON)      │   → ID, Name, RepoPath, Status 復元  │
                     │                                       │
                     │           ┌──────────┐                │
                     │           │ Snapshot  │───────► TUI   │
@@ -117,65 +112,53 @@ Session の状態は4つのデータソースから投影 (projection) される
 同じフィールドに複数のソースが書き込む場合の優先順位:
 
 1. **JSONL** (最優先) — Claude Code の一次記録。TokenUsage, Prompt, StartedAt
-2. **Hook** — リアルタイム通知。Status 遷移は Hook が最も正確
-3. **PTY** — フォールバック。スピナー検知による Running 検出は Hook が来ない場合の補助
-4. **Store** — 起動時の復元用。JSONL/Hook で上書きされる
+2. **Hook** — リアルタイム通知。Status 遷移は Hook が最も正確。`claude-deck hook` が store に書き、TUI は Store 経由で受け取る
+3. **Store** — deck セッションの状態の信頼できる唯一の情報源。TUI 起動時の復元にも使う
 
 ## 表示モデル
 
-TUI は Session の Snapshot を通じてデータを読む。ライブ PTY 表示のみ PTYDisplay を直接参照する。
+TUI は Session の Snapshot を通じてデータを読む。
 
 ```
 ┌─ Session ──────────────────────────────┐
-│                                        │
 │  Snapshot() ──► メタデータ表示          │
 │    Status, TokenUsage, Prompt, etc.    │
 │                                        │
-│  display *PTYDisplay ──► ライブ表示    │  HostEmbedded のみ
-│    .Lines() → displayCache             │
-│    .CursorPosition() → カーソル配置    │
-│                                        │
-│  GetStructuredLogs() ──► ログ表示      │  DisplayJSONL 時
+│  GetStructuredLogs() ──► ログ表示      │
 │    JSONL 由来の構造化ログエントリ       │
-│                                        │
 └────────────────────────────────────────┘
          │
          ▼ DisplayChannel で分岐
 ┌─ TUI ─────────────────────────────────┐
-│                                        │
-│  DisplayPTY  → ptyViewport (全画面)    │
-│  DisplayJSONL → logViewport (ログ)     │
-│  DisplayNone → プレースホルダ           │
-│                                        │
+│  DisplayTmux  → tmux ウィンドウが表示を持つ（deck は詳細内容を出さない） │
+│  DisplayJSONL → ログ表示                │
 └────────────────────────────────────────┘
 ```
 
 ## セッションライフサイクル (概要)
 
 ```
-  User 'n' キー
-       │
-       ▼
-  リポジトリ選択 (wizard)
+  User 'n' キー / claude-deck new
        │
        ▼
   Manager.CreateSession()
     1. NewSession()           Session 構造体作成
     2. jj workspace 作成      (オプション) 隔離環境
-    3. pty.Start()            Claude Code CLI 起動
-    4. InitDisplay()          PTYDisplay 作成
-    5. watchProcess()         プロセス監視 goroutine
+    3. store.Insert()         PID=0 で行を作成
+    4. tmux ウィンドウで claude を起動（--plugin-dir 付き）
+    5. store.Update(PID)
        │
        ▼ Claude Code 起動
   Hook: SessionStart         SessionChain に ID 追加
        │
        ▼ 対話中
-  PTY 出力 → スピナー検知     Status: Idle ←→ Running
-  Hook: Notification          Status: WaitingApproval / WaitingAnswer
-  Hook: Stop                  Status: Idle
+  Hook: turn.start / tool.call   Status: Running
+  Hook: PermissionRequest        Status: WaitingApproval / WaitingAnswer
+  Hook: turn.complete            Status: Idle
        │
        ▼ 終了
-  プロセス exit               Status: Completed, managed=false
+  ペインで claude-deck hook exited   Status: Completed
+  (x / close はウィンドウを削除し、Kill が Completed を書く)
        │
        ▼ 再開可能
   User 'r' キー → ResumeSession() → --resume で Claude Code 再起動
@@ -186,26 +169,24 @@ TUI は Session の Snapshot を通じてデータを読む。ライブ PTY 表�
 ## パッケージマップ
 
 ```
-cmd/claude-deck/          エントリポイント・依存注入
+cmd/claude-deck/          エントリポイント・CLI サブコマンド・依存注入
+deckmod/                  deck-status プラグイン（埋め込み）
 
 internal/
   session/                セッションドメインモデル (← 中心)
     Session               集約ルート
-    Manager               オーケストレータ
-    PTYDisplay            PTY 表示インフラ
-    ProcessSupervisor     プロセスライフサイクル
+    Manager               オーケストレータ（store の投影を持つ）
+    transitions           store の行に適用する状態遷移の純関数
     Snapshot              ロックフリー投影
-    hookProcessor         Hook イベントペアリング
 
   tui/                    Bubble Tea TUI (表示層)
     Model                 TUI 状態
     View                  レンダリング (Snapshot 経由)
     Keys                  キーバインド → Manager 操作
 
-  pty/                    PTY プロセス管理 (インフラ)
-  hooks/                  Claude Code フックイベント定義 (インフラ)
   usage/                  JSONL パース・ストリーミング (インフラ)
-  store/                  JSON 永続化 (インフラ)
+  store/                  SQLite 永続化 (インフラ)
+  tmux/                   tmux 操作 (インフラ)
   config/                 TOML 設定 (インフラ)
   jj/                     Jujutsu ワークスペース (インフラ)
   ghostty/                Ghostty ランチャー (インフラ)
@@ -214,6 +195,6 @@ internal/
   debuglog/               デバッグログ (インフラ)
 ```
 
-依存の方向: `tui → session → {pty, hooks, usage, store, jj}`
+依存の方向: `tui → session → {usage, store, tmux, jj}`
 
 session パッケージがドメインの中心。インフラパッケージはドメインに依存しない。

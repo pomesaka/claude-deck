@@ -8,16 +8,39 @@ cmd/claude-deck
   │    ├→ session         (セッション管理)
   │    ├→ ghostty         (ターミナルランチャー)
   │    └→ config          (設定)
-  └→ internal/control    (CLI サブコマンド ↔ 起動中の TUI の Unix ソケット)
-       └→ session
+  ├→ deckmod             (deck-status プラグインの埋め込みと書き出し)
+  └→ internal/session    (CLI サブコマンドと hook コマンド)
 
 internal/session (Manager)
-  ├→ hooks            (Claude Code フックイベント)
   ├→ usage            (JSONL パース・ストリーミング)
-  ├→ store            (JSON 永続化)
+  ├→ store            (SQLite 永続化)
   ├→ jj               (Jujutsu ワークスペース)
+  ├→ tmux             (ウィンドウの作成・削除・生存確認)
   └→ debuglog         (ログ)
 ```
+
+## プロセスと store
+
+store（`{DataDir}/deck.db`）が deck セッションの信頼できる唯一の情報源で、次のプロセスが書き手になる。
+
+| プロセス | 書くもの |
+|---|---|
+| TUI | セッションの作成・再開・フォーク・close、ステータスの補完、JSONL・jj から投影した項目 |
+| CLI `new` / `close` | TUI と同じ処理（`Manager.Launch` / `Manager.Kill`） |
+| `claude-deck hook status` / `session-start` | ステータス、SessionChain（deck-status プラグインが呼ぶ） |
+| `claude-deck hook exited` | Completed、`/clear` 直後に終了したときの SessionChain の巻き戻し（tmux ウィンドウのコマンドが呼ぶ） |
+
+書き込みはすべて `BEGIN IMMEDIATE` のトランザクション内の読み書きで、別プロセスの更新を上書きしない。状態遷移の規則は `internal/session/transitions.go` の純関数（`applyHookStatus`, `applySessionStart`, `applyExited`, `beginClose`, `beginResume`）で、どのプロセスも同じ関数を使う。
+
+`Manager.sessions` は store をメモリに投影したもので、`Manager.Reload` が store から作り直す。
+
+- store が書く項目（Status, SessionChain, PID, ワークスペース, エラーメッセージ等）は、`Reload` のたびに store に従う
+- JSONL と jj から TUI が投影する項目（Prompt, TokenUsage, BookmarkName 等）は、セッションが初めてメモリに現れるときだけ store から読む。以後はメモリの値が新しく、`PersistAll` が store に書く
+- JSONL から発見した外部セッション（Unmanaged）は store に入れず、メモリだけに持つ。`ResumeSession` で再開するときに `adoptExternal` が終了済みの deck セッションとして store に入れる
+
+`Manager.WatchStore` が `PRAGMA data_version` を 200ms ごとに見て、他プロセスがコミットしたときに `Reload` を呼ぶ。`data_version` は接続ごとの値なので、専用の接続で読む。
+
+store の初回オープン時に、旧形式の `{DataDir}/sessions/*.json` があれば一度だけ取り込み、ディレクトリを `sessions.migrated-<timestamp>` に改名する。
 
 ## 初期化フロー
 
@@ -25,23 +48,27 @@ internal/session (Manager)
 main() → run()
   1. debuglog.Init()
   2. config.Load() → Config (TOML)
-  3. store.New(dataDir + "/sessions")
-  4. session.NewManager(ctx, store, cfg)
-  5. manager.LoadExisting()              ← ストアからセッション復元
-  6. hooks.EnsureHooks(dataDir)          ← Claude Code 設定にフック登録
-  7. claudecode.EnsureTrust()            ← Claude Code trust 設定
-  8. tui.NewModel(manager, cfg) → Bubble Tea 起動
-  9. Background:
+  3. claudecode.EnsureDataDirTrusted(), SetupStatuslineHook()
+  4. session.OpenStore(dataDir)          ← deck.db を開く（旧 JSON の取り込み含む）
+  5. buildManagerConfig()                ← deckmod.Install(dataDir/plugin)
+  6. session.NewManager(ctx, store, cfg)
+  7. manager.LoadExisting()              ← 重複除去・古いセッションの prune → Reload
+  8. manager.ReconcileTmux()             ← store と生きている tmux ウィンドウの食い違いを補正
+  9. tui.NewModel(manager, cfg) → Bubble Tea 起動
+ 10. Background:
      a. manager.HydrateFromJSONL()      ← JSONL からトークン等を補完
      b. manager.DiscoverExternalSessions() ← 外部セッション取り込み
-     c. manager.StartEventWatcher()     ← フックイベント監視
-     d. manager.StartFileWatcher()      ← JSONL ファイル変更監視
-     e. manager.StartNotifyLoop()       ← UI 更新通知 (60fps)
-     f. control.Serve()                 ← CLI からの new / list / close を受け付ける（ADR-010）
+     c. manager.StartFileWatcher()      ← JSONL ファイル変更監視
+     d. manager.StartNotifyLoop()       ← UI 更新通知 (60fps)
+     e. manager.WatchStore()            ← 他プロセスの store 書き込みを反映
 
-main() → runCLI()                       ← 第 1 引数が new / list / close のとき
-  config.Load() → control.Call(dataDir/control.sock) → 応答を JSON で標準出力へ
+main() → runCLI()                       ← 第 1 引数が new / list / close / hook のとき
+  config.Load() → session.OpenStore(dataDir)
+    list / hook: store だけを使う
+    new / close: NewManager → Reload → Launch / Kill（tmux を直接操作）
 ```
+
+CLI と hook コマンドは TUI が起動していなくても動く。
 
 ## セッションライフサイクル
 
@@ -50,73 +77,69 @@ main() → runCLI()                       ← 第 1 引数が new / list / close
 ### 新規作成フロー
 
 ```
-User 'n' キー
-  → handleRepoSelectKey: リポジトリ/サブプロジェクト選択
+User 'n' キー / claude-deck new
+  → TUI: リポジトリ/サブプロジェクト選択
     Enter: ワークスペース作成+起動, Ctrl+Enter: 直接起動
-  → Manager.CreateSession(ctx, repoPath, workingDir, withWorkspace, cols, rows)
+  → Manager.CreateSession(ctx, repoPath, workingDir, withWorkspace)
     1. NewSession(repoPath, repoName)     // deck session 作成
     2. withWorkspace なら:
        jj.CreateWorkspaceAt(repo, name, path, extraSymlinks)  // ワークスペース作成
        extraSymlinks は config.toml [projects] で指定された .env 等の symlink リスト
        サブプロジェクト対応: workingDir の相対パスをワークスペース内に対応付け
-    3. tmux.StartProcess(ctx, opts)  // tmux ウィンドウで claude --agent <name> 起動
-       opts.Env = ["CLAUDE_DECK_SESSION_ID=<sessID>"]
-    4. sessions[sessID] = sess, processes[sessID] = proc
-    5. persist(sess)
-    6. go watchProcess(sess, proc)         // プロセス監視開始
+    3. startNewSession:
+       a. store.Insert(row)            // launching_at（起動中の印）を付けて先に行を作る
+       b. tmux ウィンドウで claude を起動
+          claude --name <name> --plugin-dir {DataDir}/plugin ...; claude-deck hook exited --session <ID>
+          環境変数: CLAUDE_DECK_SESSION_ID, CLAUDE_DECK_DATA_DIR, CLAUDE_DECK_BIN
+       c. store.Update(PID, BookmarkName)   // launching_at を消す
+    4. Reload
 ```
 
-### フックイベントによる ID 紐付け
+行を先に作るのは、起動直後の hook と、TUI の孤児ウィンドウ掃除が、store で行を見つけられるようにするため。
+
+### hook による状態の反映
 
 ```
-Claude Code 起動
-  → SessionStart hook {session_id: UUID, source: "startup"}
-    → handleHookEvent: sessions[ClaudeDeckSessionID].ClaudeSessionID = UUID
-
-Claude Code --resume 起動
-  → SessionStart {session_id: transient, source: "startup"}
-    → ClaudeSessionID = transient (一時的)
-  → SessionStart {session_id: original, source: "resume"}
-    → ClaudeSessionID = original (上書き、これが正しい ID)
+Claude Code（deck-status プラグイン）
+  → claude-deck hook status running --session <ID>
+    → applyHookStatus: store の Status を更新
+  → claude-deck hook session-start --claude-session-id <UUID> --source <source> --session <ID>
+    → applySessionStart: store の SessionChain を更新
+TUI: WatchStore が data_version の変化を検知 → Reload → 一覧を再描画
 ```
 
-### /clear 時のペアリング
+`/clear` では source=clear の SessionStart が新しい Claude セッション ID を運ぶ。deck ID は環境変数から得るため、SessionEnd との突き合わせは要らない。`--resume` の起動で届く SessionStart(startup / resume) は、SessionChain が空のときだけ ID を追加する。イベントの詳細は [hooks.md](hooks.md)。
 
-```
-ユーザーが /clear 実行
-  1. SessionEnd {session_id: OLD, reason: "clear", CLAUDE_DECK_SESSION_ID: DECK_ID}
-     → pendingEndEvents[DECK_ID] = &event
-  2. SessionStart {session_id: NEW, source: "clear", CLAUDE_DECK_SESSION_ID: DECK_ID}
-     → pendEnd = pendingEndEvents[DECK_ID]
-     → sess = sessions[DECK_ID]
-     → sess.PreviousClaudeSessionID = OLD
-     → sess.ClaudeSessionID = NEW
-     → oldSessionIDs[OLD] = true  (discovery で再インポート防止)
-     → JSONL ストリーム再起動
-```
+### プロセス終了の検知
 
-### プロセス終了時の処理 (watchProcess)
+claude を起動した tmux ウィンドウのコマンドは `<claude ...>; <claude-deck> hook exited --session <ID>` で、claude が終了すると同じペインのシェルが `hook exited` を実行する。`hook exited` は `applyExited` を store のトランザクション内で適用する。
 
-```
-<-proc.Done()
-  1. sess.managed = false
-  2. Status → Completed (if not already error/completed)
-  3. /clear 後に新 ID の JSONL が空の場合:
-     a. isClaudeIDClaimed(prevCSID) → true: revert しない (重複防止)
-     b. false: ClaudeSessionID を PreviousClaudeSessionID に戻す
-  4. persist(sess)
-```
+- Status を Completed にし、FinishedAt を記録する
+- `/clear` の直後にメッセージを送らず終了した場合、最新の Claude セッションには会話がなく再開できないので、SessionChain の末尾を外す。外した後の末尾を別の deck セッションが持っているときは外さない（2 つの deck セッションが同じ ID を持たないようにするため）
+
+`hook exited` が動かない終了は次の経路で補う。
+
+| 経路 | タイミング | 対象 |
+|---|---|---|
+| `Manager.Kill`（TUI の `x` / `claude-deck close`） | 実行時 | tmux ウィンドウを削除する経路。ペインごと終了するので `hook exited` は動かない。Kill 自身が `applyExited` を適用する |
+| `ReconcileTmux` | TUI 起動時 | 終了済みなのにウィンドウがある行を Idle に戻す。store に行がないウィンドウを削除する。未終了なのにウィンドウがない行を Completed にする |
+| `markVanishedSessions` | 5 秒の更新ごと | 未終了なのにウィンドウがない行を Completed にする。`launching_at`（起動中）と `closing_at`（close 中）が 2 分以内の行は対象外 |
+
+### close の排他
+
+`Manager.Kill` は最初に `beginClose` で `closing_at` を立てる。別のプロセスが 2 分以内に立てていれば `ErrClosing`、起動中（`launching_at` が 2 分以内）なら `ErrLaunching` で失敗する。TUI と CLI が同じセッションを同時に close して、同じワークスペースを削除しようとするのを防ぐ。close の途中でプロセスが落ちても、2 分後には再度 close できる。
 
 ### 再開フロー
 
 ```
-User 'r' キー or Enter
-  → Manager.ResumeSession(ctx, sessionID, cols, rows)
-    1. HasActiveProcess チェック (二重起動防止)
-    2. tmux.StartProcess(ctx, {ResumeSessionID: csID, Env: [DECK_SESSION_ID]})
-    3. sess.Status = Idle, FinishedAt = nil
-    4. processes[sessID] = proc
-    6. go watchProcess(sess, proc)
+User 'r' キー or Enter / Manager.ResumeSession(ctx, sessionID)
+    1. backend.IsActive チェック (二重起動防止)
+    2. adoptExternal: 外部セッションなら終了済みの deck セッションとして store に入れる
+    3. store.Update(beginResume): 終了済みの行だけ Idle に戻す。PID=0 にする
+       別プロセスが同時に再開しても、片方は「終了済みでない」で失敗する
+    4. ワークスペースがなければ再作成（Kill 時に保存した revision から）
+    5. tmux ウィンドウで claude --resume <csID> を起動（新規作成と同じコマンド形式）
+    6. store.Update(PID)
 ```
 
 ## TUI アーキテクチャ
@@ -179,7 +202,7 @@ updateSelected() → StreamSession(sessionID)
   1. HydrateFromJSONL()                // 既存セッションのトークン更新
   2. DiscoverExternalSessions()        // 新規外部セッション取り込み
      - usage.ListAllSessions(14日, 30件, offset)
-     - known セットで除外: ClaudeSessionID, PreviousClaudeSessionID, oldSessionIDs
+     - known セットで除外: 追跡中の全セッションの SessionChain（過去の ID を含む）
      - newExternalSession() で StatusUnmanaged セッション作成
      - offset++ (次のページ)
 ```

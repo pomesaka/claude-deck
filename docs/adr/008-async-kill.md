@@ -43,3 +43,5 @@ x キー押下
 **却下した代替案**
 - `Manager.Kill()` を「fast path」と「slow path」に分割し、ディレクトリ削除だけを別 goroutine で行う案。Kill のセマンティクスが複雑になり、エラー報告のタイミングが曖昧になるため却下。
 - `selectedID` をクリアして二重発火を防ぐ案。カーソル位置が即座に消えて UX が不自然になるため却下。
+
+NOTE: ADR-011 で `watchProcess` を削除した。Kill は終了を自分で store に記録し、UI へは store の変更として届く。`killing` フラグは TUI 内の二重押下だけを防ぎ、TUI と CLI のように別プロセスからの同時 close は store の `closing_at` で防ぐ。本文の処理の流れは当時の記録。

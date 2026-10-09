@@ -25,15 +25,14 @@ cmd/claude-deck/main.go   エントリポイント
 internal/
   session/       セッションライフサイクル管理（Manager が中心）
   tui/           Bubble Tea TUI（Model, View, Keys）
-  hooks/         Claude Code フックイベント連携
   usage/         JSONL パース・ストリーミング・トークン集計
   config/        TOML 設定ファイル
-  store/         セッションメタデータ永続化（JSON）
+  store/         セッションメタデータ永続化（SQLite）
   ghostty/       Ghostty ターミナルランチャー
   jj/            Jujutsu ワークスペース管理
   claudecode/    Claude Code パス解決・trust 設定
-  control/       CLI サブコマンド（new / list / close）と起動中の TUI をつなぐ Unix ソケット
   debuglog/      デバッグログ
+deckmod/         deck-status プラグイン（バイナリに埋め込み）
 ```
 
 詳細なアーキテクチャは [docs/architecture.md](docs/architecture.md) を参照。
@@ -85,29 +84,40 @@ Manager.mu → Session.mu の順で取得すること。逆順は ABBA デッド
 | `Session.ID` (`DeckSessionID`) | claude-deck 内部 ID（ランダム hex） |
 | `ClaudeSessionID` | Claude Code が割り当てる UUID |
 | `SessionChain` | /clear を跨いだ ClaudeSessionID の履歴（古い順） |
-| `CLAUDE_DECK_SESSION_ID` | 環境変数でフックに渡す deck ID |
+| `CLAUDE_DECK_SESSION_ID` | 環境変数で各セッションに渡す deck ID |
 
 `/clear` で ClaudeSessionID が変わるが、deck の Session.ID は不変。
-ペアリングは `CLAUDE_DECK_SESSION_ID` 環境変数で行う。
+hook は環境変数の deck ID を使って store の行を特定するので、ClaudeSessionID との突き合わせは要らない。
+
+起動する Claude Code には次の環境変数を渡す。
+
+| 環境変数 | 内容 |
+|----------|------|
+| `CLAUDE_DECK_SESSION_ID` | deck ID |
+| `CLAUDE_DECK_DATA_DIR` | データディレクトリ（`config.Load` が `data_dir` の上書きとして読む） |
+| `CLAUDE_DECK_BIN` | claude-deck バイナリの絶対パス |
 
 ### セッションステータス遷移
 
 ```
 Idle ←→ Running ←→ WaitingApproval / WaitingAnswer
   ↓                        ↓
-Completed / Error      (hook: Stop → Idle)
+Completed / Error      (hook: turn.complete → Idle)
 ```
 
-- Running/WaitingApproval/Answer: Hook イベントで遷移
-- Idle: Hook Stop イベント
-- Completed: プロセス終了
+- Running/WaitingApproval/Answer/Idle: deck-status プラグインが `claude-deck hook status` で store に書く（[docs/hooks.md](docs/hooks.md)）
+- Completed: ウィンドウのコマンド末尾の `claude-deck hook exited`、`x` / `claude-deck close`、ウィンドウ消失の検知のいずれか
+- 遷移の規則は `internal/session/transitions.go` の純関数。どのプロセスも store のトランザクション内で適用する
 
 ### データソース優先度（→ [用語集: Projection](docs/00-glossary.md#projection-投影)）
 
 - **JSONL** (Claude Code 一次データ): Prompt, TokenUsage, StartedAt, LastActivity
-- **Hook** (リアルタイム通知): Status 遷移, SessionChain 更新
-- **Store** (deck メタデータ): ID, Name, RepoPath, WorkspacePath, Status, PID
+- **Hook** (リアルタイム通知): Status 遷移, SessionChain 更新。`claude-deck hook` が store に書く
+- **Store** (SQLite `deck.db`, 信頼できる唯一の情報源): ID, Name, RepoPath, WorkspacePath, Status, PID, SessionChain, ClosingAt
 - **Runtime** (メモリのみ): JSONLLogEntries, CurrentTool
+
+`Manager.sessions` は store を `Manager.Reload` で読み直した投影。TUI は `PRAGMA data_version` を 200ms ごとに見て、他プロセス（CLI・hook）の書き込みを検知する。JSONL から発見した外部セッションは store に入れずメモリだけに持つ。
+store が書く項目（Status, SessionChain, PID, ワークスペース等）は常に store に従い、JSONL・jj から TUI が投影する項目（Prompt, TokenUsage, BookmarkName 等）は、セッションが初めてメモリに現れるときだけ store から読む。
 
 ### キーバインド
 
@@ -127,7 +137,7 @@ Completed / Error      (hook: Stop → Idle)
 
 ### CLI サブコマンド
 
-起動中の TUI に依頼して実行する（TUI が起動していなければエラー）。出力は JSON。詳細は [ADR-010](docs/adr/010-cli-control-socket.md)。
+store と tmux を直接操作するので、TUI が起動していなくても実行できる。出力は JSON。詳細は [ADR-011](docs/adr/011-store-as-source-of-truth.md)。
 
 | コマンド | 対応するキー |
 |------|------|
@@ -135,27 +145,31 @@ Completed / Error      (hook: Stop → Idle)
 | `claude-deck list` | 一覧表示 |
 | `claude-deck close <ID\|NAME>` | `x` |
 
+内部用に `claude-deck hook status|session-start|exited --session <ID>` がある。deck-status プラグインとウィンドウのコマンドが呼ぶもので、手で実行するものではない。
+
+`x` と `close` は store の `closing_at` で複数プロセスの同時 close を防ぐ（2 分でタイムアウト）。
+
 ### ディレクトリ構成
 
 ```
 ~/.config/claude-deck/config.toml     設定
 ~/.local/share/claude-deck/
-  sessions/                           セッション JSON メタデータ
+  deck.db                             セッションメタデータ（SQLite）
+  plugin/                             deck-status プラグイン（起動時にバイナリから書き出す）
   workspace/<encoded-repo>/<name>/    jj ワークスペース
-  claude-deck-events.jsonl            フックイベントログ
-  control.sock                        CLI サブコマンドの依頼を受ける Unix ソケット（TUI 起動中のみ）
   debug.log                           デバッグログ
 ~/.claude/projects/<project>/<uuid>.jsonl   Claude Code JSONL
 ```
 
-### プラグインバージョン管理
+### deck-status プラグイン
 
-プラグインのバージョンは以下の2箇所で管理しており、**常に同期させること**:
+`deckmod/` の Claude Code プラグイン（Mods の function hook）が、セッションのステータスと `/clear` を `claude-deck hook` 経由で store に書く。
 
-- `.claude-plugin/marketplace.json` の `"version"` — ユーザーに配布されるバージョン
-- `internal/hooks/hooks.go` の `PluginVersion` 定数 — 起動時のバージョンチェックに使用
+- バイナリに埋め込まれ、claude-deck の起動時に `{DataDir}/plugin/` へ書き出される（内容が同じファイルは書き換えない）
+- claude-deck が起動する全セッションに `--plugin-dir {DataDir}/plugin` を渡す。ユーザーがプラグインを別途インストールする必要はない
+- イベントとステータスの対応は [docs/hooks.md](docs/hooks.md)
 
-バージョンを上げるときは両方を同時に更新する。
+リポジトリの `plugin/` と `.claude-plugin/marketplace.json` は claude-deck が読まない。
 
 ### プロジェクト検出（モノレポ対応）
 
