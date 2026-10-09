@@ -659,6 +659,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	sess.WorkspacePath = actualWorkDir
 	sess.WorkspaceName = wsName
 	sess.SubProjectDir = srcSubProjectDir
+	sess.ForkedFrom = srcClaudeID
 
 	spec := m.startSpec(agentruntime.LaunchFork, srcClaudeID, actualWorkDir, sess.Name, repoPath)
 	if err := m.startNewSession(sess, actualWorkDir, spec); err != nil {

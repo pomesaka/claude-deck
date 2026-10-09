@@ -589,13 +589,16 @@ func TestPruneOldSessions_DiscardsWorkspace(t *testing.T) {
 	}
 }
 
-// useFakeJJ makes m run a jj that only records its arguments, and fails
-// `jj log` when logFails is set. The returned function reads the calls so far.
+// useFakeJJ makes m run a jj that only records its arguments, creates the
+// directory for `jj workspace add --name NAME PATH`, and fails `jj log` when
+// logFails is set. The returned function reads the calls so far.
 func useFakeJJ(t *testing.T, m *Manager, logFails bool) func() []string {
 	t.Helper()
 	jjLog := filepath.Join(t.TempDir(), "jj.log")
 	fakeJJ := filepath.Join(t.TempDir(), "jj")
-	script := "#!/bin/sh\necho \"$*\" >> \"$FAKE_JJ_LOG\"\nif [ \"$1\" = log ]; then exit \"$FAKE_JJ_LOG_EXIT\"; fi\n"
+	script := "#!/bin/sh\necho \"$*\" >> \"$FAKE_JJ_LOG\"\n" +
+		"if [ \"$1\" = workspace ] && [ \"$2\" = add ]; then mkdir -p \"$5\"; fi\n" +
+		"if [ \"$1\" = log ]; then exit \"$FAKE_JJ_LOG_EXIT\"; fi\n"
 	if err := os.WriteFile(fakeJJ, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -611,6 +614,37 @@ func useFakeJJ(t *testing.T, m *Manager, logFails bool) func() []string {
 			return nil
 		}
 		return strings.Split(strings.TrimSpace(string(data)), "\n")
+	}
+}
+
+// A fork records the context it left from, so the session tree can attach it
+// there even after the source session moves on with /clear.
+func TestForkSession_RecordsForkedFrom(t *testing.T) {
+	m, _ := newTestManager(t)
+	useFakeJJ(t, m, false)
+	src := createPlainSession(t, m)
+	if err := RecordSessionStart(m.store, src.ID, "ctx-1", SourceStartup); err != nil {
+		t.Fatalf("RecordSessionStart: %v", err)
+	}
+	m.Reload()
+
+	fork, err := m.ForkSession(context.Background(), src.ID)
+	if err != nil {
+		t.Fatalf("ForkSession: %v", err)
+	}
+	if err := RecordSessionStart(m.store, src.ID, "ctx-2", SourceClear); err != nil {
+		t.Fatalf("RecordSessionStart: %v", err)
+	}
+	m.Reload()
+
+	if got := mustGet(t, m.store, fork.ID).ForkedFrom; got != "ctx-1" {
+		t.Errorf("store ForkedFrom = %q, want ctx-1", got)
+	}
+	if got := m.GetSession(fork.ID).Snapshot().ForkedFrom; got != "ctx-1" {
+		t.Errorf("snapshot ForkedFrom = %q, want ctx-1", got)
+	}
+	if got := mustGet(t, m.store, src.ID).ForkedFrom; got != "" {
+		t.Errorf("source ForkedFrom = %q, want empty", got)
 	}
 }
 

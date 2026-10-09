@@ -33,6 +33,12 @@ Claude Code 側が割り振る UUID。`/clear` のたびに新しい ID が生�
 
 **フィールド**: `Session.SessionChain []ClaudeSessionID`
 
+### ForkedFrom
+
+フォークで作った Session の分岐元の ClaudeSessionID。別の Session の SessionChain の要素を指す。フォークでなければ空。`claude-deck tree` は、SessionChain と ForkedFrom から ClaudeSessionID の木を組み立てる（[ADR 012](adr/012-fork-lineage.md)）。
+
+**フィールド**: `Session.ForkedFrom ClaudeSessionID`
+
 ## 状態モデル
 
 ### Status

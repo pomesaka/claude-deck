@@ -279,8 +279,13 @@ type Session struct {
 	// /clear や compact など runtime 固有の reset 操作で末尾に新 ID が追加される。
 	// 現在の ID は SessionChain[len-1]、旧 ID はそれ以前の要素。
 	// アクセスには CurrentRuntimeID() / PriorRuntimeIDs() を使うこと。
-	SessionChain  []RuntimeSessionID `json:"session_chain,omitempty"`
-	Status        Status             `json:"status"`
+	SessionChain []RuntimeSessionID `json:"session_chain,omitempty"`
+	// ForkedFrom は、このセッションがフォークで作られたときの分岐元の runtime セッション ID。
+	// 別のセッションの SessionChain の要素を指す。フォークでなければ空。immutable after creation.
+	// WHY deck の ID でなく runtime の ID で持つ: 分岐元のセッションはその後 /clear で先へ進むので、
+	// deck の ID だけではどの文脈から分かれたかが分からなくなる（ADR 012）。
+	ForkedFrom    RuntimeSessionID `json:"forked_from,omitempty"`
+	Status        Status           `json:"status"`
 	FinishedAt    *time.Time         `json:"finished_at,omitempty"`
 	PID           int                `json:"pid,omitempty"`
 	TerminalTitle string             `json:"terminal_title,omitempty"` // OSC 0/2 で設定されたターミナルタイトル（セッション一覧表示用）
@@ -445,6 +450,8 @@ type Snapshot struct {
 	ClaudeSessionID RuntimeSessionID
 	// Deprecated: use PriorRuntimeIDs.
 	PriorClaudeIDs []RuntimeSessionID
+	// ForkedFrom is the runtime session ID this session was forked from, or "".
+	ForkedFrom RuntimeSessionID
 	// ClearCount is the number of /clear (or compact) operations performed in
 	// this session. 0 means the original session; 1 means cleared once, etc.
 	// Derived from len(SessionChain) - 1.
@@ -530,7 +537,8 @@ func (s *Session) Snapshot() Snapshot {
 		PriorRuntimeIDs:  s.PriorRuntimeIDs(),
 		ClaudeSessionID:  s.CurrentRuntimeID(),
 		PriorClaudeIDs:   s.PriorRuntimeIDs(),
-		ClearCount:       max(0, len(s.SessionChain)-1),
+		ForkedFrom:       s.ForkedFrom,
+		ClearCount:      max(0, len(s.SessionChain)-1),
 		HasProcess:       s.process.Load() != nil,
 		Display:          s.displayChannel(),
 		Status:           s.Status,

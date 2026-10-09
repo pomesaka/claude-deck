@@ -35,6 +35,7 @@ type cliRequest struct {
 var cliCommands = map[string]func(args []string) (cliRequest, error){
 	"new":   parseNewArgs,
 	"list":  parseListArgs,
+	"tree":  parseTreeArgs,
 	"close": parseCloseArgs,
 	"gc":    parseGCArgs,
 	"hook":  parseHookArgs,
@@ -48,9 +49,19 @@ type SessionInfo struct {
 	WorkDir         string `json:"work_dir"`
 	Status          string `json:"status"`
 	ClaudeSessionID string `json:"claude_session_id,omitempty"`
+	// SessionChain is every Claude Code session ID of the session, oldest first
+	// (one more for each /clear). The last one is ClaudeSessionID.
+	SessionChain []string `json:"session_chain,omitempty"`
+	// ForkedFrom is the Claude Code session ID the session was forked from: an
+	// element of another session's SessionChain.
+	ForkedFrom string `json:"forked_from,omitempty"`
 }
 
 func infoFromSnapshot(s session.Snapshot) SessionInfo {
+	var chain []string
+	for _, id := range s.Chain() {
+		chain = append(chain, string(id))
+	}
 	return SessionInfo{
 		ID:              string(s.ID),
 		Name:            s.Name,
@@ -58,6 +69,8 @@ func infoFromSnapshot(s session.Snapshot) SessionInfo {
 		WorkDir:         s.WorkDir(),
 		Status:          s.Status.ID(),
 		ClaudeSessionID: string(s.ClaudeSessionID),
+		SessionChain:    chain,
+		ForkedFrom:      string(s.ForkedFrom),
 	}
 }
 
@@ -111,6 +124,13 @@ func runCLI(name string, args []string) error {
 			infos[i] = infoFromSnapshot(s)
 		}
 		return printJSON(infos)
+	case "tree":
+		snaps, err := session.ListStored(st)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Print(renderTree(session.BuildTree(snaps)))
+		return err
 	}
 
 	// new / close start or stop processes, which needs tmux and the full config.
@@ -194,6 +214,21 @@ func parseListArgs(args []string) (cliRequest, error) {
 		return cliRequest{}, fmt.Errorf("list: unexpected arguments: %v", fs.Args())
 	}
 	return cliRequest{Op: "list"}, nil
+}
+
+func parseTreeArgs(args []string) (cliRequest, error) {
+	fs := flag.NewFlagSet("tree", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "Usage: claude-deck tree")
+		fmt.Fprintln(fs.Output(), "Claude Code のセッションを、/clear とフォークの親子関係でたどった木としてテキストで出す。同じ内容の JSON は list の session_chain と forked_from。")
+	}
+	if err := fs.Parse(args); err != nil {
+		return cliRequest{}, err
+	}
+	if fs.NArg() > 0 {
+		return cliRequest{}, fmt.Errorf("tree: unexpected arguments: %v", fs.Args())
+	}
+	return cliRequest{Op: "tree"}, nil
 }
 
 func parseCloseArgs(args []string) (cliRequest, error) {

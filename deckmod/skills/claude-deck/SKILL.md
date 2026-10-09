@@ -15,6 +15,7 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
 |---|---|
 | `new [--dir DIR] [--no-workspace]` | 新しいセッションを作り、tmux のウィンドウで Claude Code を起動する |
 | `list` | claude-deck のセッションを TUI の一覧と同じ順で返す。claude-deck の外で起動したセッションは含まない |
+| `tree` | Claude Code のセッションを、`/clear` とフォークの親子関係でたどった木としてテキストで出す |
 | `close <ID\|NAME>` | プロセスを止め、ワークスペースを消す。JSONL とメタデータは残り、TUI から再開できる |
 | `gc [--dry-run]` | どのセッションのものでもないワークスペースと、消えたワークスペースについての Claude Code の記録を消す |
 
@@ -27,9 +28,13 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
   "repo_path": "リポジトリのルート",
   "work_dir": "Claude Code が動いているディレクトリ",
   "status": "idle | running | waiting_approval | waiting_answer | completed | error",
-  "claude_session_id": "Claude Code のセッション ID（まだ届いていなければ無い）"
+  "claude_session_id": "Claude Code のセッション ID（まだ届いていなければ無い）",
+  "session_chain": ["/clear をまたいだ Claude Code のセッション ID。古い順で、末尾が claude_session_id"],
+  "forked_from": "フォークで作ったセッションの、分岐元の Claude Code のセッション ID（別のセッションの session_chain の要素。フォークでなければ無い）"
 }
 ```
+
+`tree` だけはテキストを返す。系譜をプログラムから読むときは、`list` の `session_chain` と `forked_from` を使う。
 
 ## new
 

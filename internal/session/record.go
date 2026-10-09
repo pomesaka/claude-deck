@@ -34,7 +34,8 @@ func (s *Session) recordLocked() store.Record {
 		WorkspaceName:            s.WorkspaceName,
 		SubProjectDir:            s.SubProjectDir,
 		SessionChain:             chain,
-		Status:                   s.Status.ID(),
+		ForkedFrom:               string(s.ForkedFrom),
+		Status:                 s.Status.ID(),
 		FinishedAt:               copyTimePtr(s.FinishedAt),
 		PID:                      s.PID,
 		ErrorMessage:             s.ErrorMessage,
@@ -61,6 +62,7 @@ func newSessionFromRecord(r store.Record) *Session {
 		RepoPath:      r.RepoPath,
 		RepoName:      r.RepoName,
 		SubProjectDir: r.SubProjectDir,
+		ForkedFrom:    RuntimeSessionID(r.ForkedFrom),
 	}
 	s.applyControlRecordLocked(r)
 	s.applyProjectionRecordLocked(r)

@@ -1,10 +1,12 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -36,7 +38,7 @@ func TestStore_RoundTrip(t *testing.T) {
 			rec: Record{
 				ID: "b", Name: "maika-548e", RepoPath: "/repo", RepoName: "repo",
 				WorkspacePath: "/ws/maika-548e/sub", WorkspaceName: "maika-548e", SubProjectDir: "sub",
-				SessionChain: []string{"old", "new"}, Status: "completed", FinishedAt: &finished, PID: 42,
+				SessionChain: []string{"old", "new"}, ForkedFrom: "source", Status: "completed", FinishedAt: &finished, PID: 42,
 				ErrorMessage: "boom", TerminalTitle: "title", BookmarkName: "feat/x",
 				LastJJRevision: "abc", LastJJParentRevision: "def",
 				Prompt: "hello", PermissionMode: "plan",
@@ -60,6 +62,56 @@ func TestStore_RoundTrip(t *testing.T) {
 				t.Errorf("Get() =\n%+v\nwant\n%+v", got, tt.rec)
 			}
 		})
+	}
+}
+
+// A database created before a column was added gets the column when it is
+// opened, and keeps its rows.
+func TestStore_MigratesAddedColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+
+	// The schema as it was before forked_from, with one row.
+	oldSchema := strings.Replace(schema, ",\n\tforked_from                 TEXT NOT NULL DEFAULT ''", "", 1)
+	if oldSchema == schema {
+		t.Fatal("the schema no longer has the forked_from line this test removes")
+	}
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(oldSchema); err != nil {
+		t.Fatalf("creating old schema: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO sessions (id, name, status) VALUES ('a', 'anna-8cc7', 'idle')"); err != nil {
+		t.Fatalf("inserting old row: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st := openTestStore(t, path)
+	got, err := st.Get("a")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Name != "anna-8cc7" || got.ForkedFrom != "" {
+		t.Errorf("old row = %+v, want name anna-8cc7 and no ForkedFrom", got)
+	}
+	if _, err := st.Update("a", func(r *Record) error {
+		r.ForkedFrom = "source"
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Opening again finds the column and changes nothing.
+	again := openTestStore(t, path)
+	got, err = again.Get("a")
+	if err != nil {
+		t.Fatalf("Get after reopening: %v", err)
+	}
+	if got.ForkedFrom != "source" {
+		t.Errorf("ForkedFrom after reopening = %q, want source", got.ForkedFrom)
 	}
 }
 

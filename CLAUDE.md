@@ -84,6 +84,7 @@ Manager.mu → Session.mu の順で取得すること。逆順は ABBA デッド
 | `Session.ID` (`DeckSessionID`) | claude-deck 内部 ID（ランダム hex） |
 | `ClaudeSessionID` | Claude Code が割り当てる UUID |
 | `SessionChain` | /clear を跨いだ ClaudeSessionID の履歴（古い順） |
+| `ForkedFrom` | フォークの分岐元の ClaudeSessionID（別セッションの SessionChain の要素） |
 | `CLAUDE_DECK_SESSION_ID` | 環境変数で各セッションに渡す deck ID |
 
 `/clear` で ClaudeSessionID が変わるが、deck の Session.ID は不変。
@@ -113,7 +114,7 @@ Completed / Error      (hook: turn.complete → Idle)
 
 - **JSONL** (Claude Code 一次データ): Prompt, TokenUsage, StartedAt, LastActivity
 - **Hook** (リアルタイム通知): Status 遷移, SessionChain 更新。`claude-deck hook` が store に書く
-- **Store** (SQLite `deck.db`, 信頼できる唯一の情報源): ID, Name, RepoPath, WorkspacePath, Status, PID, SessionChain, ClosingAt
+- **Store** (SQLite `deck.db`, 信頼できる唯一の情報源): ID, Name, RepoPath, WorkspacePath, Status, PID, SessionChain, ForkedFrom, ClosingAt
 - **Runtime** (メモリのみ): JSONLLogEntries, CurrentTool
 
 `Manager.sessions` は store を `Manager.Reload` で読み直した投影。TUI は `PRAGMA data_version` を 200ms ごとに見て、他プロセス（CLI・hook）の書き込みを検知する。JSONL から発見した外部セッションは store に入れずメモリだけに持つ。
@@ -137,12 +138,13 @@ store が書く項目（Status, SessionChain, PID, ワークスペース等）�
 
 ### CLI サブコマンド
 
-store と tmux を直接操作するので、TUI が起動していなくても実行できる。出力は JSON。詳細は [ADR-011](docs/adr/011-store-as-source-of-truth.md)。
+store と tmux を直接操作するので、TUI が起動していなくても実行できる。出力は JSON（`tree` だけテキスト）。詳細は [ADR-011](docs/adr/011-store-as-source-of-truth.md)。
 
 | コマンド | 対応するキー |
 |------|------|
 | `claude-deck new [--dir DIR] [--no-workspace]` | `n`（`--no-workspace` は C-Enter） |
-| `claude-deck list` | 一覧表示 |
+| `claude-deck list` | 一覧表示。`session_chain` と `forked_from` で `/clear` とフォークの系譜も返す |
+| `claude-deck tree` | なし。Claude Code のセッションを `/clear` とフォークの親子関係でたどった木を、テキストで出す（[ADR-012](docs/adr/012-fork-lineage.md)） |
 | `claude-deck close <ID\|NAME>` | `x` |
 | `claude-deck gc [--dry-run]` | なし。どのセッションのものでもないワークスペースと、消えたワークスペースについての `~/.claude.json` の登録を消す |
 

@@ -61,7 +61,7 @@ deck.db                                                  # 行の WorkspaceName/
 
 **作成:**
 ```
-deck.db                                                  # 新セッションの行を挿入
+deck.db                                                  # 新セッションの行を挿入（forked_from に分岐元の ClaudeSessionID）
 ~/.local/share/claude-deck/workspace/<encoded>/<new-name>/
 ~/.claude/projects/.../<new-uuid>.jsonl                  # Claude Code が作成
 ```

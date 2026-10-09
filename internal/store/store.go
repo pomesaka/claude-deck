@@ -37,7 +37,10 @@ type Record struct {
 	WorkspaceName string
 	SubProjectDir string
 	SessionChain  []string
-	Status        string
+	// ForkedFrom is the runtime session ID this session was forked from: an
+	// element of another record's SessionChain, or empty when it is not a fork.
+	ForkedFrom string
+	Status     string
 	FinishedAt    *time.Time
 	PID           int
 	ErrorMessage  string
@@ -94,14 +97,23 @@ CREATE TABLE IF NOT EXISTS sessions (
 	cache_read_input_tokens     INTEGER NOT NULL DEFAULT 0,
 	estimated_cost_usd          REAL NOT NULL DEFAULT 0,
 	closing_at                  INTEGER,
-	launching_at                INTEGER
+	launching_at                INTEGER,
+	forked_from                 TEXT NOT NULL DEFAULT ''
 );`
+
+// addedColumns are the columns added after the first release of the schema, in
+// the order they were added. A database created before a column existed gets it
+// from migrate; a new one gets it from schema.
+// 列を足すときは schema と columns にも足す。
+var addedColumns = []struct{ name, ddl string }{
+	{"forked_from", "forked_from TEXT NOT NULL DEFAULT ''"},
+}
 
 const columns = `id, name, repo_path, repo_name, workspace_path, workspace_name, sub_project_dir,
 	session_chain, status, finished_at, pid, error_message, terminal_title, bookmark_name,
 	last_jj_revision, last_jj_parent_revision, prompt, permission_mode, started_at, last_activity,
 	input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
-	estimated_cost_usd, closing_at, launching_at`
+	estimated_cost_usd, closing_at, launching_at, forked_from`
 
 // Store is a handle to the session database. Safe for concurrent use.
 type Store struct {
@@ -137,12 +149,56 @@ func OpenPath(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("creating schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrating schema: %w", err)
+	}
 	conn, err := db.Conn(context.Background())
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("opening version connection: %w", err)
 	}
 	return &Store{db: db, versionConn: conn}, nil
+}
+
+// migrate adds the columns of addedColumns that the sessions table lacks.
+//
+// WHY 1 つのトランザクションで確認と追加を行う: TUI・CLI・hook が同時に開く。_txlock=immediate なので
+// 2 つ目のプロセスは 1 つ目のコミットを待ち、追加済みの列を見て何もしない。
+// 注意: 列を足す前のバイナリは INSERT OR REPLACE で自分の知る列だけを書くので、古い TUI が動いている間は、
+// その TUI が書いた行の新しい列が既定値に戻る。バイナリを更新したら TUI を起動し直す。
+func migrate(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.Query("SELECT name FROM pragma_table_info('sessions')")
+	if err != nil {
+		return err
+	}
+	have := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, c := range addedColumns {
+		if have[c.name] {
+			continue
+		}
+		if _, err := tx.Exec("ALTER TABLE sessions ADD COLUMN " + c.ddl); err != nil {
+			return fmt.Errorf("adding column %s: %w", c.name, err)
+		}
+	}
+	return tx.Commit()
 }
 
 // Close releases the database.
@@ -247,12 +303,12 @@ func (t *Tx) Put(r Record) error {
 		return fmt.Errorf("marshaling session chain: %w", err)
 	}
 	_, err = t.tx.Exec(`INSERT OR REPLACE INTO sessions (`+columns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.Name, r.RepoPath, r.RepoName, r.WorkspacePath, r.WorkspaceName, r.SubProjectDir,
 		string(chainJSON), r.Status, nullableTime(r.FinishedAt), r.PID, r.ErrorMessage, r.TerminalTitle, r.BookmarkName,
 		r.LastJJRevision, r.LastJJParentRevision, r.Prompt, r.PermissionMode, unixNano(r.StartedAt), unixNano(r.LastActivity),
 		r.InputTokens, r.OutputTokens, r.CacheCreationInputTokens, r.CacheReadInputTokens,
-		r.EstimatedCostUSD, nullableTime(r.ClosingAt), nullableTime(r.LaunchingAt),
+		r.EstimatedCostUSD, nullableTime(r.ClosingAt), nullableTime(r.LaunchingAt), r.ForkedFrom,
 	)
 	return err
 }
@@ -300,7 +356,7 @@ func scanAll(rows *sql.Rows) ([]Record, error) {
 			&chainJSON, &r.Status, &finishedAt, &r.PID, &r.ErrorMessage, &r.TerminalTitle, &r.BookmarkName,
 			&r.LastJJRevision, &r.LastJJParentRevision, &r.Prompt, &r.PermissionMode, &startedAt, &lastActivity,
 			&r.InputTokens, &r.OutputTokens, &r.CacheCreationInputTokens, &r.CacheReadInputTokens,
-			&r.EstimatedCostUSD, &closingAt, &launchingAt,
+			&r.EstimatedCostUSD, &closingAt, &launchingAt, &r.ForkedFrom,
 		); err != nil {
 			return nil, err
 		}
