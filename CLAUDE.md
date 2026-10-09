@@ -184,6 +184,7 @@ excludes = ["Library", ".cache", "node_modules", ".git"]
 - `project_markers` が空（デフォルト）の場合、リポジトリルートのみが候補
 - `project_markers` を設定すると、各リポジトリ内でマーカーファイルを `fd` で検索し、見つかったディレクトリも候補に追加
 - リポジトリルートは常に候補に含まれる
+- 別の `.jj` を持つ入れ子のリポジトリの中は、外側のサブプロジェクトにしない（入れ子のリポジトリは自分の候補として出る）
 
 関連ファイル: `config.go` (`DiscoveryConfig`), `wizard.go` (`discoverRepos`, `findProjectDirs`)
 

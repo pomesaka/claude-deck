@@ -95,7 +95,7 @@ func discoverRepos(cfg *config.Config) func() tea.Msg {
 				items = append(items, repoItem{repoPath: root, projectDir: root})
 				continue
 			}
-			for _, dir := range projects {
+			for _, dir := range withoutNestedRepos(root, projects, repoRoots) {
 				items = append(items, repoItem{repoPath: root, projectDir: dir})
 			}
 		}
@@ -192,4 +192,39 @@ func (m *Model) selectRepo(item repoItem, withWorkspace bool) tea.Cmd {
 		}
 		return sessionCreatedMsg{sessionID: id, err: err}
 	}
+}
+
+// withoutNestedRepos drops the project dirs under root that belong to another jj
+// repository nested inside it (the nested root itself included).
+//
+// WHY: 入れ子のリポジトリの中身は外側のリポジトリが管理していない。外側のサブプロジェクトとして
+// 選ぶと repo_path が外側になり、外側に作ったワークスペースにはそのディレクトリが無いので、
+// ワークスペース付きの起動や fork が失敗する。入れ子のリポジトリは自分の候補として別に一覧に出る。
+func withoutNestedRepos(root string, dirs, repoRoots []string) []string {
+	var nested []string
+	for _, r := range repoRoots {
+		if r != root && isWithin(r, root) {
+			nested = append(nested, r)
+		}
+	}
+	var out []string
+	for _, dir := range dirs {
+		inNested := false
+		for _, n := range nested {
+			if isWithin(dir, n) {
+				inNested = true
+				break
+			}
+		}
+		if !inNested {
+			out = append(out, dir)
+		}
+	}
+	return out
+}
+
+// isWithin reports whether path is base or a directory under it.
+func isWithin(path, base string) bool {
+	rel, err := filepath.Rel(base, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
