@@ -14,11 +14,20 @@
 
 deck ID は環境変数から取るので、Claude Code のセッション ID との突き合わせは要らない。
 
+## セッションへの案内とスキル
+
+プラグインは、セッションが claude-deck の CLI を使えるようにする役目も持つ。
+
+- `classic.SessionStart`（`agent_id` なし）の結果の `additionalContext` に、claude-deck が起動したセッションであること、deck ID、CLI の絶対パスを足す。`/clear` と compact でも発火するので、文脈が消えた後にも届く
+- CLI の使い方は同梱のスキル `deck-status:claude-deck`（`deckmod/skills/claude-deck/SKILL.md`）に書く。案内には、使う前にこのスキルを読むことだけを書く
+
+CLI のサブコマンドやフラグを変えたら、スキルも同時に直す。
+
 ## イベントとステータスの対応
 
 | Claude Code のイベント | store への書き込み | 備考 |
 |---|---|---|
-| `classic.SessionStart`（`agent_id` なし） | `hook session-start --claude-session-id <id> --source <source>` | SessionChain を更新する |
+| `classic.SessionStart`（`agent_id` なし） | `hook session-start --claude-session-id <id> --source <source>` | SessionChain を更新する。モデルに claude-deck の案内を渡す |
 | `turn.start` | `hook status running` | サブエージェントの実行では発火しないので、メインループの開始を表す |
 | `tool.call`（メイン） | `running`（待ち状態のときは変えない）。`AskUserQuestion` のときは `waiting_answer`。実行中のツール呼び出しがすべて返ったら `running` | `next(e)` は承認ダイアログと質問への回答を待つので、返った時点でユーザーが答えている。並行して走る別の呼び出しの承認ダイアログが開いている間は、待ち状態を消さない |
 | `tool.call`（サブエージェント） | 実行中のツール呼び出しがすべて返り、直前が `waiting_approval` / `waiting_answer` なら `running` | サブエージェントの承認ダイアログもユーザーを待たせる |

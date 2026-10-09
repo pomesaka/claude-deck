@@ -16,7 +16,7 @@ func TestInstall(t *testing.T) {
 	if got != dir {
 		t.Errorf("Install returned %q, want %q", got, dir)
 	}
-	for _, rel := range []string{".claude-plugin/plugin.json", "hooks/hooks.json", "hooks/register.ts"} {
+	for _, rel := range []string{".claude-plugin/plugin.json", "hooks/hooks.json", "hooks/register.ts", "skills/claude-deck/SKILL.md"} {
 		want, err := files.ReadFile(rel)
 		if err != nil {
 			t.Fatalf("embedded %s: %v", rel, err)

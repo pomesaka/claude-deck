@@ -23,17 +23,27 @@ let lastStatus: DeckStatus | undefined
 let inFlight = 0
 
 /**
+ * The claude-deck binary and this session's deck ID. claude-deck sets both
+ * variables when it starts the session; in any other session there is none and
+ * the mod does nothing.
+ */
+async function deckEnv($: EngineInterface): Promise<{ bin: string; id: string } | undefined> {
+  const [bin, id] = await Promise.all([$.env.get('CLAUDE_DECK_BIN'), $.env.get('CLAUDE_DECK_SESSION_ID')])
+  return bin && id ? { bin, id } : undefined
+}
+
+/**
  * Runs `claude-deck hook <args> --session <id>` and resolves whether it succeeded.
- * claude-deck sets both variables when it starts the session; in any other
- * session the mod does nothing. Failures are dropped: a missed status must not
- * fail the user's turn.
+ * Failures are dropped: a missed status must not fail the user's turn.
  */
 function deck($: EngineInterface, args: string[]): Promise<boolean> {
   const run = async (): Promise<boolean> => {
     try {
-      const [bin, id] = await Promise.all([$.env.get('CLAUDE_DECK_BIN'), $.env.get('CLAUDE_DECK_SESSION_ID')])
-      if (!bin || !id) return false
-      const { exitCode } = await $.process.run([bin, 'hook', ...args, '--session', id], { timeoutMs: HOOK_TIMEOUT_MS })
+      const env = await deckEnv($)
+      if (!env) return false
+      const { exitCode } = await $.process.run([env.bin, 'hook', ...args, '--session', env.id], {
+        timeoutMs: HOOK_TIMEOUT_MS,
+      })
       return exitCode === 0
     } catch {
       return false
@@ -41,6 +51,20 @@ function deck($: EngineInterface, args: string[]): Promise<boolean> {
   }
   queue = queue.then(run, run)
   return queue
+}
+
+/**
+ * What the model is told when the session starts.
+ * WHY 実際のパスと ID を書く: バイナリは PATH に無いことがあり、close は自分の ID を避ける必要がある。
+ * 使い方はスキル（skills/claude-deck）に置き、ここには要るときにスキルを読むための手がかりだけを書く。
+ */
+function deckContext(env: { bin: string; id: string }): string {
+  return [
+    'このセッションは claude-deck（Claude Code のセッションを tmux と jj ワークスペースで管理するダッシュボード）が起動している。',
+    `deck のセッション ID: ${env.id}`,
+    `CLI: ${env.bin} new | list | close で、別のセッションを作る・一覧する・閉じることができる。`,
+    '使う前に deck-status:claude-deck スキルを読む。',
+  ].join('\n')
 }
 
 async function setStatus($: EngineInterface, status: DeckStatus): Promise<void> {
@@ -56,12 +80,14 @@ function isWaiting(): boolean {
 
 export const register: Register = on => {
   // The Claude session ID is linked here: on startup, resume and fork the first one,
-  // on /clear and compact the new one.
+  // on /clear and compact the new one. Those also drop the earlier context, so
+  // the claude-deck note is handed to the model on every source.
   on('classic.SessionStart', async ($, e, next) => {
-    if (e.agent_id === undefined) {
-      await deck($, ['session-start', '--claude-session-id', e.session_id, '--source', e.source])
-    }
-    return next(e)
+    if (e.agent_id !== undefined) return next(e)
+    await deck($, ['session-start', '--claude-session-id', e.session_id, '--source', e.source])
+    const [env, result] = await Promise.all([deckEnv($), next(e)])
+    if (!env) return result
+    return { ...result, additionalContext: [...(result.additionalContext ?? []), deckContext(env)] }
   }).catch(($, e, next) => next(e))
 
   // A subagent's run raises no turn.start, so this is the main loop.

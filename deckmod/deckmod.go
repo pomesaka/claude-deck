@@ -1,6 +1,7 @@
-// Package deckmod embeds the Claude Code plugin (a Mods hooks module) that
-// reports session status to claude-deck, and installs it where Claude Code can
-// load it with --plugin-dir.
+// Package deckmod embeds the Claude Code plugin (a Mods hooks module that
+// reports session status to claude-deck, and a skill that teaches the session
+// the claude-deck CLI), and installs it where Claude Code can load it with
+// --plugin-dir.
 package deckmod
 
 import (
@@ -12,7 +13,7 @@ import (
 	"path/filepath"
 )
 
-//go:embed all:.claude-plugin hooks/hooks.json hooks/register.ts
+//go:embed all:.claude-plugin hooks/hooks.json hooks/register.ts skills
 var files embed.FS
 
 // Install writes the plugin into dir, leaving files that already match.

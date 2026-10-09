@@ -189,7 +189,7 @@ PTY プロセスのライフサイクル (起動・停止・I/O・リサイズ) 
 
 ### deck-status プラグイン
 
-claude-deck が起動する全セッションに `--plugin-dir` で渡す Claude Code プラグイン（`deckmod/`）。Claude Code のイベントを受けて `claude-deck hook` を実行し、Status 遷移と SessionChain 更新を store に書く。ユーザーが別途インストールする必要はない。
+claude-deck が起動する全セッションに `--plugin-dir` で渡す Claude Code プラグイン（`deckmod/`）。Claude Code のイベントを受けて `claude-deck hook` を実行し、Status 遷移と SessionChain 更新を store に書く。claude-deck の CLI の使い方を書いたスキルも同梱する。ユーザーが別途インストールする必要はない。
 
 **関連**: `deckmod/`, [hooks.md](hooks.md)
 
