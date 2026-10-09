@@ -98,6 +98,7 @@ Existing Claude Code sessions running outside claude-deck are automatically disc
 | `j/k` | Move cursor |
 | `gg/G` | Jump to top/bottom |
 | `Enter` | Focus the session's tmux window / resume a finished session |
+| Click | Select the session; clicking the selected one does what `Enter` does |
 | `n` | New session (Enter: with workspace, Ctrl+Enter: direct) |
 | `r` | Resume session |
 | `f` | Fork session |

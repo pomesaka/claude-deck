@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"slices"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -132,12 +133,7 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg) tea.Cmd {
 
 	case "enter":
 		debuglog.Printf("[key:enter] selectedID=%q", m.selectedID)
-		// 実行中セッション: tmux ウィンドウを前面に出す。
-		// 完了済みセッション: resume。
-		if m.selectedDisplayChannel() == session.DisplayTmux {
-			return m.switchRightPane(m.selectedID, true)
-		}
-		return m.resumeSelected()
+		return m.activateSelected()
 
 	case "r":
 		return m.resumeSelected()
@@ -172,6 +168,39 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg) tea.Cmd {
 		return clearStatusCmd()
 	}
 
+	return tea.Batch(cmds...)
+}
+
+// activateSelected is what Enter does: a running session's tmux window gets the
+// focus, a finished session is resumed.
+func (m *Model) activateSelected() tea.Cmd {
+	if m.selectedDisplayChannel() == session.DisplayTmux {
+		return m.switchRightPane(m.selectedID, true)
+	}
+	return m.resumeSelected()
+}
+
+// handleSessionClick handles a left click on a session in the list: a click on
+// another session moves the cursor there, like j/k; a click on the selected
+// session activates it, like Enter.
+// The click is dropped while a quit confirmation is open, and when the session
+// is no longer in the list (it was drawn before the list changed).
+func (m *Model) handleSessionClick(id session.DeckSessionID) tea.Cmd {
+	if m.mode != viewDashboard || m.confirmQuit {
+		return nil
+	}
+	idx := slices.IndexFunc(m.visibleSessions(), func(s *session.Session) bool { return s.ID == id })
+	if idx < 0 {
+		return nil
+	}
+	m.pendingG = false
+	if id == m.selectedID {
+		debuglog.Printf("[click] activate selectedID=%q", m.selectedID)
+		return m.activateSelected()
+	}
+	m.cursor = idx
+	cmds := m.updateSelected()
+	m.ensureCursorVisible()
 	return tea.Batch(cmds...)
 }
 

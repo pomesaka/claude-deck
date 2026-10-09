@@ -23,13 +23,15 @@ func (m Model) View() tea.View {
 		return tea.View{}
 	}
 
-	var sections []string
-
-	sections = append(sections, m.renderHeader())
+	header := m.renderHeader()
+	sections := []string{header}
+	var rows []sessionRow
 	if m.mode == viewSelectRepo {
 		sections = append(sections, m.repoList.View())
 	} else {
-		sections = append(sections, m.renderMain())
+		var list string
+		list, rows = m.renderSessionList(m.width, m.sessionListHeight())
+		sections = append(sections, list)
 	}
 
 	sections = append(sections, m.renderFooter())
@@ -37,8 +39,42 @@ func (m Model) View() tea.View {
 	v := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, sections...))
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
+	v.OnMouse = sessionClickHandler(rows, lipgloss.Height(header))
 
 	return v
+}
+
+// sessionRow is where one session was drawn: lines [top, bottom) counted from
+// the first line of the list box.
+type sessionRow struct {
+	id          session.DeckSessionID
+	top, bottom int
+}
+
+// sessionClickedMsg reports a left click on a session in the list.
+type sessionClickedMsg struct {
+	id session.DeckSessionID
+}
+
+// sessionClickHandler turns a left click on one of rows into a sessionClickedMsg.
+// listTop is the screen line of the list box's first line.
+// WHY View が返すハンドラで判定する: どの行に何を描いたかを知っているのは描画だけ。Update で
+// 座標から逆算すると、下寄せや枠の計算を描画と二重に持つことになる。セッションを ID で返すのは、
+// 描画からクリックまでの間に一覧が並び替わっても、描かれていたセッションを指すため。
+func sessionClickHandler(rows []sessionRow, listTop int) func(tea.MouseMsg) tea.Cmd {
+	return func(msg tea.MouseMsg) tea.Cmd {
+		click, ok := msg.(tea.MouseClickMsg)
+		if !ok || click.Button != tea.MouseLeft {
+			return nil
+		}
+		y := click.Y - listTop
+		for _, row := range rows {
+			if y >= row.top && y < row.bottom {
+				return func() tea.Msg { return sessionClickedMsg{id: row.id} }
+			}
+		}
+		return nil
+	}
 }
 
 func (m Model) renderHeader() string {
@@ -99,30 +135,71 @@ func sessionStatusIcon(s session.Status) string {
 	}
 }
 
-func (m Model) renderMain() string {
-	contentHeight := m.height - m.headerLineCount() - 1
-	if contentHeight < 3 {
-		contentHeight = 3
-	}
-	return m.renderSessionList(m.width, contentHeight)
+// sessionListHeight is the outer height of the session list box: the screen
+// without the header and the footer line.
+func (m Model) sessionListHeight() int {
+	return max(3, m.height-m.headerLineCount()-1)
 }
 
-func (m Model) renderSessionList(width, height int) string {
+// filterBarHeight is 1 while the filter bar is shown under the list, else 0.
+func (m Model) filterBarHeight() int {
+	if m.filterActive || m.filterText != "" {
+		return 1
+	}
+	return 0
+}
+
+const (
+	sessionItemHeight = 2 // lines per session in the list
+	listBorderHeight  = 2 // top and bottom border of the list box
+)
+
+// listWindow is the part of the session list drawn in the list box.
+type listWindow struct {
+	start, end int // sessions [start, end) are drawn
+	// hasAbove and hasBelow tell whether the one-line "↑ 他N件" / "↓ 他N件"
+	// indicators are drawn.
+	hasAbove, hasBelow bool
+}
+
+// sessionListWindow decides which of n sessions fit in a list box of the given
+// outer height when scrolled to offset.
+func sessionListWindow(height, filterBarHeight, offset, n int) listWindow {
+	// Height() はボーダー込みの外寸。コンテンツ領域はボーダー(上下各1)分を差し引く。
+	// フィルタバー分も除いた利用可能高さ。
+	availHeight := height - listBorderHeight - filterBarHeight
+
+	offset = max(0, offset)
+	if offset >= n {
+		offset = max(0, n-1)
+	}
+	w := listWindow{start: offset, hasAbove: offset > 0}
+	if w.hasAbove {
+		availHeight-- // 上インジケータ分
+	}
+
+	w.end = min(n, offset+max(1, availHeight/sessionItemHeight))
+	// 下にまだあるなら、インジケータ分を確保して再計算
+	if w.end < n {
+		w.hasBelow = true
+		w.end = min(n, offset+max(1, (availHeight-1)/sessionItemHeight))
+	}
+	return w
+}
+
+// renderSessionList draws the list box and reports where each session is in it.
+func (m Model) renderSessionList(width, height int) (string, []sessionRow) {
 	style := sessionListStyle
 
 	// m.viewSnaps は Update() 内で事前計算済み。View() でのロック取得を避けるため
 	// visibleSessions() は呼ばず、キャッシュ済みスナップショットを直接参照する。
 	snaps := m.viewSnaps
 
-	// フィルタバーの高さを確保
 	var filterBar string
-	filterBarHeight := 0
 	if m.filterActive {
 		filterBar = m.filterInput.View()
-		filterBarHeight = 1
 	} else if m.filterText != "" {
 		filterBar = dimStyle.Render("/ " + m.filterText)
-		filterBarHeight = 1
 	}
 
 	if len(snaps) == 0 {
@@ -134,59 +211,17 @@ func (m Model) renderSessionList(width, height int) string {
 		}
 		if filterBar != "" {
 			content := lipgloss.JoinVertical(lipgloss.Left, msg, filterBar)
-			return style.Width(width).Height(height).AlignVertical(lipgloss.Bottom).Render(content)
+			return style.Width(width).Height(height).AlignVertical(lipgloss.Bottom).Render(content), nil
 		}
-		return style.Width(width).Height(height).Render(msg)
+		return style.Width(width).Height(height).Render(msg), nil
 	}
 
-	const itemHeight = 2
-
-	// Height() はボーダー込みの外寸。コンテンツ領域はボーダー(上下各1)分を差し引く。
-	// フィルタバー分も除いた利用可能高さ。
-	const borderHeight = 2
-	listHeight := height - borderHeight - filterBarHeight
-
-	// スクロール範囲を算出（タブ行分を差し引く）
-	offset := m.scrollOffset
-	if offset < 0 {
-		offset = 0
-	}
-	if offset >= len(snaps) {
-		offset = max(0, len(snaps)-1)
-	}
-
-	availHeight := listHeight
-	hasAbove := offset > 0
-	if hasAbove {
-		availHeight-- // 上インジケータ分
-	}
-
-	visibleCount := availHeight / itemHeight
-	if visibleCount < 1 {
-		visibleCount = 1
-	}
-
-	end := offset + visibleCount
-	if end > len(snaps) {
-		end = len(snaps)
-	}
-
-	// 下にまだあるなら、インジケータ分を確保して再計算
-	if end < len(snaps) {
-		revised := (availHeight - 1) / itemHeight
-		if revised < 1 {
-			revised = 1
-		}
-		end = offset + revised
-		if end > len(snaps) {
-			end = len(snaps)
-		}
-	}
+	win := sessionListWindow(height, m.filterBarHeight(), m.scrollOffset, len(snaps))
 
 	var items []string
 
-	if hasAbove {
-		items = append(items, dimStyle.Render(fmt.Sprintf("  ↑ 他%d件", offset)))
+	if win.hasAbove {
+		items = append(items, dimStyle.Render(fmt.Sprintf("  ↑ 他%d件", win.start)))
 	}
 
 	// リストペインのコンテンツ幅: border(2) + padding(2) を引く
@@ -194,11 +229,21 @@ func (m Model) renderSessionList(width, height int) string {
 	if itemWidth < 10 {
 		itemWidth = 10
 	}
-	for i := offset; i < end; i++ {
-		items = append(items, renderSessionItem(snaps[i], i == m.cursor, itemWidth))
+	// rows は content の先頭からの行で記録し、最後に箱の中での位置へずらす。
+	var rows []sessionRow
+	line := 0
+	for _, item := range items {
+		line += lipgloss.Height(item)
+	}
+	for i := win.start; i < win.end; i++ {
+		item := renderSessionItem(snaps[i], i == m.cursor, itemWidth)
+		h := lipgloss.Height(item)
+		rows = append(rows, sessionRow{id: snaps[i].ID, top: line, bottom: line + h})
+		line += h
+		items = append(items, item)
 	}
 
-	if remaining := len(snaps) - end; remaining > 0 {
+	if remaining := len(snaps) - win.end; remaining > 0 {
 		items = append(items, dimStyle.Render(fmt.Sprintf("  ↓ 他%d件", remaining)))
 	}
 
@@ -208,7 +253,16 @@ func (m Model) renderSessionList(width, height int) string {
 
 	content := lipgloss.JoinVertical(lipgloss.Left, items...)
 	// アイテムが少ない場合は下寄せで表示（AlignVertical は Height 内のコンテンツ配置を制御）
-	return style.Width(width).Height(height).AlignVertical(lipgloss.Bottom).Render(content)
+	box := style.Width(width).Height(height).AlignVertical(lipgloss.Bottom).Render(content)
+
+	// 下寄せなので、content の最終行は下の枠のすぐ上にある。
+	const bottomBorder = 1
+	contentTop := lipgloss.Height(box) - bottomBorder - lipgloss.Height(content)
+	for i := range rows {
+		rows[i].top += contentTop
+		rows[i].bottom += contentTop
+	}
+	return box, rows
 }
 
 // selBg returns the style with the selected background applied when selected is true.

@@ -214,6 +214,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
+	case sessionClickedMsg:
+		if cmd := m.handleSessionClick(msg.id); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
