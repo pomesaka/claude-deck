@@ -54,5 +54,3 @@
 - **Event Storming**: Alberto Brandolini — 協調的ドメイン探索ワークショップ
 - **Hexagonal Architecture**: Alistair Cockburn — ドメインの外部依存からの独立
 - **Make Illegal States Unrepresentable**: 型システムでドメインの制約を表現
-
-詳細な調査レポートは [docs/ddd-research.md](ddd-research.md) を参照。

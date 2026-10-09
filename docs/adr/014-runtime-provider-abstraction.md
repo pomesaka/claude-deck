@@ -1,4 +1,4 @@
-# ADR-009: Runtime provider abstraction for Claude Code and Codex
+# ADR-014: Runtime provider abstraction for Claude Code and Codex
 
 ## ステータス
 
@@ -51,3 +51,7 @@ Claude Code 固有の前提を provider 境界に切り出す。
 - Manager に `if provider == codex` の分岐を直接追加する案。短期的には簡単だが、起動引数・transcript・status 更新の3つの差分が Manager に漏れて責務が混ざるため却下。
 - Codex transcript を Claude JSONL 互換のファイルへ変換してから読む案。変換ファイルのライフサイクルが増え、一次データとの同期問題が生じるため却下。
 - Codex は起動だけ対応し、status/log は未対応にする案。dashboard としての価値が大きく落ち、ユーザーが「動いているが見えない」状態になるため却下。
+
+## 追記（2026-10-09）: transcript の読み取りを形式ごとの実装に分けた
+
+決定 3 の `TranscriptLayout` は `usage.Reader` の各メソッドで `if layout == TranscriptCodex` と分岐する形で、分岐が `usage` の 17 か所に増えていた。`usage` の `format` インターフェース（`claudeFormat` と `codexFormat`）に置き換え、`Reader`・`MultiWatcher`・`LogStreamer` は 1 つの `format` を持つだけにした。`TranscriptLayout` は無くなった。provider 名から形式を選ぶ分岐は `usage.formatFor` の 1 か所にある。詳細は [ADR-015](015-cleanup-after-store-migration.md)。

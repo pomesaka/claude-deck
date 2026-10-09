@@ -29,7 +29,7 @@ Claude Code 側が割り振る UUID。`/clear` のたびに新しい ID が生�
 
 ### SessionChain
 
-1つの Session が経験した ClaudeSessionID の履歴 (古い順)。`/clear` や compact のたびに末尾に新 ID が追加される。`CurrentClaudeID()` は末尾、`PriorClaudeIDs()` はそれ以前を返す。
+1つの Session が経験した ClaudeSessionID の履歴 (古い順)。`/clear` や compact のたびに末尾に新 ID が追加される。`CurrentRuntimeID()` は末尾、`PriorRuntimeIDs()` はそれ以前を返す。
 
 **フィールド**: `Session.SessionChain []ClaudeSessionID`
 
@@ -57,65 +57,29 @@ Claude Code 側が割り振る UUID。`/clear` のたびに新しい ID が生�
 
 **型**: `session.Status`
 
-### SessionPhase
-
-RunningProcess と Status から導出される粗粒度のライフサイクル段階。TUI や Manager の条件分岐を単純化するための概念。
-
-| 値 | 意味 | 導出条件 |
-|----|------|----------|
-| Active | プロセスが生存中、または未完了 | Status=Unmanaged 以外 かつ (IsTerminal でない OR RunningProcess あり) |
-| Archived | 完了済み (Completed/Error) でプロセスなし | IsTerminal && RunningProcess == nil |
-| External | JSONL から発見、deck 未起動 | Status=Unmanaged |
-
-**型**: `session.SessionPhase`
-
-### RunningProcess
-
-実行中プロセスへのハンドルを束ねた Value Object。`display` フィールドの nil/non-nil で Embedded/External を区別する。  
-Session は `atomic.Pointer[RunningProcess]` として保持し、プロセス起動時に `AttachProcess(pid, display)` でセット、終了時に `DetachProcess()` でクリアする。
-
-- `display != nil` → **Embedded**: claude-deck が PTY を所有し、エミュレータで出力をキャプチャ
-- `display == nil` → **External**: 外部ターミナルが PTY を所有し、claude-deck はメタデータのみ追跡
-- `RunningProcess == nil` → プロセス未起動 or 終了済み
-
-**型**: `session.RunningProcess`
-
-### HostingMode
-
-detail pane に「誰がターミナルを所有しているか」を伝える導出値。RunningProcess から決まる (永続化しない)。
-
-| 値 | 意味 | 導出条件 |
-|----|------|----------|
-| HostEmbedded | claude-deck が PTY を所有 | RunningProcess.display != nil |
-| HostExternal | 外部ターミナルが PTY を所有、またはプロセスなし | RunningProcess == nil or display == nil |
-
-**型**: `session.HostingMode`
-
 ### DisplayChannel
 
-detail pane に何を表示するかの投影。RunningProcess から導出される (永続化しない)。
+右ペインに何を表示するかの投影。Status から導出される (永続化しない)。
 
 | 値 | 条件 | 表示内容 |
 |----|------|----------|
-| DisplayPTY | RunningProcess あり + display あり (Embedded) | PTYDisplay のリアルタイム画面 |
-| DisplayNone | RunningProcess あり + display なし (External) | 「外部ターミナルで表示中」プレースホルダ |
-| DisplayJSONL | RunningProcess なし | JSONL 構造化ログ |
+| DisplayTmux | 未終了 (Idle / Running / Waiting*) | セッションの tmux ウィンドウ |
+| DisplayJSONL | 終了済み (Completed / Error) または外部 (Unmanaged) | preview ウィンドウの JSONL 構造化ログ |
 
 **型**: `session.DisplayChannel`
 
 ## データアーキテクチャ
 
-### DataSource
+### データソース
 
-Session の状態を構成する3つのデータソース。各ソースが Session の特定のフィールドを「所有」する。
+Session の状態を構成するデータソース。各ソースが Session の特定のフィールドを「所有」する。
 
 | ソース | 所有フィールド | 更新タイミング |
 |--------|---------------|---------------|
-| **Store** | ID, Name, RepoPath, SessionChain, Status, PID, BookmarkName, LastJJRevision, LastJJParentRevision | 信頼できる唯一の情報源。TUI・CLI・hook コマンドが SQLite に書き、TUI は `Reload` で読む |
+| **Store** | ID, Name, RepoPath, SessionChain, Status, PID, LastJJRevision, LastJJParentRevision | 信頼できる唯一の情報源。TUI・CLI・hook コマンドが SQLite に書き、TUI は `Reload` で読む |
 | **JSONL** | Prompt, PermissionMode, StartedAt, LastActivity, TokenUsage | Claude Code が JSONL に書き込み時 |
+| **jj** | BookmarkName | TUI が 5 秒ごとに読む |
 | **Hook** | Status 遷移, SessionChain 追加 | deck-status プラグインが `claude-deck hook` で store に書く。TUI が `WatchStore` で検知する |
-
-**型**: `session.DataSource`
 
 ### LastJJRevision / LastJJParentRevision
 
@@ -132,50 +96,13 @@ Session の状態を構成する3つのデータソース。各ソースが Sess
 
 ### Projection (投影)
 
-複数の DataSource から Session の統一状態を構築するパターン。Session の `Apply*` メソッド群 (`ApplyJSONLTokens`, `ApplyFileActivity`, `ApplyBookmark`) が各ソースからの更新を正規化された方法で適用する。
+複数のデータソースから Session の統一状態を構築するパターン。store の項目は `Reload` が、JSONL と jj の項目は Session の `Apply*` メソッド群 (`ApplyJSONLTokens`, `ApplyFileActivity`, `ApplyBookmark`) が書く。
 
 ### Snapshot
 
-Session のロックフリーな読み取りコピー。TUI レンダリングは常に Snapshot を通じてデータにアクセスする。Status, Phase, DisplayChannel 等の導出フィールドも含む。
+Session のロックフリーな読み取りコピー。TUI レンダリングは常に Snapshot を通じてデータにアクセスする。DisplayChannel などの導出フィールドも含む。
 
 **型**: `session.Snapshot`
-
-## PTY 表示
-
-### PTYDisplay
-
-PTY エミュレータの表示インフラをカプセル化した構造体。仮想端末 (vt.Emulator)、displayCache、scrollback、カーソル追跡を管理する。
-
-- RunningProcess.display に格納される。Embedded セッションのみ non-nil
-- External セッションでは RunningProcess.display == nil (型レベルで「表示インフラなし」を保証)
-- `Write(data)` で PTY 出力を受け取り、`Lines()` で表示行を返す
-
-**型**: `session.PTYDisplay`
-
-### displayCache
-
-PTYDisplay 内の atomic キャッシュ。エミュレータの `Write()` 完了後に毎回更新される `[]string`。`Lines()` はこのキャッシュをロックなしで読む。TUI の 60fps レンダリングが PTY 出力処理をブロックしない設計。
-
-## プロセス管理
-
-### ProcessSupervisor
-
-PTY プロセスのライフサイクル (起動・停止・I/O・リサイズ) を管理するインフラ型。Session のドメインロジックからプロセス管理を分離するために抽出された。
-
-**型**: `session.ProcessSupervisor`
-
-### LaunchIntent / LaunchKind
-
-セッション起動の意図を表す Value Object。`Manager.Launch()` がディスパッチする。
-
-| Kind | 操作 |
-|------|------|
-| LaunchNew | 新規セッション作成 |
-| LaunchResume | 既存セッション再開 (--resume) |
-| LaunchFork | 既存セッションをフォーク (--resume --fork-session) |
-| LaunchExternal | 外部ターミナルホスト (メタデータのみ管理) |
-
-**型**: `session.LaunchIntent`, `session.LaunchKind`
 
 ## トークンとコスト
 

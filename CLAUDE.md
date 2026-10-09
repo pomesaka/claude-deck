@@ -25,7 +25,7 @@ cmd/claude-deck/main.go   エントリポイント
 internal/
   session/       セッションライフサイクル管理（Manager が中心）
   tui/           Bubble Tea TUI（Model, View, Keys）
-  usage/         JSONL パース・ストリーミング・トークン集計
+  usage/         JSONL パース・ストリーミング・トークン集計（Claude / Codex の違いは format の 2 実装）
   config/        TOML 設定ファイル
   store/         セッションメタデータ永続化（SQLite）
   ghostty/       Ghostty ターミナルランチャー
@@ -108,14 +108,14 @@ Completed / Error      (hook: turn.complete → Idle)
 
 - Running/WaitingApproval/Answer/Idle: deck-status プラグインが `claude-deck hook status` で store に書く（[docs/hooks.md](docs/hooks.md)）
 - Completed: ウィンドウのコマンド末尾の `claude-deck hook exited`、`x` / `claude-deck close`、ウィンドウ消失の検知のいずれか
-- 遷移の規則は `internal/session/transitions.go` の純関数。どのプロセスも store のトランザクション内で適用する
+- 遷移の規則は `internal/session/transitions.go` の純関数。どのプロセスも store のトランザクション内で適用する。`Status` を書くのはこのファイルだけ（[ADR-015](docs/adr/015-cleanup-after-store-migration.md)）
 
 ### データソース優先度（→ [用語集: Projection](docs/00-glossary.md#projection-投影)）
 
 - **JSONL** (Claude Code 一次データ): Prompt, TokenUsage, StartedAt, LastActivity
 - **Hook** (リアルタイム通知): Status 遷移, SessionChain 更新。`claude-deck hook` が store に書く
 - **Store** (SQLite `deck.db`, 信頼できる唯一の情報源): ID, Name, RepoPath, WorkspacePath, Status, PID, SessionChain, ForkedFrom, ClosingAt
-- **Runtime** (メモリのみ): JSONLLogEntries, CurrentTool
+- **Runtime** (メモリのみ): CurrentTool
 
 `Manager.sessions` は store を `Manager.Reload` で読み直した投影。TUI は `PRAGMA data_version` を 200ms ごとに見て、他プロセス（CLI・hook）の書き込みを検知する。JSONL から発見した外部セッションは store に入れずメモリだけに持つ。
 store が書く項目（Status, SessionChain, PID, ワークスペース等）は常に store に従い、JSONL・jj から TUI が投影する項目（Prompt, TokenUsage, BookmarkName 等）は、セッションが初めてメモリに現れるときだけ store から読む。
@@ -125,7 +125,6 @@ store が書く項目（Status, SessionChain, PID, ワークスペース等）�
 | キー | 操作 |
 |------|------|
 | `j/k` | カーソル移動 |
-| `h/l` | ペイン切替 |
 | `gg/G` | 先頭/末尾 |
 | `Enter` | tmux ウィンドウにフォーカス / 再開 |
 | `n` | 新規セッション（Enter: ワークスペース付, C-Enter: 直接起動） |
@@ -133,8 +132,12 @@ store が書く項目（Status, SessionChain, PID, ワークスペース等）�
 | `f` | セッションフォーク |
 | `x` | プロセス終了 + ワークスペース削除（JSONL・メタデータは保持） |
 | `t` | Ghostty ターミナル起動 |
+| `R` | 再描画 |
 | `/` | フィルタ |
 | `tab` | 次の要手動介入セッションへジャンプ |
+| `C-c` / `C-z` | 終了（確認あり / 確認なし） |
+
+`f` と `t` だけ `config.toml` の `[keybinds]`（`fork`、`open_term`）で変えられる。
 
 ### CLI サブコマンド
 
@@ -189,8 +192,6 @@ codex = "codex"
 - claude-deck が起動する全セッションに `--plugin-dir {DataDir}/plugin` を渡す。ユーザーがプラグインを別途インストールする必要はない
 - イベントとステータスの対応は [docs/hooks.md](docs/hooks.md)
 - セッション開始時に、claude-deck の CLI が使えることをモデルに伝える。使い方は同梱のスキル `deck-status:claude-deck`（`deckmod/skills/claude-deck/SKILL.md`）にあるので、CLI を変えたらスキルも直す
-
-リポジトリの `plugin/` と `.claude-plugin/marketplace.json` は claude-deck が読まない。
 
 ### プロジェクト検出（モノレポ対応）
 

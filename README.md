@@ -28,13 +28,13 @@ claude-deck solves this with a single dashboard that monitors all sessions, high
 - **Token & cost tracking** — Per-session token usage with cost estimates
 - **Ghostty integration** — Open a full terminal for any session with `t`
 - **Workspace symlinks** — Auto-symlink `.env` and other untracked files into workspaces via per-project config
-- **Customizable theme** — Nord, Dracula, or your own palette via `config.toml`
+- **Customizable theme** — Set your own palette via `config.toml`
 
 ## Demo
 
 <!-- <--- デモ GIF (optional): 新規セッション作成 → 複数セッションが並行実行 → Tab で承認待ちにジャンプ → Enter で入力 → 完了。15-20秒程度 ---> -->
 
-<!-- <--- セッション詳細ペインのスクリーンショット: JSONL ログビューア (上段) と PTY 出力 (下段) の分割表示。ツール呼び出しや diff が見えている状態 ---> -->
+<!-- <--- 右ペインのスクリーンショット: 終了済みセッションの JSONL ログビューア。ツール呼び出しや diff が見えている状態 ---> -->
 
 <!-- <--- 承認待ちセッションのスクリーンショット: セッションリストで承認待ちアイコンが目立っている状態 ---> -->
 
@@ -45,6 +45,7 @@ claude-deck solves this with a single dashboard that monitors all sessions, high
 - Go 1.26+
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude` command) or Codex CLI (`codex` command)
 - [jj (Jujutsu)](https://github.com/jj-vcs/jj)
+- [tmux](https://github.com/tmux/tmux)
 - [Ghostty](https://ghostty.org/) (optional, for `t` key terminal launch)
 
 ### Install
@@ -58,8 +59,8 @@ GOEXPERIMENT=jsonv2 go install github.com/pomesaka/claude-deck/cmd/claude-deck@l
 Or build from source:
 
 ```bash
-git clone https://github.com/pomesaka/sandbox.git
-cd sandbox/claude-deck
+git clone https://github.com/pomesaka/claude-deck.git
+cd claude-deck
 GOEXPERIMENT=jsonv2 go build -o claude-deck ./cmd/claude-deck
 ```
 
@@ -95,21 +96,21 @@ Existing Claude Code sessions running outside claude-deck are automatically disc
 | Key | Action |
 |-----|--------|
 | `j/k` | Move cursor |
-| `h/l` | Switch pane focus |
 | `gg/G` | Jump to top/bottom |
-| `Enter/i` | PTY input mode / resume session |
-| `Ctrl+D` | Exit PTY input mode |
+| `Enter` | Focus the session's tmux window / resume a finished session |
 | `n` | New session (Enter: with workspace, Ctrl+Enter: direct) |
 | `r` | Resume session |
 | `f` | Fork session |
-| `dd` | Delete session (including JSONL) |
-| `dD` | Remove deck metadata only (JSONL preserved) |
-| `x` | Kill process |
+| `x` | Kill the process and remove its workspace (JSONL and metadata are kept) |
 | `t` | Open Ghostty terminal |
-| `/` | Filter sessions |
+| `/` | Filter sessions (`Esc` clears the filter) |
 | `Tab` | Jump to next session needing attention |
+| `R` | Redraw |
 | `?` | Show help |
-| `Ctrl+C` | Quit |
+| `Ctrl+C` | Quit (asks first) |
+| `Ctrl+Z` | Quit without asking |
+
+`f` and `t` can be rebound with `[keybinds]` (`fork`, `open_term`). The other keys are fixed.
 
 ## Configuration
 
@@ -133,7 +134,6 @@ success = "#10B981"
 warning = "#F59E0B"
 danger = "#EF4444"
 bg_selected = "#313244"
-border = "#45475A"
 border_focus = "#7C3AED"
 text = "#CDD6F4"
 text_dim = "#6C7086"
@@ -160,8 +160,6 @@ excludes = ["Library", ".cache", "node_modules", ".git"]
 
 [session]
 max_sessions = 30
-max_log_lines = 1000
-max_scrollback = 2000
 max_jsonl_entries = 500
 discovery_days = 14
 refresh_interval = "5s"
@@ -182,7 +180,7 @@ workspace_symlinks = [".env", ".env.local", "secrets/"]
 ## Known Limitations
 
 - **jj required** — Workspace isolation relies on jj. Git-only repositories need `jj git init --colocate` first.
-- **macOS / Linux only** — PTY management uses Unix-specific APIs. Windows is not supported.
+- **macOS / Linux only** — Sessions run in tmux. Windows is not supported.
 - **Ghostty-specific** — The `t` key terminal launch assumes Ghostty. Other terminals can be used manually.
 - **Single machine** — Sessions are local. No remote or Docker-based background execution yet.
 
@@ -213,6 +211,7 @@ See [docs/architecture.md](docs/architecture.md) for details.
 ~/.local/share/claude-deck/
   deck.db                                  Session metadata (SQLite)
   plugin/                                  deck-status plugin
+  rate-limits.json                         Account rate limits reported by the sessions
   workspace/<encoded-repo>/<name>/         jj workspaces
   debug.log                                Debug log
 ~/.claude/projects/<project>/<uuid>.jsonl              Claude Code JSONL (read by claude-deck)

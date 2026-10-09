@@ -102,7 +102,7 @@ classic hook ではなく Mods を使う理由は、2026-10-09 に Mods の hook
 - バックグラウンドのサブエージェントが結果を返すと、`UserPromptSubmit` と `turn.start` が発火し、人の入力と区別できない。メインのループが結果を処理している間は実際に動いているので、Running にするのは誤りではないが、確かめてはいない
 - deck-status プラグインはローカルの `--plugin-dir` でだけ読み込む。marketplace での配布は決めていない
 
-## 追記（2026-10-09）: Runtime adapter（ADR-009 runtime-provider-abstraction）との統合
+## 追記（2026-10-09）: Runtime adapter（ADR-014 runtime-provider-abstraction）との統合
 
 main の Codex 対応と統合したときに、次のように決めた。
 

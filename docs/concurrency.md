@@ -2,51 +2,29 @@
 
 ## ロック階層
 
-Session には2つのロックがあり、それぞれ独立したリソースを保護する:
-
 ```
 Manager.mu (外側)  →  Session.mu (内側)
-
-Session.rt.mu        独立 (JSONL ログ専用)
-Session.mu           その他全フィールド
 ```
 
-**鉄則**:
-- Manager.mu を持ったまま Session.mu を取得しない (コピー→解放→個別ロック)
-- rt.mu と Session.mu は同時に保持しない
+**鉄則**: Session.mu を持ったまま Manager.mu を取得しない。逆順は ABBA デッドロックを起こす。
+
+Manager.mu を持ったまま Session.mu を取るのは、短い読み書きだけにする（`Reload` が store の行を各 Session に写すところなど）。jj やファイルの読み取りのように時間のかかる処理は、次のパターン 1 で Manager.mu を先に解放する。
 
 ## 安全なアクセスパターン
 
 ### パターン 1: コピー→解放→個別ロック
 
-Manager.mu でセッションリストをコピーし、mu を解放してから各セッションのフィールドにアクセス。
+Manager.mu でセッションリストをコピーし、mu を解放してから各セッションのフィールドにアクセスする。
 
 ```go
-// ✅ 安全
-m.mu.RLock()
-sessions := make([]*Session, 0, len(m.sessions))
-for _, s := range m.sessions {
-    sessions = append(sessions, s)
-}
-m.mu.RUnlock()  // 先に解放
+sessions := m.copySessionsList() // Manager.mu はこの中で取って解放する
 
 for _, s := range sessions {
     s.mu.RLock()
-    csID := s.ClaudeSessionID
+    csID := s.CurrentRuntimeID()
     s.mu.RUnlock()
-    // csID を使った処理
+    // csID を使った処理（JSONL の読み取りなど）
 }
-```
-
-```go
-// ❌ デッドロックリスク
-m.mu.RLock()
-for _, s := range m.sessions {
-    s.mu.RLock()          // Manager.mu 保持中に Session.mu 取得
-    // ...
-    s.mu.RUnlock()
-}
-m.mu.RUnlock()
 ```
 
 ### パターン 2: ソートのロック回避
@@ -88,17 +66,6 @@ func (m *Manager) notifyChange(sessionIDs ...DeckSessionID) {
 
 StartNotifyLoop が 16ms (≈60fps) 間隔でドレインし、onChange コールバックに変更セット全体を渡す。TUI 側は ChangedIDs に選択中セッションが含まれる場合のみ viewport を更新する。
 
-### パターン 4: setStatusLocked
-
-既にロックを保持している場合に使う内部ヘルパー。
-
-```go
-sess.mu.Lock()
-sess.setStatusLocked(StatusIdle)  // ロック取得済み前提
-sess.FinishedAt = nil
-sess.mu.Unlock()
-```
-
 ## プロセス間の排他
 
 deck セッションの状態は複数のプロセス（TUI、CLI、hook コマンド、ウィンドウの終了コマンド）が書く。排他は SQLite に任せる。
@@ -119,7 +86,6 @@ deck セッションの状態は複数のプロセス（TUI、CLI、hook コマ�
 | StartNotifyLoop | main | ctx.Done() | dirty flag → onChange (60fps) |
 | WatchStore | main | ctx.Done() | `data_version` を 200ms ごとに見て、変化したら `Reload` |
 | MultiWatcher.Run | main | ctx.Done() | JSONL ファイル変更監視 |
-| StreamSession | updateSelected | cancel() | JSONL リアルタイム読み込み |
 | HydrateFromJSONL | main (init) | 完了 | 起動時トークン補完 |
 
 ## TUI から外部副作用を発行する時の順序保証
@@ -133,13 +99,10 @@ deck セッションの状態は複数のプロセス（TUI、CLI、hook コマ�
 
 ```
 main の ctx (signal: SIGINT/SIGTERM)
-  ├→ Manager.ctx (全 goroutine の親)
-  │    ├→ WatchStore goroutine
-  │    ├→ MultiWatcher.Run goroutine
-  │    └→ NotifyLoop goroutine
-  │
-  └→ 個別セッションの ctx
-       └→ StreamSession (activeStreamCancel)
+  └→ Manager.ctx (全 goroutine の親)
+       ├→ WatchStore goroutine
+       ├→ MultiWatcher.Run goroutine
+       └→ NotifyLoop goroutine
 ```
 
-activeStreamCancel は1つだけアクティブ（前のストリームはキャンセルされる）。
+JSONL のログを読む goroutine は preview サブプロセスにある（`tui/preview.go` の `previewStreamer`）。選択が変わるたびに前のストリームをキャンセルするので、動いているのは常に 1 つ。

@@ -128,14 +128,12 @@ TUI は Session の Snapshot を通じてデータを読む。
 │  Snapshot() ──► メタデータ表示          │
 │    Status, TokenUsage, Prompt, etc.    │
 │                                        │
-│  GetStructuredLogs() ──► ログ表示      │
-│    JSONL 由来の構造化ログエントリ       │
 └────────────────────────────────────────┘
          │
          ▼ DisplayChannel で分岐
-┌─ TUI ─────────────────────────────────┐
-│  DisplayTmux  → tmux ウィンドウが表示を持つ（deck は詳細内容を出さない） │
-│  DisplayJSONL → ログ表示                │
+┌─ 右ペイン ────────────────────────────┐
+│  DisplayTmux  → セッションの tmux ウィンドウ                     │
+│  DisplayJSONL → preview ウィンドウが JSONL を読んでログを表示    │
 └────────────────────────────────────────┘
 ```
 

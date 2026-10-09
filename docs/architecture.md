@@ -26,7 +26,7 @@ store（`{DataDir}/deck.db`）が deck セッションの信頼できる唯一�
 | プロセス | 書くもの |
 |---|---|
 | TUI | セッションの作成・再開・フォーク・close、ステータスの補完、JSONL・jj から投影した項目 |
-| CLI `new` / `close` | TUI と同じ処理（`Manager.Launch` / `Manager.Kill`） |
+| CLI `new` / `close` | TUI と同じ処理（`Manager.CreateSession` / `Manager.Kill`） |
 | `claude-deck hook status` / `session-start` | ステータス、SessionChain（deck-status プラグインが呼ぶ） |
 | `claude-deck hook exited` | Completed、`/clear` 直後に終了したときの SessionChain の巻き戻し（tmux ウィンドウのコマンドが呼ぶ） |
 
@@ -65,7 +65,8 @@ main() → run()
 main() → runCLI()                       ← 第 1 引数が new / list / close / hook のとき
   config.Load() → session.OpenStore(dataDir)
     list / hook: store だけを使う
-    new / close: NewManager → Reload → Launch / Kill（tmux を直接操作）
+    new / close: NewManager → Reload → CreateSession / Kill（tmux を直接操作）
+    gc: session.CollectGarbage（Manager も tmux も使わない）
 ```
 
 CLI と hook コマンドは TUI が起動していなくても動く。
@@ -152,34 +153,34 @@ User 'r' キー or Enter / Manager.ResumeSession(ctx, sessionID)
 | viewDashboard | リスト (35%) + 詳細 (65%) | handleDashboardKey |
 | viewSelectRepo | リポジトリ選択 (全画面) | handleRepoSelectKey |
 
-### 詳細ペイン表示
+### 右ペイン表示
 
 | セッション状態 | 内容 |
 |--------------|------|
-| 実行中 (managed) | 「外部ターミナルで表示中」プレースホルダ（tmux がホスト） |
-| 完了・外部 | JSONL 構造化ログ (logViewport) |
+| 未終了 (DisplayTmux) | セッションの tmux ウィンドウ |
+| 終了済み・外部 (DisplayJSONL) | preview ウィンドウ（`claude-deck --preview`）の JSONL 構造化ログ |
 
 ### vim マルチキーシーケンス
 
 ```go
 pendingG = true → 次の 'g' で gg 実行
-pendingD = true → 次の 'd' で dd (軽量削除)、'D' で dD (完全削除)
 ```
 
 ## JSONL ストリーミングシステム
 
 ### ストリーム起動
 
+ログを読むのは preview サブプロセスで、メインプロセスは読まない。メインプロセスは選択が変わるたびに、JSONL のパスを解決して `preview-selection` に書く（`preview.WriteSpec`）。
+
 ```
-updateSelected() → StreamSession(sessionID)
-  1. stopActiveStream(prev)        // 前のストリームを停止
-  2. activeStreamID = sessionID
-  3. go:
-     a. ReadTail(512KB)            // 即時表示（末尾から読み込み）
-     b. RunFrom(tailOffset)        // 以降はリアルタイム監視
+preview: WatchSpec → previewStreamer.Start(spec)
+  1. 前のストリームを停止
+  2. go:
+     a. /clear 前の JSONL を新しい順に読む（上限 max_jsonl_entries）
+     b. ReadTail(512KB)            // 即時表示（末尾から読み込み）
+     c. RunFrom(tailOffset)        // 以降はリアルタイム監視
         → fsnotify で JSONL 変更検知
         → 新しい行をパース → LogEntry に変換
-        → sess.JSONLLogEntries に追加 (cap 500)
 ```
 
 ### LogEntry 種別

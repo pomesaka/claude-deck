@@ -52,7 +52,7 @@ deck.db                                                  # セッションの行
 
 **ワークスペースが削除済み**（`x` で終了後）の場合:
 ```
-# recreateWorkspace が走る
+# workspaces.recreate が走る
 ~/.local/share/claude-deck/workspace/<encoded>/<name>/   # 再作成
 deck.db                                                  # 行の WorkspaceName/Path を更新
 ~/.claude/projects/.../<uuid>.jsonl                      # Claude Code が追記
