@@ -1,132 +1,177 @@
 package store
 
 import (
-	"os"
+	"errors"
 	"path/filepath"
-	"strings"
+	"reflect"
+	"strconv"
+	"sync"
 	"testing"
+	"time"
 )
 
-func setupTestStore(t *testing.T) *Store {
+func openTestStore(t *testing.T, path string) *Store {
 	t.Helper()
-	dir := t.TempDir()
-	st, err := New(dir)
+	st, err := OpenPath(path)
 	if err != nil {
-		t.Fatalf("New(%q) error: %v", dir, err)
+		t.Fatalf("OpenPath(%q): %v", path, err)
 	}
+	t.Cleanup(func() { st.Close() })
 	return st
 }
 
-type testData struct {
-	Name  string `json:"name"`
-	Value int    `json:"value"`
+func TestStore_RoundTrip(t *testing.T) {
+	finished := time.Unix(1_700_000_100, 5)
+	closing := time.Unix(1_700_000_200, 0)
+	tests := []struct {
+		name string
+		rec  Record
+	}{
+		{
+			name: "zero values stay zero",
+			rec:  Record{ID: "a", Status: "idle"},
+		},
+		{
+			name: "every field set",
+			rec: Record{
+				ID: "b", Name: "maika-548e", RepoPath: "/repo", RepoName: "repo",
+				WorkspacePath: "/ws/maika-548e/sub", WorkspaceName: "maika-548e", SubProjectDir: "sub",
+				SessionChain: []string{"old", "new"}, Status: "completed", FinishedAt: &finished, PID: 42,
+				ErrorMessage: "boom", TerminalTitle: "title", BookmarkName: "feat/x",
+				LastJJRevision: "abc", LastJJParentRevision: "def",
+				Prompt: "hello", PermissionMode: "plan",
+				StartedAt: time.Unix(1_700_000_000, 1), LastActivity: time.Unix(1_700_000_050, 2),
+				InputTokens: 1, OutputTokens: 2, CacheCreationInputTokens: 3, CacheReadInputTokens: 4,
+				EstimatedCostUSD: 0.5, ClosingAt: &closing,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := openTestStore(t, filepath.Join(t.TempDir(), FileName))
+			if err := st.Insert(tt.rec); err != nil {
+				t.Fatalf("Insert: %v", err)
+			}
+			got, err := st.Get(tt.rec.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.rec) {
+				t.Errorf("Get() =\n%+v\nwant\n%+v", got, tt.rec)
+			}
+		})
+	}
 }
 
-func TestStore_SaveAndLoad(t *testing.T) {
-	st := setupTestStore(t)
+func TestStore_GetMissing(t *testing.T) {
+	st := openTestStore(t, filepath.Join(t.TempDir(), FileName))
+	if _, err := st.Get("nope"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Get(missing) error = %v, want ErrNotFound", err)
+	}
+	if _, err := st.Update("nope", func(*Record) error { return nil }); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Update(missing) error = %v, want ErrNotFound", err)
+	}
+}
 
-	data := testData{Name: "test", Value: 42}
-	if err := st.Save("abc123", data); err != nil {
-		t.Fatalf("Save error: %v", err)
+func TestStore_InsertDuplicate(t *testing.T) {
+	st := openTestStore(t, filepath.Join(t.TempDir(), FileName))
+	if err := st.Insert(Record{ID: "a", Status: "idle"}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if err := st.Insert(Record{ID: "a", Status: "running"}); err == nil {
+		t.Error("second Insert with the same ID succeeded")
+	}
+}
+
+func TestStore_UpdateErrorWritesNothing(t *testing.T) {
+	st := openTestStore(t, filepath.Join(t.TempDir(), FileName))
+	if err := st.Insert(Record{ID: "a", Status: "idle"}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	abort := errors.New("abort")
+	_, err := st.Update("a", func(r *Record) error {
+		r.Status = "running"
+		return abort
+	})
+	if !errors.Is(err, abort) {
+		t.Fatalf("Update error = %v, want abort", err)
+	}
+	got, _ := st.Get("a")
+	if got.Status != "idle" {
+		t.Errorf("Status = %q after aborted update, want idle", got.Status)
+	}
+}
+
+// Two Store handles on the same file stand in for two processes (TUI and CLI).
+// Each increments PID many times; a lost update would leave the total short.
+func TestStore_ConcurrentUpdatesFromTwoHandles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	a := openTestStore(t, path)
+	b := openTestStore(t, path)
+	if err := a.Insert(Record{ID: "s", Status: "idle"}); err != nil {
+		t.Fatalf("Insert: %v", err)
 	}
 
-	loaded, err := st.Load("abc123")
+	const perHandle = 50
+	var wg sync.WaitGroup
+	errs := make(chan error, 2*perHandle)
+	for _, st := range []*Store{a, b} {
+		wg.Go(func() {
+			for range perHandle {
+				if _, err := st.Update("s", func(r *Record) error {
+					r.PID++
+					return nil
+				}); err != nil {
+					errs <- err
+				}
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("Update: %v", err)
+	}
+	got, _ := a.Get("s")
+	if got.PID != 2*perHandle {
+		t.Errorf("PID = %d, want %d", got.PID, 2*perHandle)
+	}
+}
+
+func TestStore_DataVersionSeesOtherHandleCommits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	watcher := openTestStore(t, path)
+	writer := openTestStore(t, path)
+
+	before, err := watcher.DataVersion()
 	if err != nil {
-		t.Fatalf("Load error: %v", err)
+		t.Fatalf("DataVersion: %v", err)
 	}
-	if len(loaded) == 0 {
-		t.Fatal("expected non-empty data")
-	}
-	// Check that JSON contains expected fields
-	s := string(loaded)
-	if !strings.Contains(s, `"name": "test"`) {
-		t.Errorf("loaded JSON missing name field: %s", s)
-	}
-	if !strings.Contains(s, `"value": 42`) {
-		t.Errorf("loaded JSON missing value field: %s", s)
-	}
-}
-
-func TestStore_LoadNonExistent(t *testing.T) {
-	st := setupTestStore(t)
-
-	_, err := st.Load("nonexistent")
-	if err == nil {
-		t.Error("expected error for non-existent ID")
+	for i := range 3 {
+		if err := writer.Insert(Record{ID: strconv.Itoa(i), Status: "idle"}); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+		after, err := watcher.DataVersion()
+		if err != nil {
+			t.Fatalf("DataVersion: %v", err)
+		}
+		if after == before {
+			t.Fatalf("DataVersion did not change after commit %d", i)
+		}
+		before = after
 	}
 }
 
-func TestStore_LoadAll(t *testing.T) {
-	st := setupTestStore(t)
-
-	st.Save("id1", testData{Name: "one", Value: 1})
-	st.Save("id2", testData{Name: "two", Value: 2})
-
-	all, err := st.LoadAll()
-	if err != nil {
-		t.Fatalf("LoadAll error: %v", err)
+// A write through the same handle also changes DataVersion, because writes go
+// through pool connections other than the dedicated version connection.
+func TestStore_DataVersionSeesOwnCommits(t *testing.T) {
+	st := openTestStore(t, filepath.Join(t.TempDir(), FileName))
+	before, _ := st.DataVersion()
+	if err := st.Insert(Record{ID: "a", Status: "idle"}); err != nil {
+		t.Fatalf("Insert: %v", err)
 	}
-	if len(all) != 2 {
-		t.Errorf("expected 2 entries, got %d", len(all))
+	after, _ := st.DataVersion()
+	if after == before {
+		t.Error("DataVersion did not change after own commit")
 	}
-	if _, ok := all["id1"]; !ok {
-		t.Error("missing id1")
-	}
-	if _, ok := all["id2"]; !ok {
-		t.Error("missing id2")
-	}
-}
-
-func TestStore_LoadAll_EmptyDir(t *testing.T) {
-	st := setupTestStore(t)
-
-	all, err := st.LoadAll()
-	if err != nil {
-		t.Fatalf("LoadAll error: %v", err)
-	}
-	if len(all) != 0 {
-		t.Errorf("expected 0 entries, got %d", len(all))
-	}
-}
-
-func TestStore_Delete(t *testing.T) {
-	st := setupTestStore(t)
-
-	st.Save("to-delete", testData{Name: "bye", Value: 0})
-
-	if err := st.Delete("to-delete"); err != nil {
-		t.Fatalf("Delete error: %v", err)
-	}
-
-	_, err := st.Load("to-delete")
-	if err == nil {
-		t.Error("expected error after delete")
-	}
-}
-
-func TestStore_Delete_NonExistent(t *testing.T) {
-	st := setupTestStore(t)
-
-	err := st.Delete("nonexistent")
-	if err == nil {
-		t.Error("expected error for non-existent delete")
-	}
-}
-
-func TestStore_CreatesSessionsSubdir(t *testing.T) {
-	dir := t.TempDir()
-	st, err := New(dir)
-	if err != nil {
-		t.Fatalf("New error: %v", err)
-	}
-
-	sessDir := filepath.Join(dir, "sessions")
-	info, err := os.Stat(sessDir)
-	if err != nil {
-		t.Fatalf("sessions dir not created: %v", err)
-	}
-	if !info.IsDir() {
-		t.Error("sessions is not a directory")
-	}
-	_ = st
 }

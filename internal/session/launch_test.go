@@ -84,7 +84,7 @@ func mustMkdir(t *testing.T, dir string) {
 }
 
 func TestFindSession(t *testing.T) {
-	m := newTestManager()
+	m, _ := newTestManager(t)
 	for _, s := range []struct {
 		id   DeckSessionID
 		name string

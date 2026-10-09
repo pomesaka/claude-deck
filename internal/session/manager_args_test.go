@@ -7,11 +7,19 @@ import (
 
 func TestBuildSessionArgs(t *testing.T) {
 	tests := []struct {
-		name     string
-		sessName string
-		addDirs  []string
-		want     []string
+		name      string
+		sessName  string
+		pluginDir string
+		addDirs   []string
+		want      []string
 	}{
+		{
+			name:      "plugin dir between name and add-dirs",
+			sessName:  "anna-8cc7",
+			pluginDir: "/data/plugin",
+			addDirs:   []string{"/shared"},
+			want:      []string{"--name", "anna-8cc7", "--plugin-dir", "/data/plugin", "--add-dir", "/shared"},
+		},
 		{
 			name:     "name only",
 			sessName: "anna-8cc7",
@@ -35,8 +43,9 @@ func TestBuildSessionArgs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := newTestManager()
+			m, _ := newTestManager(t)
 			m.config.AddDirsFunc = func(string) []string { return tt.addDirs }
+			m.config.PluginDir = tt.pluginDir
 
 			got := m.buildSessionArgs(tt.sessName, "/repo")
 			if !slices.Equal(got, tt.want) {

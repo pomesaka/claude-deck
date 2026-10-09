@@ -202,9 +202,21 @@ func Default() *Config {
 	}
 }
 
+// EnvDataDir overrides data_dir when set. claude-deck sets it for every Claude Code
+// session it starts, so hook commands run inside the session write to the same
+// store as the process that started it.
+const EnvDataDir = "CLAUDE_DECK_DATA_DIR"
+
 // Load reads configuration from the default config file.
 func Load() (*Config, error) {
-	return LoadFrom(filepath.Join(DefaultConfigDir(), "config.toml"))
+	cfg, err := LoadFrom(filepath.Join(DefaultConfigDir(), "config.toml"))
+	if err != nil {
+		return nil, err
+	}
+	if dir := os.Getenv(EnvDataDir); dir != "" {
+		cfg.DataDir = dir
+	}
+	return cfg, nil
 }
 
 // LoadFrom reads configuration from the specified path.

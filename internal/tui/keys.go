@@ -313,6 +313,11 @@ func (m *Model) killSelected() tea.Cmd {
 	if m.selectedID == "" || m.killing {
 		return nil
 	}
+	// 外部セッションは store に無く、claude-deck が起動したプロセスでもないので終了できない。
+	if sess := m.manager.GetSession(m.selectedID); sess != nil && sess.GetStatus() == session.StatusUnmanaged {
+		m.statusMsg = "外部セッションは終了できません"
+		return clearStatusCmd()
+	}
 	sid := m.selectedID
 	mgr := m.manager
 	m.killing = true

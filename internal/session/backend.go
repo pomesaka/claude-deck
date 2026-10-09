@@ -1,18 +1,5 @@
 package session
 
-import (
-	"context"
-)
-
-// ReconcileResult is returned by SessionBackend.Reconcile.
-// It describes which sessions have live backend processes after reconciliation.
-type ReconcileResult struct {
-	// LivePIDs maps DeckSessionID → process PID for sessions whose backend
-	// process is still running. Manager uses this to update Session.PID and
-	// re-mark sessions as managed after a restart.
-	LivePIDs map[DeckSessionID]int
-}
-
 // SessionBackend abstracts the process management layer for Claude Code sessions.
 // It decouples Manager from the concrete mechanism used to host processes,
 // enabling backend swapping without touching session domain logic.
@@ -24,20 +11,25 @@ type ReconcileResult struct {
 //   - Session object creation and persistence
 //   - jj workspace management
 //   - JSONL streaming and status tracking
+//   - Recording that a process exited: the command passed in ProcessStartOpts.OnExit
+//     does that from inside the hosting environment (ADR-011)
 type SessionBackend interface {
-	// StartProcess launches a Claude Code process for the session.
-	// The backend is responsible for:
-	//   - calling sess.AttachProcess to wire the RunningProcess sentinel
-	//   - spawning the exit-watcher goroutine that calls the onExit callback
-	StartProcess(ctx context.Context, sess *Session, opts ProcessStartOpts, onOutput func([]byte)) error
+	// StartProcess launches a Claude Code process for the session and returns its PID.
+	StartProcess(sessionID DeckSessionID, opts ProcessStartOpts) (pid int, err error)
 
 	// StopProcess terminates the process for the given session.
-	// fallbackPID is used when the process handle is unavailable (e.g., session
-	// restored from store without a live handle).
+	// fallbackPID is signalled when the hosting window is already gone.
 	StopProcess(sessionID DeckSessionID, fallbackPID int) error
 
 	// IsActive returns true if the session has a live, non-exited process.
 	IsActive(sessionID DeckSessionID) bool
+
+	// LiveSessions returns the sessions that have a live hosting window, with the
+	// window's process PID.
+	LiveSessions() (map[DeckSessionID]int, error)
+
+	// KillOrphans stops hosting windows that belong to no known session.
+	KillOrphans(known map[DeckSessionID]bool) error
 
 	// Focus makes the session's terminal visible in the hosting environment.
 	// tmuxBackend: runs tmux select-window for ~0ms session switching.
@@ -54,15 +46,6 @@ type SessionBackend interface {
 	// KillPreview destroys the preview window.
 	// tmuxBackend: kills the __preview__ tmux window.
 	KillPreview() error
-
-	// Reconcile synchronises backend state against the provided session list.
-	// For each session with a live backend process, the backend re-attaches its
-	// exit watcher and includes the session ID in ReconcileResult.LivePIDs.
-	// Orphaned backend processes (no corresponding deck session) are killed.
-	Reconcile(sessions []*Session) (ReconcileResult, error)
-
-	// Close releases all resources held by the backend.
-	Close()
 }
 
 // ProcessStartOpts contains all parameters needed to start a Claude Code process.
@@ -71,6 +54,10 @@ type SessionBackend interface {
 type ProcessStartOpts struct {
 	Command string   // claude binary path (e.g., "/usr/local/bin/claude")
 	WorkDir string   // working directory for the process
-	Args    []string // fully assembled CLI args (e.g., ["--resume", "<id>", "--agent", "foo"])
+	Args    []string // fully assembled CLI args (e.g., ["--resume", "<id>", "--name", "foo"])
 	Env     []string // additional KEY=VALUE pairs appended to the process environment
+	// OnExit is a command run in the same hosting window after the process exits
+	// (on its own, by crash, or by a signal to the process). It does not run when
+	// the window itself is killed (StopProcess). Empty means nothing runs.
+	OnExit []string
 }

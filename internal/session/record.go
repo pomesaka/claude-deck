@@ -1,0 +1,146 @@
+package session
+
+import (
+	"time"
+
+	"github.com/pomesaka/claude-deck/internal/store"
+)
+
+// StatusFromID parses the value returned by Status.ID.
+func StatusFromID(id string) (Status, bool) {
+	for _, s := range []Status{
+		StatusRunning, StatusWaitingApproval, StatusWaitingAnswer,
+		StatusCompleted, StatusError, StatusIdle, StatusUnmanaged,
+	} {
+		if s.ID() == id {
+			return s, true
+		}
+	}
+	return 0, false
+}
+
+// recordLocked converts the session to a store row. Caller must hold s.mu (read).
+func (s *Session) recordLocked() store.Record {
+	chain := make([]string, len(s.SessionChain))
+	for i, id := range s.SessionChain {
+		chain[i] = string(id)
+	}
+	return store.Record{
+		ID:                       string(s.ID),
+		Name:                     s.Name,
+		RepoPath:                 s.RepoPath,
+		RepoName:                 s.RepoName,
+		WorkspacePath:            s.WorkspacePath,
+		WorkspaceName:            s.WorkspaceName,
+		SubProjectDir:            s.SubProjectDir,
+		SessionChain:             chain,
+		Status:                   s.Status.ID(),
+		FinishedAt:               copyTimePtr(s.FinishedAt),
+		PID:                      s.PID,
+		ErrorMessage:             s.ErrorMessage,
+		TerminalTitle:            s.TerminalTitle,
+		BookmarkName:             s.BookmarkName,
+		LastJJRevision:           s.LastJJRevision,
+		LastJJParentRevision:     s.LastJJParentRevision,
+		Prompt:                   s.Prompt,
+		PermissionMode:           s.PermissionMode,
+		StartedAt:                s.StartedAt,
+		LastActivity:             s.LastActivity,
+		InputTokens:              s.TokenUsage.InputTokens,
+		OutputTokens:             s.TokenUsage.OutputTokens,
+		CacheCreationInputTokens: s.TokenUsage.CacheCreationInputTokens,
+		CacheReadInputTokens:     s.TokenUsage.CacheReadInputTokens,
+		EstimatedCostUSD:         s.TokenUsage.EstimatedCostUSD,
+	}
+}
+
+// newSessionFromRecord builds an in-memory session from a store row.
+func newSessionFromRecord(r store.Record) *Session {
+	s := &Session{
+		ID:            DeckSessionID(r.ID),
+		RepoPath:      r.RepoPath,
+		RepoName:      r.RepoName,
+		SubProjectDir: r.SubProjectDir,
+	}
+	s.applyControlRecordLocked(r)
+	s.applyProjectionRecordLocked(r)
+	return s
+}
+
+// applyControlRecordLocked copies the fields that any process may write
+// (CLI, hook commands, the pane's exit command) from the store row.
+// Caller must hold s.mu (write) or own s exclusively.
+// Returns true when the current Claude session ID changed (e.g. after /clear).
+func (s *Session) applyControlRecordLocked(r store.Record) (chainHeadChanged bool) {
+	before := s.CurrentClaudeID()
+
+	s.Name = r.Name
+	s.WorkspacePath = r.WorkspacePath
+	s.WorkspaceName = r.WorkspaceName
+	s.SessionChain = s.SessionChain[:0]
+	for _, id := range r.SessionChain {
+		s.SessionChain = append(s.SessionChain, ClaudeSessionID(id))
+	}
+	if len(s.SessionChain) == 0 {
+		s.SessionChain = nil
+	}
+	if status, ok := StatusFromID(r.Status); ok {
+		s.Status = status
+	}
+	s.FinishedAt = copyTimePtr(r.FinishedAt)
+	s.PID = r.PID
+	s.ErrorMessage = r.ErrorMessage
+	s.LastJJRevision = r.LastJJRevision
+	s.LastJJParentRevision = r.LastJJParentRevision
+
+	// WHY process をステータスから導く: プロセスを起動・終了させるのは CLI やペイン内の終了コマンドなど
+	// TUI 以外のプロセスのこともあり、TUI はそれを store のステータスでしか知り得ない。
+	if s.Status.IsTerminal() || s.Status == StatusUnmanaged {
+		s.process.Store(nil)
+	} else {
+		s.process.Store(&RunningProcess{})
+	}
+	return s.CurrentClaudeID() != before
+}
+
+// applyProjectionRecordLocked copies the fields the TUI projects from JSONL
+// and jj. Only applied when a session first appears in memory: after that the
+// TUI's in-memory values are newer than what it last wrote to the store.
+func (s *Session) applyProjectionRecordLocked(r store.Record) {
+	s.TerminalTitle = r.TerminalTitle
+	s.BookmarkName = r.BookmarkName
+	s.Prompt = r.Prompt
+	s.PermissionMode = r.PermissionMode
+	s.StartedAt = r.StartedAt
+	s.LastActivity = r.LastActivity
+	s.TokenUsage = TokenUsage{
+		InputTokens:              r.InputTokens,
+		OutputTokens:             r.OutputTokens,
+		CacheCreationInputTokens: r.CacheCreationInputTokens,
+		CacheReadInputTokens:     r.CacheReadInputTokens,
+		EstimatedCostUSD:         r.EstimatedCostUSD,
+	}
+}
+
+// copyProjection copies the TUI-projected fields of src into r.
+func copyProjection(r *store.Record, src store.Record) {
+	r.TerminalTitle = src.TerminalTitle
+	r.BookmarkName = src.BookmarkName
+	r.Prompt = src.Prompt
+	r.PermissionMode = src.PermissionMode
+	r.StartedAt = src.StartedAt
+	r.LastActivity = src.LastActivity
+	r.InputTokens = src.InputTokens
+	r.OutputTokens = src.OutputTokens
+	r.CacheCreationInputTokens = src.CacheCreationInputTokens
+	r.CacheReadInputTokens = src.CacheReadInputTokens
+	r.EstimatedCostUSD = src.EstimatedCostUSD
+}
+
+func copyTimePtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	c := *t
+	return &c
+}

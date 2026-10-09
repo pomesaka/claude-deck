@@ -147,24 +147,6 @@ func TestParseWindowList(t *testing.T) {
 	}
 }
 
-func TestExitChannel(t *testing.T) {
-	tests := []struct {
-		windowName string
-		want       string
-	}{
-		{"abc123", "deck-exit-abc123"},
-		{"session-id-xyz", "deck-exit-session-id-xyz"},
-		{"a1b2c3d4e5f6", "deck-exit-a1b2c3d4e5f6"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.windowName, func(t *testing.T) {
-			if got := ExitChannel(tc.windowName); got != tc.want {
-				t.Errorf("ExitChannel(%q) = %q, want %q", tc.windowName, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestRunnerDefaults(t *testing.T) {
 	r := &Runner{}
 	if got := r.cmd(); got != DefaultCommand {

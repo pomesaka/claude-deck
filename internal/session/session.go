@@ -391,40 +391,6 @@ func (s *Session) AttachProcess(pid int) {
 	s.mu.Unlock()
 }
 
-// reconcileStatusFromStore corrects the session status when loaded from the store.
-// ストア復元直後に呼び出し、保存時に実行中だったセッションが実際には死んでいる場合に
-// StatusCompleted へ補正し FinishedAt を記録する。
-// StatusRunning / WaitingApproval / WaitingAnswer / Idle のいずれかで PID が生存していなければ補正し、
-// true を返す。補正が不要なときは false を返す。
-//
-// LoadExisting と SyncNewFromStore の両方から呼ばれる共通ロジック。
-// ワーキングディレクトリの存在確認など起動時固有の補正は呼び出し側で行うこと。
-//
-// 前提: 呼び出し時点で s は他の goroutine に公開されていない（m.sessions への登録前の
-// deserialize 直後のローカル変数）。そのため s.mu を取得せずにフィールドを直書きしている。
-// 登録済みセッションに対して呼ぶのは禁止。
-func (s *Session) reconcileStatusFromStore() bool {
-	switch s.Status {
-	case StatusRunning, StatusWaitingApproval, StatusWaitingAnswer:
-		if !isProcessAlive(s.PID) {
-			s.Status = StatusCompleted
-			now := time.Now()
-			s.FinishedAt = &now
-			return true
-		}
-	case StatusIdle:
-		// PID=0 は「一度も起動していない」を意味するため Completed に補正しない。
-		// PID が設定されていてプロセスが死んでいる場合のみ補正する。
-		if s.PID > 0 && !isProcessAlive(s.PID) {
-			s.Status = StatusCompleted
-			now := time.Now()
-			s.FinishedAt = &now
-			return true
-		}
-	}
-	return false
-}
-
 // DetachProcess clears the running process context.
 // Called by Manager when a process exits.
 // mu is not required: atomic.Pointer.Store provides the necessary atomicity.

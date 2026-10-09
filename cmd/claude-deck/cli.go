@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"flag"
@@ -9,20 +10,58 @@ import (
 	"path/filepath"
 
 	"github.com/pomesaka/claude-deck/internal/config"
-	"github.com/pomesaka/claude-deck/internal/control"
+	"github.com/pomesaka/claude-deck/internal/session"
+	"github.com/pomesaka/claude-deck/internal/store"
+	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
-// cliCommands are the subcommands that talk to the running TUI over the control socket.
-var cliCommands = map[string]func(args []string) (control.Request, error){
+// cliRequest is one parsed subcommand.
+type cliRequest struct {
+	Op          string
+	Dir         string // new
+	NoWorkspace bool   // new
+	Target      string // close
+	// hook
+	HookEvent       string
+	Session         string
+	Status          string
+	ClaudeSessionID string
+	Source          string
+}
+
+// cliCommands are the subcommands. Each one works on the store directly, so the
+// TUI does not need to be running (ADR-011).
+var cliCommands = map[string]func(args []string) (cliRequest, error){
 	"new":   parseNewArgs,
 	"list":  parseListArgs,
 	"close": parseCloseArgs,
+	"hook":  parseHookArgs,
 }
 
-// runCLI sends one subcommand to the running TUI and prints the response as JSON.
+// SessionInfo is the JSON form of a session printed by new / list / close.
+type SessionInfo struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	RepoPath        string `json:"repo_path"`
+	WorkDir         string `json:"work_dir"`
+	Status          string `json:"status"`
+	ClaudeSessionID string `json:"claude_session_id,omitempty"`
+}
+
+func infoFromSnapshot(s session.Snapshot) SessionInfo {
+	return SessionInfo{
+		ID:              string(s.ID),
+		Name:            s.Name,
+		RepoPath:        s.RepoPath,
+		WorkDir:         s.WorkDir(),
+		Status:          s.Status.ID(),
+		ClaudeSessionID: string(s.ClaudeSessionID),
+	}
+}
+
+// runCLI runs one subcommand.
 func runCLI(name string, args []string) error {
-	parse := cliCommands[name]
-	req, err := parse(args)
+	req, err := cliCommands[name](args)
 	if err != nil {
 		return err
 	}
@@ -30,75 +69,181 @@ func runCLI(name string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-	resp, err := control.Call(cfg.DataDir, req)
+	st, err := session.OpenStore(cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("opening store: %w", err)
+	}
+	defer st.Close()
+
+	switch req.Op {
+	case "hook":
+		return runHook(req, st)
+	case "list":
+		snaps, err := session.ListStored(st)
+		if err != nil {
+			return err
+		}
+		infos := make([]SessionInfo, len(snaps))
+		for i, s := range snaps {
+			infos[i] = infoFromSnapshot(s)
+		}
+		return printJSON(infos)
+	}
+
+	// new / close start or stop processes, which needs tmux and the full config.
+	mcfg, err := buildManagerConfig(cfg)
 	if err != nil {
 		return err
 	}
-	return printJSON(cliOutput(req.Op, resp))
-}
+	ctx := context.Background()
+	mgr := session.NewManager(ctx, st, mcfg)
+	mgr.Reload()
 
-// cliOutput picks the part of the response the subcommand prints.
-func cliOutput(op control.Op, resp control.Response) any {
-	if op == control.OpList {
-		if resp.Sessions == nil {
-			return []control.SessionInfo{}
+	switch req.Op {
+	case "new":
+		repoPath, workingDir, isJJ := session.ResolveLaunchDir(req.Dir)
+		withWorkspace := !req.NoWorkspace
+		if withWorkspace && !isJJ {
+			return fmt.Errorf("%s は jj リポジトリではないためワークスペースを作れません（--no-workspace で直接起動できます）", req.Dir)
 		}
-		return resp.Sessions
+		sess, err := mgr.Launch(ctx, session.LaunchIntent{
+			Kind:          session.LaunchNew,
+			RepoPath:      repoPath,
+			WorkingDir:    workingDir,
+			WithWorkspace: withWorkspace,
+		})
+		if err != nil {
+			return err
+		}
+		return printJSON(infoFromSnapshot(sess.Snapshot()))
+	case "close":
+		sess, err := mgr.FindSession(req.Target)
+		if err != nil {
+			return err
+		}
+		if err := mgr.Kill(sess.ID); err != nil {
+			return err
+		}
+		return printJSON(infoFromSnapshot(sess.Snapshot()))
+	default:
+		return fmt.Errorf("unknown command %q", req.Op)
 	}
-	return resp.Session
 }
 
-func parseNewArgs(args []string) (control.Request, error) {
+func parseNewArgs(args []string) (cliRequest, error) {
 	fs := flag.NewFlagSet("new", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: claude-deck new [--dir DIR] [--no-workspace]")
-		fmt.Fprintln(fs.Output(), "TUI で n を押したときと同じく新しいセッションを作り、JSON で返す。")
+		fmt.Fprintln(fs.Output(), "TUI で n を押したときと同じく新しいセッションを作り、JSON で返す。TUI が起動していなくてもよい。")
 		fs.PrintDefaults()
 	}
 	dir := fs.String("dir", "", "セッションを起動するディレクトリ（既定: カレントディレクトリ）。jj ワークスペース内なら本体リポジトリの同じ位置に解決する")
 	noWorkspace := fs.Bool("no-workspace", false, "jj ワークスペースを作らずに直接起動する（TUI の C-Enter）")
 	if err := fs.Parse(args); err != nil {
-		return control.Request{}, err
+		return cliRequest{}, err
 	}
 	if fs.NArg() > 0 {
-		return control.Request{}, fmt.Errorf("new: unexpected arguments: %v", fs.Args())
+		return cliRequest{}, fmt.Errorf("new: unexpected arguments: %v", fs.Args())
 	}
 	absDir, err := resolveDir(*dir)
 	if err != nil {
-		return control.Request{}, err
+		return cliRequest{}, err
 	}
-	return control.Request{Op: control.OpNew, Dir: absDir, NoWorkspace: *noWorkspace}, nil
+	return cliRequest{Op: "new", Dir: absDir, NoWorkspace: *noWorkspace}, nil
 }
 
-func parseListArgs(args []string) (control.Request, error) {
+func parseListArgs(args []string) (cliRequest, error) {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: claude-deck list")
-		fmt.Fprintln(fs.Output(), "全セッションを TUI の一覧と同じ順で JSON で返す。")
+		fmt.Fprintln(fs.Output(), "claude-deck のセッションを TUI の一覧と同じ順で JSON で返す。外部セッションは含まない。")
 	}
 	if err := fs.Parse(args); err != nil {
-		return control.Request{}, err
+		return cliRequest{}, err
 	}
 	if fs.NArg() > 0 {
-		return control.Request{}, fmt.Errorf("list: unexpected arguments: %v", fs.Args())
+		return cliRequest{}, fmt.Errorf("list: unexpected arguments: %v", fs.Args())
 	}
-	return control.Request{Op: control.OpList}, nil
+	return cliRequest{Op: "list"}, nil
 }
 
-func parseCloseArgs(args []string) (control.Request, error) {
+func parseCloseArgs(args []string) (cliRequest, error) {
 	fs := flag.NewFlagSet("close", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: claude-deck close <ID|NAME>")
 		fmt.Fprintln(fs.Output(), "TUI で x を押したときと同じくプロセスを止めてワークスペースを消す。r で再開できる。")
 	}
 	if err := fs.Parse(args); err != nil {
-		return control.Request{}, err
+		return cliRequest{}, err
 	}
 	if fs.NArg() != 1 {
 		fs.Usage()
-		return control.Request{}, fmt.Errorf("close: specify exactly one session ID or name")
+		return cliRequest{}, fmt.Errorf("close: specify exactly one session ID or name")
 	}
-	return control.Request{Op: control.OpClose, Target: fs.Arg(0)}, nil
+	return cliRequest{Op: "close", Target: fs.Arg(0)}, nil
+}
+
+// Hook events accepted by `claude-deck hook`.
+const (
+	hookStatus       = "status"
+	hookSessionStart = "session-start"
+	hookExited       = "exited"
+)
+
+// parseHookArgs parses `hook <event> [args] --session ID`. These are called by
+// the deck-status plugin and by the pane's exit command, not by people.
+func parseHookArgs(args []string) (cliRequest, error) {
+	usage := "Usage: claude-deck hook status <running|idle|waiting_approval|waiting_answer> | session-start --claude-session-id ID --source SOURCE | exited  [--session DECK_ID]"
+	if len(args) == 0 {
+		return cliRequest{}, fmt.Errorf("hook: missing event\n%s", usage)
+	}
+	req := cliRequest{Op: "hook", HookEvent: args[0]}
+	fs := flag.NewFlagSet("hook "+args[0], flag.ContinueOnError)
+	fs.StringVar(&req.Session, "session", os.Getenv(session.EnvSessionID), "deck session ID（既定: $"+session.EnvSessionID+"）")
+	switch req.HookEvent {
+	case hookStatus:
+		if len(args) < 2 {
+			return cliRequest{}, fmt.Errorf("hook status: missing status\n%s", usage)
+		}
+		req.Status = args[1]
+		if _, ok := session.StatusFromID(req.Status); !ok {
+			return cliRequest{}, fmt.Errorf("hook status: unknown status %q", req.Status)
+		}
+		args = args[2:]
+	case hookSessionStart:
+		fs.StringVar(&req.ClaudeSessionID, "claude-session-id", "", "Claude Code のセッション ID")
+		fs.StringVar(&req.Source, "source", "", "SessionStart の source（startup / resume / fork / clear / compact）")
+		args = args[1:]
+	case hookExited:
+		args = args[1:]
+	default:
+		return cliRequest{}, fmt.Errorf("hook: unknown event %q\n%s", req.HookEvent, usage)
+	}
+	if err := fs.Parse(args); err != nil {
+		return cliRequest{}, err
+	}
+	if fs.NArg() > 0 {
+		return cliRequest{}, fmt.Errorf("hook %s: unexpected arguments: %v", req.HookEvent, fs.Args())
+	}
+	if req.Session == "" {
+		return cliRequest{}, fmt.Errorf("hook %s: no session (--session or $%s)", req.HookEvent, session.EnvSessionID)
+	}
+	return req, nil
+}
+
+func runHook(req cliRequest, st *store.Store) error {
+	id := session.DeckSessionID(req.Session)
+	switch req.HookEvent {
+	case hookStatus:
+		status, _ := session.StatusFromID(req.Status) // validated in parseHookArgs
+		return session.RecordHookStatus(st, id, status)
+	case hookSessionStart:
+		return session.RecordSessionStart(st, id, session.ClaudeSessionID(req.ClaudeSessionID), req.Source)
+	case hookExited:
+		return session.MarkExited(st, usage.NewReader(""), id)
+	default:
+		return fmt.Errorf("hook: unknown event %q", req.HookEvent)
+	}
 }
 
 func resolveDir(dir string) (string, error) {

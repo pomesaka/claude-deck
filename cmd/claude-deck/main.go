@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"runtime/debug"
 	"syscall"
@@ -14,17 +15,15 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/pomesaka/claude-deck/deckmod"
 	"github.com/pomesaka/claude-deck/internal/claudecode"
 	"github.com/pomesaka/claude-deck/internal/config"
-	"github.com/pomesaka/claude-deck/internal/control"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/ghostty"
-	"github.com/pomesaka/claude-deck/internal/hooks"
 	"github.com/pomesaka/claude-deck/internal/jj"
 	"github.com/pomesaka/claude-deck/internal/preview"
 	"github.com/pomesaka/claude-deck/internal/ratelimits"
 	"github.com/pomesaka/claude-deck/internal/session"
-	"github.com/pomesaka/claude-deck/internal/store"
 	"github.com/pomesaka/claude-deck/internal/tui"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
@@ -106,25 +105,25 @@ func run() error {
 	}
 
 	// Initialize store
-	st, err := store.New(cfg.DataDir)
+	st, err := session.OpenStore(cfg.DataDir)
 	if err != nil {
 		return fmt.Errorf("initializing store: %w", err)
+	}
+	defer st.Close()
+
+	mcfg, err := buildManagerConfig(cfg)
+	if err != nil {
+		return err
 	}
 
 	// Context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Parse refresh interval
-	refreshInterval, err := time.ParseDuration(cfg.Session.RefreshInterval)
-	if err != nil {
-		refreshInterval = 5 * time.Second
-	}
-
 	// Create session manager
-	mgr := session.NewManager(ctx, st, buildManagerConfig(cfg, refreshInterval))
+	mgr := session.NewManager(ctx, st, mcfg)
 
-	// Load session metadata from store (fast: local JSON files only)
+	// Load session metadata from the store
 	if err := mgr.LoadExisting(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to load existing sessions: %v\n", err)
 	}
@@ -188,34 +187,14 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "warning: file watcher: %v\n", err)
 	}
 
-	// Hook のセットアップ状態を確認し、イベント監視を開始する。
-	// プラグイン方式への移行を案内。レガシー hooks はそのまま動作する。
-	// Plugin 管理以外は起動前に警告を出してキー入力で続行する。
-	if msg := hookWarningMessage(hooks.CheckHooks()); msg != "" {
-		fmt.Print(msg)
-		fmt.Fprint(os.Stderr, "Press any key to continue...")
-		b := make([]byte, 1)
-		if _, err := os.Stdin.Read(b); err != nil {
-			return err
-		}
-		fmt.Fprint(os.Stderr, "\033[2K\r") // "Press any key..." 行だけクリア
-	}
-	if err := mgr.StartEventWatcher(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: event watcher: %v\n", err)
-	}
-
-	// claude-deck new / list / close からの依頼を受け付ける。失敗しても TUI の操作には影響しない。
-	if ln, err := control.Listen(cfg.DataDir); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: control socket: %v\n", err)
-	} else {
-		control.Serve(ctx, ln, control.NewManagerHandler(ctx, mgr))
-	}
+	// CLI・hook・ペインの終了コマンドが store に書いた変更を一覧に反映する。
+	go mgr.WatchStore(ctx)
 
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("running TUI: %w", err)
 	}
 
-	// 終了時に全 managed セッションを永続化（TerminalTitle 等の実行時更新を保存）
+	// 終了時に JSONL から読んだトークン数などを保存し、次回起動時にすぐ表示できるようにする
 	mgr.PersistAll()
 
 	// claude-deck が開いた Ghostty 右ペインと preview ウィンドウを閉じる。
@@ -288,8 +267,25 @@ func runPreview() error {
 	return nil
 }
 
-// buildManagerConfig constructs the ManagerConfig from app config and derived values.
-func buildManagerConfig(cfg *config.Config, refreshInterval time.Duration) session.ManagerConfig {
+// buildManagerConfig constructs the ManagerConfig from app config.
+// It installs the deck-status plugin under the data directory, since every
+// session claude-deck starts (from the TUI or the CLI) loads it with --plugin-dir.
+func buildManagerConfig(cfg *config.Config) (session.ManagerConfig, error) {
+	refreshInterval, err := time.ParseDuration(cfg.Session.RefreshInterval)
+	if err != nil {
+		refreshInterval = 5 * time.Second
+	}
+	deckCommand, err := os.Executable()
+	if err != nil {
+		return session.ManagerConfig{}, fmt.Errorf("locating claude-deck binary: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(deckCommand); err == nil {
+		deckCommand = resolved
+	}
+	pluginDir, err := deckmod.Install(filepath.Join(cfg.DataDir, "plugin"))
+	if err != nil {
+		return session.ManagerConfig{}, err
+	}
 	return session.ManagerConfig{
 		DataDir:               cfg.DataDir,
 		ClaudeCommand:         cfg.Commands.Claude,
@@ -306,9 +302,11 @@ func buildManagerConfig(cfg *config.Config, refreshInterval time.Duration) sessi
 		},
 		WorkspaceSymlinksFunc: cfg.WorkspaceSymlinks,
 		AddDirsFunc:           cfg.ResolvedAddDirs,
+		DeckCommand:           deckCommand,
+		PluginDir:             pluginDir,
 		TmuxCommand:           cfg.Tmux.Command,
 		TmuxSession:           cfg.Tmux.SessionName,
-	}
+	}, nil
 }
 
 // setupGhosttySplit opens the tmux right pane in Ghostty if running inside it.
@@ -350,20 +348,4 @@ func setupGhosttySplit(cfg *config.Config) string {
 	}
 
 	return uuid
-}
-
-func hookWarningMessage(status hooks.HookStatus) string {
-	switch status {
-	case hooks.HookStatusNone:
-		return "⚠ claude-deck plugin not installed. Session status tracking requires hooks.\n" +
-			"  Run:\n" +
-			"    claude plugin marketplace add pomesaka/claude-deck\n" +
-			"    claude plugin install claude-deck\n"
-	case hooks.HookStatusOutdated:
-		return "⚠ claude-deck plugin is outdated (latest: " + hooks.PluginVersion + ").\n" +
-			"  Run:\n" +
-			"    claude plugin update claude-deck\n"
-	default:
-		return ""
-	}
 }

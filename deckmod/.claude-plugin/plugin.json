@@ -1,0 +1,8 @@
+{
+  "name": "deck-status",
+  "version": "0.1.0",
+  "description": "Reports session status and /clear to claude-deck by writing its store through the claude-deck CLI",
+  "author": {
+    "name": "pomesaka"
+  }
+}

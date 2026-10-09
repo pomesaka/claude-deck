@@ -5,8 +5,6 @@ package tmux
 
 import (
 	"bufio"
-	"context"
-	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -163,56 +161,6 @@ func (r *Runner) SendKeys(windowName, keys string) error {
 	// -l sends keys literally, preventing tmux from interpreting special key names.
 	_, err := r.run("send-keys", "-l", "-t", r.sess()+":"+windowName, keys)
 	return err
-}
-
-// ── Exit detection ───────────────────────────────────────────────────────────
-
-// SetHook sets a tmux hook on a specific window.
-// hookName is the tmux hook event (e.g., "pane-exited").
-// hookCmd is the tmux command string to execute when the hook fires.
-//
-// Exit-detection pattern:
-//
-//	SetHook(name, "pane-exited", "wait-for -S "+ExitChannel(name))
-//	go WaitFor(ExitChannel(name))  // blocks until pane exits
-func (r *Runner) SetHook(windowName, hookName, hookCmd string) error {
-	target := r.sess() + ":" + windowName
-	_, err := r.run("set-hook", "-t", target, hookName, hookCmd)
-	return err
-}
-
-// WaitFor blocks the calling goroutine until WaitForSignal is called with the
-// same channel name.  This is the blocking half of the exit-detection pair.
-func (r *Runner) WaitFor(channel string) error {
-	_, err := r.run("wait-for", channel)
-	return err
-}
-
-// WaitForCtx is like WaitFor but respects context cancellation.
-// When ctx is cancelled, the underlying tmux wait-for command is killed and
-// this method returns ctx.Err(). The tmux channel remains valid — a subsequent
-// WaitFor on the same channel will return immediately if the signal was already sent.
-func (r *Runner) WaitForCtx(ctx context.Context, channel string) error {
-	if err := exec.CommandContext(ctx, r.cmd(), "wait-for", channel).Run(); err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		return err
-	}
-	return nil
-}
-
-// WaitForSignal unblocks any WaitFor goroutine waiting on channel.
-// Typically called from the pane-exited hook set up by SetHook.
-func (r *Runner) WaitForSignal(channel string) error {
-	_, err := r.run("wait-for", "-S", channel)
-	return err
-}
-
-// ExitChannel returns the wait-for channel name for the given window's exit event.
-// Deterministic and unique per window name.
-func ExitChannel(windowName string) string {
-	return fmt.Sprintf("deck-exit-%s", windowName)
 }
 
 // ── Unexported helpers (argument construction, tested via package-level tests) ─

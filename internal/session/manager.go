@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pomesaka/claude-deck/internal/config"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/jj"
 	"github.com/pomesaka/claude-deck/internal/store"
@@ -20,6 +22,18 @@ import (
 
 // notifyInterval はデバウンス間隔。16ms ≈ 60fps で UI を駆動する。
 const notifyInterval = 16 * time.Millisecond
+
+// Environment variables passed to every Claude Code process claude-deck starts.
+const (
+	// EnvSessionID carries the deck session ID; hook commands use it to find the row.
+	EnvSessionID = "CLAUDE_DECK_SESSION_ID"
+	// EnvCommand is the absolute path of the claude-deck binary, for the plugin's hooks.
+	EnvCommand = "CLAUDE_DECK_BIN"
+	// EnvDataDir pins the data directory for hook commands run inside the session.
+	// WHY 環境変数で渡す: tmux のペインは TUI でなく tmux サーバーの環境を引き継ぐ。
+	// 設定ファイルの場所（XDG_CONFIG_HOME）が TUI と違うと、hook が別の store に書いてしまう。
+	EnvDataDir = config.EnvDataDir
+)
 
 // ManagerConfig holds configuration values used by Manager for session creation.
 type ManagerConfig struct {
@@ -35,6 +49,13 @@ type ManagerConfig struct {
 	// AddDirsFunc returns the --add-dir paths for the given repository.
 	AddDirsFunc func(repoPath string) []string
 
+	// DeckCommand is the absolute path of the claude-deck binary. Sessions run
+	// "<DeckCommand> hook exited" when Claude Code exits, and the plugin calls it
+	// for status hooks. Empty disables both (tests).
+	DeckCommand string
+	// PluginDir is passed to Claude Code as --plugin-dir. Empty passes nothing.
+	PluginDir string
+
 	// TmuxCommand is the tmux binary path. Defaults to "tmux" if empty.
 	TmuxCommand string
 	// TmuxSession is the tmux session name. Defaults to "claude-deck" if empty.
@@ -42,7 +63,11 @@ type ManagerConfig struct {
 }
 
 // Manager coordinates multiple Claude Code sessions.
-// The dashboard is monitor-only; manual intervention is done via Ghostty.
+//
+// The store is the source of truth for deck sessions (ADR-011). The sessions map
+// is an in-memory projection of the store plus external sessions discovered from
+// JSONL, which are never stored. Every operation that changes a deck session
+// writes the store first and then reloads the projection.
 type Manager struct {
 	mu       sync.RWMutex
 	sessions map[DeckSessionID]*Session
@@ -61,6 +86,9 @@ type Manager struct {
 	// RefreshFromJSONL の並行実行ガード
 	refreshing atomic.Bool
 
+	// reloadMu serialises Reload so that two reloads never interleave their merges.
+	reloadMu sync.Mutex
+
 	// notifyChange デバウンス用チャネル（バッファ 1 でバーストを吸収）
 	notifyCh chan struct{}
 
@@ -71,10 +99,6 @@ type Manager struct {
 
 	// JSONL ファイルの fsnotify 監視
 	fileWatcher *usage.MultiWatcher
-
-	// hookProc はシングルゴルーチンで動作する SessionEnd→SessionStart ペアリングステートマシン。
-	// event watcher goroutine のみが読み書きするため mu 不要。
-	hookProc *hookProcessor
 
 	// 次回 DiscoverExternalSessions の読み込み開始位置（ページネーション用）
 	discoveryOffset int
@@ -91,7 +115,6 @@ func NewManager(ctx context.Context, st *store.Store, cfg ManagerConfig) *Manage
 		config:         cfg,
 		notifyCh:       make(chan struct{}, 1),
 		pendingChanges: make(map[DeckSessionID]bool),
-		hookProc:       newHookProcessor(),
 	}
 
 	runner := &tmuxrunner.Runner{
@@ -107,7 +130,7 @@ func NewManager(ctx context.Context, st *store.Store, cfg ManagerConfig) *Manage
 			runner.ApplyDefaultOptions() // マウスホイールでターミナル履歴を遡れるようにする
 		}
 	}
-	m.backend = newTmuxBackend(m.ctx, runner, m.watchProcess)
+	m.backend = newTmuxBackend(runner)
 
 	return m
 }
@@ -141,6 +164,23 @@ func buildStartArgs(resumeID string, forkSession bool, permMode string, addition
 		args = append(args, "--permission-mode", permMode)
 	}
 	return append(args, additionalArgs...)
+}
+
+// processOpts assembles the ProcessStartOpts shared by every launch mode.
+func (m *Manager) processOpts(sessionID DeckSessionID, workDir string, args []string) ProcessStartOpts {
+	env := []string{EnvSessionID + "=" + string(sessionID), EnvDataDir + "=" + m.config.DataDir}
+	var onExit []string
+	if m.config.DeckCommand != "" {
+		env = append(env, EnvCommand+"="+m.config.DeckCommand)
+		onExit = []string{m.config.DeckCommand, "hook", "exited", "--session", string(sessionID)}
+	}
+	return ProcessStartOpts{
+		Command: m.config.ClaudeCommand,
+		WorkDir: workDir,
+		Args:    args,
+		Env:     env,
+		OnExit:  onExit,
+	}
 }
 
 // SetOnChange registers a callback for session state changes.
@@ -215,7 +255,6 @@ func (m *Manager) StartNotifyLoop(ctx context.Context) {
 	}()
 }
 
-
 // Launch starts a session based on the given LaunchIntent.
 // This is the unified entry point for all session launch operations (New, Resume, Fork).
 // Returns the session (new or existing) and any error.
@@ -244,26 +283,41 @@ func computeActualWorkDir(wsPath, subProjectDir string) string {
 	return filepath.Join(wsPath, subProjectDir)
 }
 
-// finalizeNewSession は新規セッション（CreateSession / ForkSession）の共通後処理。
-// jj ブックマークをセッション名として設定し、sessions マップへ登録、永続化、通知を行う。
+// startNewSession is the shared tail of CreateSession and ForkSession.
 //
-// 冪等性: 呼び出し元は hook 競合防止のため StartProcess 前に sess を m.sessions に登録する
-// （SessionStart フックが先に発火する場合がある）。この呼び出しはブックマーク取得後に
-// 同じキーで上書きするため問題ない。
-// ResumeSession は既存セッションを対象とするため、このパターンを使用しない。
-func (m *Manager) finalizeNewSession(sess *Session, workDir string) {
-	if bookmark, err := m.jj().GetNearestBookmark(workDir); err == nil && bookmark != "" {
-		// sess.mu と m.mu を同時保持しないため逐次的取得であり、順序は問わない（ABBA なし）。
-		sess.mu.Lock()
-		sess.BookmarkName = bookmark
-		sess.mu.Unlock()
+// The row is inserted before the process starts: the process's hooks and the
+// TUI's orphan-window cleanup both look the session up in the store, and must
+// find it as soon as the window exists. PID stays 0 until the process has started,
+// which tells other processes that the launch is still in progress.
+func (m *Manager) startNewSession(sess *Session, workDir string, args []string) error {
+	sess.mu.RLock()
+	rec := sess.recordLocked()
+	sess.mu.RUnlock()
+	if err := m.store.Insert(rec); err != nil {
+		return fmt.Errorf("saving session: %w", err)
 	}
-	m.mu.Lock()
-	m.sessions[sess.ID] = sess
-	m.mu.Unlock()
-	m.persist(sess)
+
+	pid, err := m.backend.StartProcess(sess.ID, m.processOpts(sess.ID, workDir, args))
+	if err != nil {
+		if derr := m.store.Delete(string(sess.ID)); derr != nil {
+			debuglog.Printf("[startNewSession] store delete after failed start: %v", derr)
+		}
+		return fmt.Errorf("starting claude code: %w", err)
+	}
+
+	bookmark, _ := m.jj().GetNearestBookmark(workDir)
+	if _, err := m.store.Update(string(sess.ID), func(r *store.Record) error {
+		r.PID = pid
+		if bookmark != "" {
+			r.BookmarkName = bookmark
+		}
+		return nil
+	}); err != nil {
+		debuglog.Printf("[startNewSession] recording pid: %v", err)
+	}
 	m.pruneOldSessions()
-	m.notifyChange(sess.ID)
+	m.Reload()
+	return nil
 }
 
 // CreateSession creates and starts a new Claude Code session.
@@ -314,38 +368,15 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	}
 
 	debuglog.Printf("[CreateSession] starting process workDir=%q", actualWorkDir)
-	additionalArgs := m.buildSessionArgs(sess.Name, repoPath)
-
-	// StartProcess より前に m.sessions に登録する。
-	// tmux/PTY プロセスが起動してすぐ SessionStart フックを発火することがあり、
-	// event watcher が m.sessions を参照するタイミングとの競合を防ぐため。
-	m.mu.Lock()
-	m.sessions[sess.ID] = sess
-	m.mu.Unlock()
-
-	// Backend handles AttachProcess internally (PID storage, exit watcher).
-	if err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
-		Command: m.config.ClaudeCommand,
-		WorkDir: actualWorkDir,
-		Args:    buildStartArgs("", false, m.config.DefaultPermissionMode, additionalArgs),
-		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
-	}, nil); err != nil {
-		debuglog.Printf("[CreateSession] StartProcess failed: %v", err)
-		m.mu.Lock()
-		delete(m.sessions, sess.ID)
-		m.mu.Unlock()
+	args := buildStartArgs("", false, m.config.DefaultPermissionMode, m.buildSessionArgs(sess.Name, repoPath))
+	if err := m.startNewSession(sess, actualWorkDir, args); err != nil {
 		if withWorkspace {
 			_ = m.jj().ForgetWorkspace(repoPath, sess.Name)
 		}
-		return nil, fmt.Errorf("starting claude code: %w", err)
+		return nil, err
 	}
 	debuglog.Printf("[CreateSession] process started")
-
-	// backend.StartProcess already registered the process and wired the exit watcher.
-	// finalizeNewSession も m.sessions[sess.ID] = sess を呼ぶが冪等なので問題なし。
-	m.finalizeNewSession(sess, actualWorkDir)
-
-	return sess, nil
+	return m.GetSession(sess.ID), nil
 }
 
 // FocusSession makes the session's terminal visible in the tmux window.
@@ -393,188 +424,156 @@ func (m *Manager) ResolveJSONLPaths(sid DeckSessionID) (current string, prior []
 	return current, prior
 }
 
-// ReconcileTmux synchronises in-memory session state with the live tmux session.
-// Call this after LoadExisting() on startup in tmux mode.
-//
-// Cases:
-//  1. tmux window exists, deck session exists → backend re-attaches exit watcher (backend.Reconcile)
-//  2. tmux window exists, deck session missing → backend kills orphaned window (backend.Reconcile)
-//  3. deck session exists, tmux window missing → Manager marks session Completed (this function)
-func (m *Manager) ReconcileTmux() {
-	sessions := m.copySessionsList()
-	result, err := m.backend.Reconcile(sessions)
-	if err != nil {
-		debuglog.Printf("[ReconcileTmux] Reconcile failed: %v", err)
-		return
-	}
-
-	// Apply backend result to session state.
-	for _, sess := range sessions {
-		if panePID, alive := result.LivePIDs[sess.ID]; alive {
-			// Case 1: window is live — attach process sentinel.
-			sess.AttachProcess(panePID)
-			// LoadExisting marks sessions Completed when the stored PID is stale
-			// (old pane PID from the previous run no longer exists). If the tmux
-			// window is actually alive, reset to Idle so the session shows as
-			// active and status hooks can drive transitions from here.
-			if status := sess.GetStatus(); status == StatusCompleted || status == StatusError {
-				debuglog.Printf("[ReconcileTmux] window alive but status=%s, resetting to Idle session=%s", status, sess.ID)
-				sess.SetStatus(StatusIdle)
-				m.persist(sess)
-			}
-		} else {
-			// Case 3: window gone — mark Completed if not already terminal.
-			// StatusUnmanaged（外部発見セッション）は tmux が管理しないため skip する。
-			// ReconcileTmux が Unmanaged → Completed に変換するとストアに重複が蓄積する。
-			status := sess.GetStatus()
-			if status != StatusCompleted && status != StatusError && status != StatusUnmanaged {
-				debuglog.Printf("[ReconcileTmux] window gone, marking Completed session=%s", sess.ID)
-				// SetStatus before DetachProcess — see watchProcess comment for ordering rationale.
-				sess.SetStatus(StatusCompleted)
-				sess.DetachProcess()
-				m.persist(sess)
-			}
-		}
-	}
+// MarkExited records that the session's process has ended. The pane's exit
+// command calls it through `claude-deck hook exited`, and the TUI calls it for
+// sessions whose window is gone.
+func (m *Manager) MarkExited(sessionID DeckSessionID) error {
+	err := MarkExited(m.store, m.usage, sessionID)
+	m.Reload()
+	return err
 }
 
-// watchProcess is called by the SessionBackend after a process exits.
-// ワークスペースはセッション削除時まで保持する（再開時に必要）。
-// /clear 後にメッセージ未送信で終了した場合、ClaudeSessionID を旧 ID にフォールバックする。
-//
-// The backend is responsible for blocking until the process exits before calling
-// this method, so there is no <-proc.Done() here — that keeps the signature
-// backend-agnostic (ptyBackend and tmuxBackend share the same onExit type).
-func (m *Manager) watchProcess(sess *Session) {
-	debuglog.Printf("[watchProcess] process exited session=%s", sess.ID)
-
-	// SetStatus before DetachProcess so that the brief race window observed by
-	// Snapshot() is always "terminal status, process still attached" (PhaseActive,
-	// the documented case in Phase()) rather than "non-terminal, process gone".
-	status := sess.GetStatus()
-	if status != StatusCompleted && status != StatusError {
-		sess.SetStatus(StatusCompleted)
-	}
-	sess.DetachProcess()
-
-	// /clear 後にメッセージを送らず終了した場合、新 ID の JSONL は空。
-	// resume 不可能なので chain の末尾をポップして旧 ID にフォールバックする。
-	sess.mu.RLock()
-	chain := make([]ClaudeSessionID, len(sess.SessionChain))
-	copy(chain, sess.SessionChain)
-	sess.mu.RUnlock()
-
-	if len(chain) > 1 {
-		csID := chain[len(chain)-1]
-		prevCSID := chain[len(chain)-2]
-		if !m.usage.HasConversation(string(csID)) {
-			// 旧 ID が別の deck セッションに既に紐付いている場合は revert しない。
-			// Discovery が旧 ID を外部セッションとしてインポート済みの場合に
-			// 2つの deck セッションが同じ ClaudeSessionID を持つのを防ぐ。
-			if m.isClaudeIDClaimed(prevCSID, sess.ID) {
-				debuglog.Printf("[watchProcess] session %s: empty JSONL for %s, but %s is claimed by another session, not reverting",
-					sess.ID, csID, prevCSID)
-			} else {
-				debuglog.Printf("[watchProcess] session %s: empty JSONL for %s, reverting to %s",
-					sess.ID, csID, prevCSID)
-				sess.mu.Lock()
-				sess.popChainLocked()
-				sess.mu.Unlock()
-			}
+// MarkExited records that the session's process has ended, without a Manager.
+// See applyExited for the rules.
+func MarkExited(st *store.Store, ur *usage.Reader, sessionID DeckSessionID) error {
+	return st.Tx(func(tx *store.Tx) error {
+		r, err := tx.Get(string(sessionID))
+		if err != nil {
+			return err
 		}
-	}
-
-	m.persist(sess)
-	m.notifyChange(sess.ID)
+		others, err := tx.List()
+		if err != nil {
+			return err
+		}
+		applyExited(&r, others, ur.HasConversation, time.Now())
+		return tx.Put(r)
+	})
 }
 
 // ResumeSession resumes a completed Claude Code session using --resume.
 func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) error {
 	debuglog.Printf("[ResumeSession] sessionID=%s", sessionID)
-	if m.HasActiveProcess(sessionID) {
+	if m.backend.IsActive(sessionID) {
 		debuglog.Printf("[ResumeSession] already has active process")
 		return fmt.Errorf("session %s already has an active process", sessionID)
 	}
 
-	m.mu.RLock()
-	sess, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok {
-		debuglog.Printf("[ResumeSession] session not found")
-		return fmt.Errorf("session not found: %s", sessionID)
+	if err := m.adoptExternal(sessionID); err != nil {
+		return err
 	}
 
-	sess.mu.RLock()
-	csID := sess.CurrentClaudeID()
-	wsPath := sess.WorkspacePath
-	repoPath := sess.RepoPath
-	sessName := sess.Name
-	subProjectDir := sess.SubProjectDir
-	atRev := sess.LastJJRevision
-	parentRev := sess.LastJJParentRevision
-	sess.mu.RUnlock()
-	debuglog.Printf("[ResumeSession] csID=%q wsPath=%q repoPath=%q atRev=%q parentRev=%q", csID, wsPath, repoPath, atRev, parentRev)
+	// beginResume moves the row out of the finished state, so a second resume
+	// from another process fails here instead of starting a second window.
+	rec, err := m.store.Update(string(sessionID), beginResume)
+	if err != nil {
+		return err
+	}
+	csID := ""
+	if len(rec.SessionChain) > 0 {
+		csID = rec.SessionChain[len(rec.SessionChain)-1]
+	}
+	debuglog.Printf("[ResumeSession] csID=%q wsPath=%q repoPath=%q atRev=%q parentRev=%q",
+		csID, rec.WorkspacePath, rec.RepoPath, rec.LastJJRevision, rec.LastJJParentRevision)
+
+	// fail puts the row back into a finished state when the process could not start.
+	fail := func(cause error, markError bool) error {
+		if _, err := m.store.Update(string(sessionID), func(r *store.Record) error {
+			now := time.Now()
+			if markError {
+				setError(r, cause.Error(), now)
+			} else {
+				r.Status = StatusCompleted.ID()
+				r.FinishedAt = &now
+			}
+			return nil
+		}); err != nil {
+			debuglog.Printf("[ResumeSession] restoring status: %v", err)
+		}
+		m.Reload()
+		return cause
+	}
 
 	if csID == "" {
-		return fmt.Errorf("no Claude Code session ID available for resume")
+		return fail(errors.New("no Claude Code session ID available for resume"), false)
 	}
 
 	// ワークスペースがなければ（Kill で削除済み）再作成する。
 	// Kill 時に保存した @ / @- の change_id を渡す（ADR 009）。
 	// CreateWorkspaceAt が jj edit <@> → jj new <@-> → jj new trunk() の順で試みる。
-	if wsPath == "" && repoPath != "" && sessName != "" {
-		newWsPath, err := m.recreateWorkspace(repoPath, sessName, subProjectDir, atRev, parentRev)
+	wsPath := rec.WorkspacePath
+	if wsPath == "" && rec.RepoPath != "" && rec.Name != "" {
+		newWsPath, err := m.recreateWorkspace(rec.RepoPath, rec.Name, rec.SubProjectDir, rec.LastJJRevision, rec.LastJJParentRevision)
 		if err != nil {
 			debuglog.Printf("[ResumeSession] workspace recreate failed, falling back to repo: %v", err)
-			wsPath = repoPath
+			wsPath = rec.RepoPath
 		} else {
 			wsPath = newWsPath
-			sess.mu.Lock()
-			sess.WorkspaceName = sessName
-			sess.WorkspacePath = newWsPath
-			sess.mu.Unlock()
+			if _, err := m.store.Update(string(sessionID), func(r *store.Record) error {
+				r.WorkspaceName = rec.Name
+				r.WorkspacePath = newWsPath
+				return nil
+			}); err != nil {
+				debuglog.Printf("[ResumeSession] recording workspace: %v", err)
+			}
 		}
 	}
 
 	workDir := wsPath
 	if workDir == "" {
-		workDir = repoPath
+		workDir = rec.RepoPath
 	}
 	if workDir == "" {
-		return fmt.Errorf("no work directory available for session %s", sessionID)
+		return fail(fmt.Errorf("no work directory available for session %s", sessionID), false)
 	}
 	debuglog.Printf("[ResumeSession] workDir=%q", workDir)
 
 	if _, err := os.Stat(workDir); os.IsNotExist(err) {
 		debuglog.Printf("[ResumeSession] workDir does not exist: %s", workDir)
-		sess.SetErrorStatus(fmt.Sprintf("ディレクトリが見つかりません: %s", workDir))
-		m.persist(sess)
-		return fmt.Errorf("作業ディレクトリが見つかりません: %s", workDir)
+		return fail(fmt.Errorf("ディレクトリが見つかりません: %s", workDir), true)
 	}
 
-	sess.mu.Lock()
-	sess.setStatusLocked(StatusIdle)
-	sess.FinishedAt = nil // resume なので終了時刻をクリア
-	sess.mu.Unlock()
-
-	debuglog.Printf("[ResumeSession] calling backend.StartProcess")
-	if err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
-		Command: m.config.ClaudeCommand,
-		WorkDir: workDir,
-		Args:    buildStartArgs(string(csID), false, m.config.DefaultPermissionMode, m.buildSessionArgs(sessName, repoPath)),
-		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sessionID)},
-	}, nil); err != nil {
+	args := buildStartArgs(csID, false, m.config.DefaultPermissionMode, m.buildSessionArgs(rec.Name, rec.RepoPath))
+	pid, err := m.backend.StartProcess(sessionID, m.processOpts(sessionID, workDir, args))
+	if err != nil {
 		debuglog.Printf("[ResumeSession] StartProcess failed: %v", err)
-		return fmt.Errorf("resuming claude code: %w", err)
+		return fail(fmt.Errorf("resuming claude code: %w", err), false)
 	}
-	debuglog.Printf("[ResumeSession] session state updated")
-
-	// backend.StartProcess already registered the process and wired the exit watcher.
-	m.persist(sess)
-	m.notifyChange(sessionID)
-	debuglog.Printf("[ResumeSession] done, watching process")
-
+	if _, err := m.store.Update(string(sessionID), func(r *store.Record) error {
+		r.PID = pid
+		return nil
+	}); err != nil {
+		debuglog.Printf("[ResumeSession] recording pid: %v", err)
+	}
+	m.Reload()
+	debuglog.Printf("[ResumeSession] done")
 	return nil
+}
+
+// adoptExternal stores an external session (discovered from JSONL, memory only)
+// as a finished deck session, so it can be resumed like one. No-op for deck sessions.
+func (m *Manager) adoptExternal(sessionID DeckSessionID) error {
+	sess := m.GetSession(sessionID)
+	if sess == nil {
+		return nil
+	}
+	sess.mu.RLock()
+	status := sess.Status
+	rec := sess.recordLocked()
+	sess.mu.RUnlock()
+	if status != StatusUnmanaged {
+		return nil
+	}
+	now := time.Now()
+	rec.Status = StatusCompleted.ID()
+	rec.FinishedAt = &now
+	return m.store.Tx(func(tx *store.Tx) error {
+		if _, err := tx.Get(rec.ID); err == nil {
+			return nil
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		return tx.Put(rec)
+	})
 }
 
 // ForkSession creates a new session that forks from an existing session's conversation.
@@ -626,30 +625,12 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	sess.WorkspaceName = wsName
 	sess.SubProjectDir = srcSubProjectDir
 
-	// StartProcess より前に m.sessions に登録する（CreateSession と同じ競合対策）。
-	m.mu.Lock()
-	m.sessions[sess.ID] = sess
-	m.mu.Unlock()
-
-	// Backend handles AttachProcess internally.
-	forkArgs := m.buildSessionArgs(sess.Name, repoPath)
-	if err := m.backend.StartProcess(ctx, sess, ProcessStartOpts{
-		Command: m.config.ClaudeCommand,
-		WorkDir: actualWorkDir,
-		Args:    buildStartArgs(string(srcClaudeID), true, m.config.DefaultPermissionMode, forkArgs),
-		Env:     []string{"CLAUDE_DECK_SESSION_ID=" + string(sess.ID)},
-	}, nil); err != nil {
-		m.mu.Lock()
-		delete(m.sessions, sess.ID)
-		m.mu.Unlock()
+	args := buildStartArgs(string(srcClaudeID), true, m.config.DefaultPermissionMode, m.buildSessionArgs(sess.Name, repoPath))
+	if err := m.startNewSession(sess, actualWorkDir, args); err != nil {
 		_ = m.jj().ForgetWorkspace(repoPath, wsName)
 		return nil, fmt.Errorf("starting forked session: %w", err)
 	}
-
-	// backend.StartProcess already registered the process and wired the exit watcher.
-	m.finalizeNewSession(sess, actualWorkDir)
-
-	return sess, nil
+	return m.GetSession(sess.ID), nil
 }
 
 // RemoveSession removes a deck session from the manager and store, but keeps
@@ -724,10 +705,8 @@ func (m *Manager) removeSessionCore(sessionID DeckSessionID) []string {
 	delete(m.sessions, sessionID)
 	m.mu.Unlock()
 
-	if m.store != nil {
-		if storeErr := m.store.Delete(string(sessionID)); storeErr != nil {
-			return []string{fmt.Sprintf("ストア削除失敗: %v", storeErr)}
-		}
+	if storeErr := m.store.Delete(string(sessionID)); storeErr != nil {
+		return []string{fmt.Sprintf("ストア削除失敗: %v", storeErr)}
 	}
 	return nil
 }
@@ -800,47 +779,52 @@ func (m *Manager) recreateWorkspace(repoPath, sessName, subProjectDir, atRev, pa
 
 // Kill forcefully terminates a session and cleans up its workspace directory.
 // Session metadata and Claude Code JSONL are preserved for future --resume.
+//
+// ClosingAt in the store guards against the TUI and the CLI closing the same
+// session at once (both would try to remove the same workspace).
 func (m *Manager) Kill(sessionID DeckSessionID) error {
-	m.mu.RLock()
-	sess, hasSess := m.sessions[sessionID]
-	m.mu.RUnlock()
-
-	if !hasSess {
-		return fmt.Errorf("session not found: %s", sessionID)
+	rec, err := m.store.Update(string(sessionID), func(r *store.Record) error {
+		return beginClose(r, time.Now())
+	})
+	if err != nil {
+		return err
 	}
-
-	sess.mu.RLock()
-	pid := sess.PID
-	wsName := sess.WorkspaceName
-	repoPath := sess.RepoPath
-	sess.mu.RUnlock()
-	// repoPath は生成後に変化しない。wsName は Kill / Resume のどちらかしか実行されない設計のため
-	// RUnlock 後も有効な値として扱える（並行 Kill+Resume のガードは呼び出し元の TUI が担う）。
-
-	if err := m.backend.StopProcess(sessionID, pid); err != nil {
+	// endClose clears ClosingAt and applies fn in one transaction.
+	endClose := func(fn func(tx *store.Tx, r *store.Record) error) error {
+		err := m.store.Tx(func(tx *store.Tx) error {
+			r, err := tx.Get(string(sessionID))
+			if err != nil {
+				return err
+			}
+			r.ClosingAt = nil
+			if fn != nil {
+				if err := fn(tx, &r); err != nil {
+					return err
+				}
+			}
+			return tx.Put(r)
+		})
+		m.Reload()
 		return err
 	}
 
-	// StopProcess が SIGTERM を送った場合、watchProcess が Completed に遷移させる。
-	// プロセスハンドルがない（PID フォールバック）場合は手動で遷移させる。
-	//
-	// DetachProcess と notifyChange も呼ぶ。呼ばないと:
-	//   - process.Load() != nil のまま → DisplayChannel が DisplayTmux のまま残る
-	//   - TUI が更新されず detail pane が古い表示のままになる
-	// watchProcess も後から同じ処理をするが、それまでの間 TUI が不整合状態になるのを防ぐ。
-	// 二重実行になるが DetachProcess / SetStatus / persist / notifyChange はすべて冪等なので問題なし。
-	if !m.backend.IsActive(sessionID) {
-		// SetStatus before DetachProcess — see watchProcess comment for ordering rationale.
-		sess.SetStatus(StatusCompleted)
-		sess.DetachProcess()
+	// kill-window はペインごと終了させるので、ペイン内の終了コマンド（hook exited）は動かない。
+	// 終了の記録はここで行う。
+	if err := m.backend.StopProcess(sessionID, rec.PID); err != nil {
+		if cerr := endClose(nil); cerr != nil {
+			debuglog.Printf("[Kill] clearing closing flag: %v", cerr)
+		}
+		return err
 	}
 
 	// ワークスペースディレクトリを削除して disk を回収する。
 	// node_modules 等の依存ファイルがワークスペースごとに複製されるため、
 	// プロセス終了時に即座にクリーンアップする。
 	// resume 時は recreateWorkspace で新規ワークスペースが作られる。
-	if wsName != "" && repoPath != "" {
-		wsRootPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
+	var atRev, parentRev string
+	var revErr error
+	if rec.WorkspaceName != "" && rec.RepoPath != "" {
+		wsRootPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(rec.RepoPath), rec.WorkspaceName)
 		// GetWorkspaceRevisions は cleanupWorkspace（jj workspace forget）より前に呼ぶこと。
 		// workspace forget 後は @ の change_id が取得できない場合があるため順序依存がある。
 		// @ が空の場合 workspace forget で abandon されるため、@- も fallback として記録する。
@@ -848,36 +832,34 @@ func (m *Manager) Kill(sessionID DeckSessionID) error {
 		// Claude Code の jj 操作と競合しうるが、cleanupWorkspace の jj workspace forget も
 		// 同じ前提で動作しており（既存の設計上の制約）、revision 取得を先に行っても
 		// リスクプロファイルは変わらない。
-		atRev, parentRev, revErr := m.jj().GetWorkspaceRevisions(wsRootPath)
+		atRev, parentRev, revErr = m.jj().GetWorkspaceRevisions(wsRootPath)
 		if revErr != nil {
 			debuglog.Printf("[Kill] GetWorkspaceRevisions failed: %v", revErr)
 		}
-		if w := m.cleanupWorkspace(repoPath, wsName, wsRootPath); w != "" {
+		if w := m.cleanupWorkspace(rec.RepoPath, rec.WorkspaceName, wsRootPath); w != "" {
 			debuglog.Printf("[Kill] workspace cleanup: %s", w)
 		}
-		sess.mu.Lock()
-		sess.WorkspaceName = ""
-		sess.WorkspacePath = ""
-		if revErr == nil {
-			sess.setLastJJRevisionsPairLocked(atRev, parentRev)
-		} else {
-			// 取得失敗時は古い revision が誤って resume に使われないようクリアする
-			sess.setLastJJRevisionsPairLocked("", "")
-		}
-		sess.mu.Unlock()
-	} else {
-		// ワークスペースなしセッションを Kill する場合。
-		// 現状このパスに到達することはないが、以前の Kill 時の値が残らないよう防御的にクリアする。
-		// 将来 ResumeSession がワークスペースなしパスで revision を参照するようになった場合は
-		// このクリアが正しく機能することをテストで確認すること。
-		sess.mu.Lock()
-		sess.setLastJJRevisionsPairLocked("", "")
-		sess.mu.Unlock()
 	}
 
-	m.persist(sess)
-	m.notifyChange(sessionID)
-	return nil
+	return endClose(func(tx *store.Tx, r *store.Record) error {
+		others, err := tx.List()
+		if err != nil {
+			return err
+		}
+		applyExited(r, others, m.usage.HasConversation, time.Now())
+		if rec.WorkspaceName != "" && rec.RepoPath != "" {
+			r.WorkspaceName = ""
+			r.WorkspacePath = ""
+		}
+		// 取得失敗時（とワークスペースなしのとき）は古い revision が誤って resume に使われないようクリアする。
+		// ADR 009: 2 つは常にペアで更新する。
+		if revErr == nil && rec.WorkspaceName != "" {
+			r.LastJJRevision, r.LastJJParentRevision = atRev, parentRev
+		} else {
+			r.LastJJRevision, r.LastJJParentRevision = "", ""
+		}
+		return nil
+	})
 }
 
 // HasActiveProcess returns true if the session has a live process.
@@ -895,13 +877,32 @@ func (m *Manager) GetSession(id DeckSessionID) *Session {
 // ListSessions returns all sessions sorted by status group, then by last activity (newest first).
 // Group order (top→bottom): Unmanaged/Completed/Error → Idle → Running → WaitingApproval/Answer.
 func (m *Manager) ListSessions() []*Session {
-	m.mu.RLock()
-	list := make([]*Session, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		list = append(list, s)
-	}
-	m.mu.RUnlock()
+	list := m.copySessionsList()
+	sortSessions(list)
+	return list
+}
 
+// ListStored returns the deck sessions in the store, in the same order as
+// ListSessions, without a Manager (no tmux, no JSONL). Used by `claude-deck list`.
+func ListStored(st *store.Store) ([]Snapshot, error) {
+	recs, err := st.List()
+	if err != nil {
+		return nil, err
+	}
+	list := make([]*Session, len(recs))
+	for i, r := range recs {
+		list[i] = newSessionFromRecord(r)
+	}
+	sortSessions(list)
+	snaps := make([]Snapshot, len(list))
+	for i, s := range list {
+		snaps[i] = s.Snapshot()
+	}
+	return snaps, nil
+}
+
+// sortSessions sorts by status group, then by last activity (newest last).
+func sortSessions(list []*Session) {
 	// ソートキーを事前計算（比較ごとのロック取得を排除）
 	// sort.Slice は list 内の要素をスワップするが、別配列の keys はスワップしないため
 	// キーと要素がずれる。session とキーをペアにした構造体をソートする。
@@ -932,8 +933,6 @@ func (m *Manager) ListSessions() []*Session {
 	for i, item := range items {
 		list[i] = item.session
 	}
-
-	return list
 }
 
 // FindSession looks up a session by deck session ID, falling back to its name.
@@ -977,14 +976,17 @@ func (m *Manager) copySessionsList() []*Session {
 }
 
 // buildSessionArgs returns the flags shared by every launch mode (create / resume / fork):
-// --name <name> followed by the --add-dir pairs for the repository.
+// --name <name>, --plugin-dir, and the --add-dir pairs for the repository.
 // name が空のときは --name を付けない（空文字の表示名を Claude Code に渡さないため）。
 func (m *Manager) buildSessionArgs(name, repoPath string) []string {
-	addDirArgs := m.buildAddDirArgs(repoPath)
-	if name == "" {
-		return addDirArgs
+	var args []string
+	if name != "" {
+		args = append(args, "--name", name)
 	}
-	return append([]string{"--name", name}, addDirArgs...)
+	if m.config.PluginDir != "" {
+		args = append(args, "--plugin-dir", m.config.PluginDir)
+	}
+	return append(args, m.buildAddDirArgs(repoPath)...)
 }
 
 // buildAddDirArgs returns --add-dir flag pairs for the given repository path.
@@ -1001,21 +1003,4 @@ func (m *Manager) buildAddDirArgs(repoPath string) []string {
 		args = append(args, "--add-dir", d)
 	}
 	return args
-}
-
-// isClaudeIDClaimed returns true if the given Claude Code session ID is already
-// used by another deck session (excluding excludeID).
-func (m *Manager) isClaudeIDClaimed(claudeSessionID ClaudeSessionID, excludeID DeckSessionID) bool {
-	for _, s := range m.copySessionsList() {
-		if s.ID == excludeID {
-			continue
-		}
-		s.mu.RLock()
-		csID := s.CurrentClaudeID()
-		s.mu.RUnlock()
-		if csID == claudeSessionID {
-			return true
-		}
-	}
-	return false
 }
