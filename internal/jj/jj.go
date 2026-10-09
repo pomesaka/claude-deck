@@ -225,10 +225,17 @@ func (r *Runner) GetNearestBookmark(dir string) (string, error) {
 	return "", nil
 }
 
-// ForgetWorkspace removes a jj workspace.
-func (r *Runner) ForgetWorkspace(repoPath, name string) error {
-	cmd := exec.Command(r.command(), "workspace", "forget", name)
-	cmd.Dir = repoPath
+// ForgetWorkspace removes a jj workspace. dir is any directory of the
+// repository: its root, or one of its workspaces.
+//
+// WHY --ignore-working-copy: forget は dir の作業コピーを必要としない。付けないと dir の作業コピーを
+// snapshot する操作が 1 件余分に書かれ（GetNearestBookmark の WHY と同じ分岐の原因になる）、
+// 作業コピーが stale だと forget そのものが失敗する。付けると forget の操作 1 件だけになることを
+// 使い捨てのリポジトリで確認した（jj 0.37.0）。
+// 消すワークスペースの snapshot が要る呼び出し元は、先に GetWorkspaceRevisions を呼ぶ。
+func (r *Runner) ForgetWorkspace(dir, name string) error {
+	cmd := exec.Command(r.command(), "--ignore-working-copy", "workspace", "forget", name)
+	cmd.Dir = dir
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {

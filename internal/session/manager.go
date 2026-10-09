@@ -49,6 +49,13 @@ type ManagerConfig struct {
 	RefreshInterval       time.Duration
 	Pricing               PricingPolicy
 	WorkspaceSymlinksFunc func(repoPath string) []string
+	// TrustWorkspaceFunc tells the runtime that a workspace claude-deck created is
+	// trusted, so the session does not open on a trust dialog. Nil does nothing.
+	TrustWorkspaceFunc func(wsPath string) error
+	// ForgetProjectsFunc removes what the runtime recorded about the directories
+	// match accepts (workspaces that are gone) and returns how many records that
+	// is; with dryRun it only counts. Nil does nothing.
+	ForgetProjectsFunc func(match func(dir string) bool, dryRun bool) (int, error)
 	// AddDirsFunc returns the --add-dir paths for the given repository.
 	AddDirsFunc func(repoPath string) []string
 
@@ -349,17 +356,10 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	var actualWorkDir string
 	if withWorkspace {
 		wsName := sess.Name
-		wsPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
-
-		var extraSymlinks []string
-		if m.config.WorkspaceSymlinksFunc != nil {
-			extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
-		}
-		debuglog.Printf("[CreateSession] creating jj workspace name=%q path=%q", wsName, wsPath)
-		if err := m.jj().CreateWorkspaceAt(repoPath, wsName, wsPath, jj.WorkspaceOptions{ExtraSymlinks: extraSymlinks}); err != nil {
+		wsPath, err := m.createWorkspace(repoPath, wsName, jj.WorkspaceOptions{})
+		if err != nil {
 			return nil, fmt.Errorf("creating jj workspace: %w", err)
 		}
-		debuglog.Printf("[CreateSession] jj workspace created")
 		sess.WorkspaceName = wsName
 
 		// サブプロジェクト対応: workingDir がリポジトリルートと異なる場合、
@@ -649,13 +649,8 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	sess := NewSession(repoPath, repoName)
 
 	wsName := sess.Name
-	wsPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
-
-	var extraSymlinks []string
-	if m.config.WorkspaceSymlinksFunc != nil {
-		extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
-	}
-	if err := m.jj().CreateWorkspaceAt(repoPath, wsName, wsPath, jj.WorkspaceOptions{ExtraSymlinks: extraSymlinks}); err != nil {
+	wsPath, err := m.createWorkspace(repoPath, wsName, jj.WorkspaceOptions{})
+	if err != nil {
 		return nil, fmt.Errorf("creating jj workspace: %w", err)
 	}
 	// サブプロジェクト対応: ソースが wsPath/subProject で動いていた場合、
@@ -798,9 +793,35 @@ func (m *Manager) cleanupWorkspace(repoPath, wsName, wsRootPath string) string {
 	return strings.Join(warnings, "; ")
 }
 
+// workspaceRoot returns where the jj workspace named wsName of repoPath lives.
+func (m *Manager) workspaceRoot(repoPath, wsName string) string {
+	return filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
+}
+
+// createWorkspace creates the jj workspace wsName of repoPath with the project's
+// extra symlinks, marks it trusted for the runtime, and returns its root.
+// opts.ExtraSymlinks is filled in here.
+func (m *Manager) createWorkspace(repoPath, wsName string, opts jj.WorkspaceOptions) (string, error) {
+	wsPath := m.workspaceRoot(repoPath, wsName)
+	if m.config.WorkspaceSymlinksFunc != nil {
+		opts.ExtraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
+	}
+	debuglog.Printf("[createWorkspace] name=%q path=%q", wsName, wsPath)
+	if err := m.jj().CreateWorkspaceAt(repoPath, wsName, wsPath, opts); err != nil {
+		return "", err
+	}
+	if m.config.TrustWorkspaceFunc != nil {
+		// 失敗しても起動は続ける。trust ダイアログが出るだけで、利用者がその場で承認できる。
+		if err := m.config.TrustWorkspaceFunc(wsPath); err != nil {
+			debuglog.Printf("[createWorkspace] trusting %q failed: %v", wsPath, err)
+		}
+	}
+	return wsPath, nil
+}
+
 // discardWorkspace removes a workspace created for a session that failed to start.
 func (m *Manager) discardWorkspace(repoPath, wsName string) {
-	wsRootPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), wsName)
+	wsRootPath := m.workspaceRoot(repoPath, wsName)
 	if w := m.cleanupWorkspace(repoPath, wsName, wsRootPath); w != "" {
 		debuglog.Printf("[discardWorkspace] %s", w)
 	}
@@ -810,13 +831,9 @@ func (m *Manager) discardWorkspace(repoPath, wsName string) {
 // atRev/parentRev は Kill 時に保存した @ / @- の change_id（ADR 009）。
 // Returns the effective work directory (wsPath/subProjectDir if subProjectDir is set).
 func (m *Manager) recreateWorkspace(repoPath, sessName, subProjectDir, atRev, parentRev string) (string, error) {
-	wsPath := filepath.Join(m.config.DataDir, "workspace", encodePathForDir(repoPath), sessName)
-	var extraSymlinks []string
-	if m.config.WorkspaceSymlinksFunc != nil {
-		extraSymlinks = m.config.WorkspaceSymlinksFunc(repoPath)
-	}
-	debuglog.Printf("[recreateWorkspace] repoPath=%q sessName=%q wsPath=%q atRev=%q parentRev=%q", repoPath, sessName, wsPath, atRev, parentRev)
-	if err := m.jj().CreateWorkspaceAt(repoPath, sessName, wsPath, jj.WorkspaceOptions{ExtraSymlinks: extraSymlinks, AtRev: atRev, ParentRev: parentRev}); err != nil {
+	debuglog.Printf("[recreateWorkspace] repoPath=%q sessName=%q atRev=%q parentRev=%q", repoPath, sessName, atRev, parentRev)
+	wsPath, err := m.createWorkspace(repoPath, sessName, jj.WorkspaceOptions{AtRev: atRev, ParentRev: parentRev})
+	if err != nil {
 		return "", fmt.Errorf("recreating jj workspace: %w", err)
 	}
 	if subProjectDir != "" {

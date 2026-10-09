@@ -41,6 +41,17 @@ func TestParseCLIArgs(t *testing.T) {
 			want:    cliRequest{Op: "close", Target: "anna-8cc7"},
 		},
 		{
+			name:    "gc",
+			command: "gc",
+			want:    cliRequest{Op: "gc"},
+		},
+		{
+			name:    "gc dry run",
+			command: "gc",
+			args:    []string{"--dry-run"},
+			want:    cliRequest{Op: "gc", DryRun: true},
+		},
+		{
 			name:    "hook status",
 			command: "hook",
 			args:    []string{"status", "waiting_approval", "--session", "abc"},
@@ -95,6 +106,7 @@ func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 		{name: "close without target", command: "close"},
 		{name: "close with two targets", command: "close", args: []string{"a", "b"}},
 		{name: "unknown flag", command: "new", args: []string{"--prompt", "hi"}},
+		{name: "gc with positional argument", command: "gc", args: []string{"extra"}},
 		{name: "hook without event", command: "hook"},
 		{name: "hook unknown event", command: "hook", args: []string{"bogus", "--session", "abc"}},
 		{name: "hook status without status", command: "hook", args: []string{"status"}},

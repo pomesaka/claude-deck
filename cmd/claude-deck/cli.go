@@ -21,6 +21,7 @@ type cliRequest struct {
 	Dir         string // new
 	NoWorkspace bool   // new
 	Target      string // close
+	DryRun      bool   // gc
 	// hook
 	HookEvent       string
 	Session         string
@@ -35,6 +36,7 @@ var cliCommands = map[string]func(args []string) (cliRequest, error){
 	"new":   parseNewArgs,
 	"list":  parseListArgs,
 	"close": parseCloseArgs,
+	"gc":    parseGCArgs,
 	"hook":  parseHookArgs,
 }
 
@@ -57,6 +59,27 @@ func infoFromSnapshot(s session.Snapshot) SessionInfo {
 		Status:          s.Status.ID(),
 		ClaudeSessionID: string(s.ClaudeSessionID),
 	}
+}
+
+// GCInfo is the JSON form of what gc removed, or with dry_run would remove.
+type GCInfo struct {
+	DryRun            bool              `json:"dry_run"`
+	Workspaces        []GCWorkspaceInfo `json:"workspaces"`
+	ForgottenProjects int               `json:"forgotten_projects"`
+}
+
+// GCWorkspaceInfo is one workspace directory in GCInfo.
+type GCWorkspaceInfo struct {
+	Path    string `json:"path"`
+	Warning string `json:"warning,omitempty"`
+}
+
+func infoFromGCReport(r session.GCReport) GCInfo {
+	info := GCInfo{DryRun: r.DryRun, Workspaces: make([]GCWorkspaceInfo, len(r.Workspaces)), ForgottenProjects: r.ForgottenProjects}
+	for i, ws := range r.Workspaces {
+		info.Workspaces[i] = GCWorkspaceInfo{Path: ws.Path, Warning: ws.Warning}
+	}
+	return info
 }
 
 // runCLI runs one subcommand.
@@ -125,6 +148,12 @@ func runCLI(name string, args []string) error {
 			return err
 		}
 		return printJSON(infoFromSnapshot(sess.Snapshot()))
+	case "gc":
+		report, err := mgr.CollectGarbage(req.DryRun)
+		if err != nil {
+			return err
+		}
+		return printJSON(infoFromGCReport(report))
 	default:
 		return fmt.Errorf("unknown command %q", req.Op)
 	}
@@ -181,6 +210,23 @@ func parseCloseArgs(args []string) (cliRequest, error) {
 		return cliRequest{}, fmt.Errorf("close: specify exactly one session ID or name")
 	}
 	return cliRequest{Op: "close", Target: fs.Arg(0)}, nil
+}
+
+func parseGCArgs(args []string) (cliRequest, error) {
+	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "Usage: claude-deck gc [--dry-run]")
+		fmt.Fprintln(fs.Output(), "どのセッションのものでもないワークスペースと、消えたワークスペースについての Claude Code の記録を消し、JSON で返す。")
+		fs.PrintDefaults()
+	}
+	dryRun := fs.Bool("dry-run", false, "消さずに、消す対象だけを返す")
+	if err := fs.Parse(args); err != nil {
+		return cliRequest{}, err
+	}
+	if fs.NArg() > 0 {
+		return cliRequest{}, fmt.Errorf("gc: unexpected arguments: %v", fs.Args())
+	}
+	return cliRequest{Op: "gc", DryRun: *dryRun}, nil
 }
 
 // Hook events accepted by `claude-deck hook`.

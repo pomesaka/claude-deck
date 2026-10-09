@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pomesaka/claude-deck/internal/agentruntime"
+	"github.com/pomesaka/claude-deck/internal/jj"
 	"github.com/pomesaka/claude-deck/internal/store"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
@@ -489,6 +490,251 @@ func TestPruneOldSessions(t *testing.T) {
 	}
 	if want := []string{"newest", "old-closing", "old-running"}; !slices.Equal(ids, want) {
 		t.Errorf("remaining = %v, want %v", ids, want)
+	}
+}
+
+// A pruned session cannot be resumed, so its workspace and the runtime's records
+// about it go with the row.
+func TestPruneOldSessions_DiscardsWorkspace(t *testing.T) {
+	const snapshot = "log --no-graph --color=never -r @ -T change_id"
+	const snapshotParent = "log --no-graph --color=never -r @- -T change_id"
+
+	tests := []struct {
+		name          string
+		workspaceName string // the pruned row's WorkspaceName
+		newestName    string // the Name of the row that stays
+		jjLogFails    bool
+		wantDir       bool
+		wantJJ        []string
+		wantForgotten bool
+	}{
+		{
+			name:          "session that still has its workspace",
+			workspaceName: "ws",
+			newestName:    "other",
+			wantDir:       false,
+			wantJJ:        []string{snapshot, snapshotParent, "--ignore-working-copy workspace forget ws"},
+			wantForgotten: true,
+		},
+		{
+			name:          "closed session: the workspace is already gone from the row",
+			workspaceName: "",
+			newestName:    "other",
+			wantDir:       true,
+			wantJJ:        nil,
+			wantForgotten: true,
+		},
+		{
+			name:          "a remaining row has the same workspace",
+			workspaceName: "ws",
+			newestName:    "ws",
+			wantDir:       true,
+			wantJJ:        nil,
+			wantForgotten: false,
+		},
+		{
+			name:          "snapshot fails: the workspace is kept",
+			workspaceName: "ws",
+			newestName:    "other",
+			jjLogFails:    true,
+			wantDir:       true,
+			wantJJ:        []string{snapshot},
+			wantForgotten: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _ := newTestManager(t)
+			m.config.MaxSessions = 1
+
+			jjCalls := useFakeJJ(t, m, tt.jjLogFails)
+
+			repo := t.TempDir()
+			wsRoot := m.workspaceRoot(repo, "ws")
+			if err := os.MkdirAll(wsRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// The workspace and what is below it are forgotten, a sibling is not.
+			forgotten := false
+			m.config.ForgetProjectsFunc = func(match func(dir string) bool, dryRun bool) (int, error) {
+				forgotten = match(wsRoot) && match(filepath.Join(wsRoot, "sub")) && !match(wsRoot+"x") && !dryRun
+				return 0, nil
+			}
+			at := func(sec int64) time.Time { return time.Unix(1_700_000_000+sec, 0) }
+			for _, r := range []store.Record{
+				{ID: "newest", Name: tt.newestName, RepoPath: repo, Status: StatusCompleted.ID(), LastActivity: at(9)},
+				{ID: "old", Name: "ws", RepoPath: repo, WorkspaceName: tt.workspaceName, Status: StatusCompleted.ID(), LastActivity: at(1)},
+			} {
+				if err := m.store.Insert(r); err != nil {
+					t.Fatalf("Insert: %v", err)
+				}
+			}
+
+			m.pruneOldSessions()
+
+			if _, err := m.store.Get("old"); err == nil {
+				t.Error("old row was not pruned")
+			}
+			_, statErr := os.Stat(wsRoot)
+			if gotDir := statErr == nil; gotDir != tt.wantDir {
+				t.Errorf("workspace directory exists = %v, want %v", gotDir, tt.wantDir)
+			}
+			if gotJJ := jjCalls(); !slices.Equal(gotJJ, tt.wantJJ) {
+				t.Errorf("jj calls = %q, want %q", gotJJ, tt.wantJJ)
+			}
+			if forgotten != tt.wantForgotten {
+				t.Errorf("forgotten = %v, want %v", forgotten, tt.wantForgotten)
+			}
+		})
+	}
+}
+
+// useFakeJJ makes m run a jj that only records its arguments, and fails
+// `jj log` when logFails is set. The returned function reads the calls so far.
+func useFakeJJ(t *testing.T, m *Manager, logFails bool) func() []string {
+	t.Helper()
+	jjLog := filepath.Join(t.TempDir(), "jj.log")
+	fakeJJ := filepath.Join(t.TempDir(), "jj")
+	script := "#!/bin/sh\necho \"$*\" >> \"$FAKE_JJ_LOG\"\nif [ \"$1\" = log ]; then exit \"$FAKE_JJ_LOG_EXIT\"; fi\n"
+	if err := os.WriteFile(fakeJJ, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_JJ_LOG", jjLog)
+	t.Setenv("FAKE_JJ_LOG_EXIT", "0")
+	if logFails {
+		t.Setenv("FAKE_JJ_LOG_EXIT", "1")
+	}
+	m.config.JJ = &jj.Runner{Command: fakeJJ}
+	return func() []string {
+		data, err := os.ReadFile(jjLog)
+		if err != nil {
+			return nil
+		}
+		return strings.Split(strings.TrimSpace(string(data)), "\n")
+	}
+}
+
+func TestCollectGarbage(t *testing.T) {
+	const snapshot = "log --no-graph --color=never -r @ -T change_id"
+	const snapshotParent = "log --no-graph --color=never -r @- -T change_id"
+	const forgetOrphan = "--ignore-working-copy workspace forget orphan"
+	old := time.Now().Add(-2 * time.Hour)
+
+	tests := []struct {
+		name       string
+		dryRun     bool
+		jjLogFails bool
+		// wantLeft are the workspace names still on disk afterwards.
+		wantLeft     []string
+		wantReported []string
+		wantJJ       []string
+		// wantForgotten are the project records the runtime is asked to drop.
+		wantForgotten []string
+	}{
+		{
+			name:          "removes workspaces without a row",
+			wantLeft:      []string{"fresh", "owned"},
+			wantReported:  []string{"orphan", "plain"},
+			wantJJ:        []string{snapshot, snapshotParent, forgetOrphan},
+			wantForgotten: []string{"gone", "gone/sub", "orphan", "plain"},
+		},
+		{
+			name:          "dry run removes nothing",
+			dryRun:        true,
+			wantLeft:      []string{"fresh", "orphan", "owned", "plain"},
+			wantReported:  []string{"orphan", "plain"},
+			wantJJ:        nil,
+			wantForgotten: []string{"gone", "gone/sub", "orphan", "plain"},
+		},
+		{
+			name:          "snapshot fails: the workspace is removed anyway",
+			jjLogFails:    true,
+			wantLeft:      []string{"fresh", "owned"},
+			wantReported:  []string{"orphan", "plain"},
+			wantJJ:        []string{snapshot, forgetOrphan},
+			wantForgotten: []string{"gone", "gone/sub", "orphan", "plain"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _ := newTestManager(t)
+			jjCalls := useFakeJJ(t, m, tt.jjLogFails)
+
+			repo := t.TempDir()
+			repoDir := filepath.Dir(m.workspaceRoot(repo, "x"))
+			// owned: a closed session's row has this name. orphan: a jj workspace with no row.
+			// plain: no row and not a jj workspace. fresh: no row yet, just created.
+			for _, name := range []string{"owned", "orphan", "plain", "fresh"} {
+				if err := os.MkdirAll(filepath.Join(repoDir, name), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Mkdir(filepath.Join(repoDir, "orphan", ".jj"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"owned", "orphan", "plain"} {
+				if err := os.Chtimes(filepath.Join(repoDir, name), old, old); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := m.store.Insert(store.Record{ID: "s", Name: "owned", RepoPath: repo, Status: StatusCompleted.ID()}); err != nil {
+				t.Fatalf("Insert: %v", err)
+			}
+
+			// Records the runtime holds: for each workspace, for one that is already
+			// gone (and a directory below it), and for directories outside the workspaces.
+			candidates := []string{"fresh", "gone", "gone/sub", "orphan", "owned", "plain"}
+			var forgotten []string
+			var forgetDryRun bool
+			m.config.ForgetProjectsFunc = func(match func(dir string) bool, dryRun bool) (int, error) {
+				forgetDryRun = dryRun
+				for _, c := range candidates {
+					if match(filepath.Join(repoDir, c)) {
+						forgotten = append(forgotten, c)
+					}
+				}
+				if match(repo) || match(repoDir) || match(m.config.DataDir) {
+					t.Error("a directory that is not a workspace matched")
+				}
+				return len(forgotten), nil
+			}
+
+			report, err := m.CollectGarbage(tt.dryRun)
+			if err != nil {
+				t.Fatalf("CollectGarbage: %v", err)
+			}
+
+			entries, err := os.ReadDir(repoDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var left []string
+			for _, e := range entries {
+				left = append(left, e.Name())
+			}
+			if !slices.Equal(left, tt.wantLeft) {
+				t.Errorf("left on disk = %v, want %v", left, tt.wantLeft)
+			}
+			var reported []string
+			for _, ws := range report.Workspaces {
+				reported = append(reported, filepath.Base(ws.Path))
+				if ws.Warning != "" {
+					t.Errorf("%s: warning %q", ws.Path, ws.Warning)
+				}
+			}
+			if !slices.Equal(reported, tt.wantReported) {
+				t.Errorf("reported = %v, want %v", reported, tt.wantReported)
+			}
+			if gotJJ := jjCalls(); !slices.Equal(gotJJ, tt.wantJJ) {
+				t.Errorf("jj calls = %q, want %q", gotJJ, tt.wantJJ)
+			}
+			if !slices.Equal(forgotten, tt.wantForgotten) {
+				t.Errorf("forgotten = %v, want %v", forgotten, tt.wantForgotten)
+			}
+			if report.ForgottenProjects != len(tt.wantForgotten) || report.DryRun != tt.dryRun || forgetDryRun != tt.dryRun {
+				t.Errorf("report = %+v (forget dryRun %v), want %d forgotten, dry run %v", report, forgetDryRun, len(tt.wantForgotten), tt.dryRun)
+			}
+		})
 	}
 }
 

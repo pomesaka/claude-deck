@@ -144,6 +144,7 @@ store と tmux を直接操作するので、TUI が起動していなくても�
 | `claude-deck new [--dir DIR] [--no-workspace]` | `n`（`--no-workspace` は C-Enter） |
 | `claude-deck list` | 一覧表示 |
 | `claude-deck close <ID\|NAME>` | `x` |
+| `claude-deck gc [--dry-run]` | なし。どのセッションのものでもないワークスペースと、消えたワークスペースについての `~/.claude.json` の登録を消す |
 
 内部用に `claude-deck hook status|session-start|exited --session <ID>` がある。deck-status プラグインとウィンドウのコマンドが呼ぶもので、手で実行するものではない。
 
@@ -184,6 +185,7 @@ codex = "codex"
 - バイナリに埋め込まれ、claude-deck の起動時に `{DataDir}/plugin/` へ書き出される（内容が同じファイルは書き換えない）
 - claude-deck が起動する全セッションに `--plugin-dir {DataDir}/plugin` を渡す。ユーザーがプラグインを別途インストールする必要はない
 - イベントとステータスの対応は [docs/hooks.md](docs/hooks.md)
+- セッション開始時に、claude-deck の CLI が使えることをモデルに伝える。使い方は同梱のスキル `deck-status:claude-deck`（`deckmod/skills/claude-deck/SKILL.md`）にあるので、CLI を変えたらスキルも直す
 
 リポジトリの `plugin/` と `.claude-plugin/marketplace.json` は claude-deck が読まない。
 
@@ -238,7 +240,7 @@ add_dirs = ["../shared-lib", "/absolute/path/to/docs"]
 
 ### 上限値（デフォルト値、config.toml の `[session]` で変更可）
 
-- セッション数: 30（LRU で古いものを prune）
+- セッション数: 30（超えると終了済みの古いものを prune。残っているワークスペースと `~/.claude.json` の登録も消す。[docs/data-lifecycle.md](docs/data-lifecycle.md)）
 - JSONL LogEntries: 500 件
 - ディスカバリ対象: 過去 14 日間
 - メタデータ更新間隔: 5 秒

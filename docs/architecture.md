@@ -85,6 +85,7 @@ User 'n' キー / claude-deck new
     2. withWorkspace なら:
        jj.CreateWorkspaceAt(repo, name, path, extraSymlinks)  // ワークスペース作成
        extraSymlinks は config.toml [projects] で指定された .env 等の symlink リスト
+       claudecode.EnsureTrusted(path)   // trust ダイアログを出さない（Claude のみ）
        サブプロジェクト対応: workingDir の相対パスをワークスペース内に対応付け
     3. startNewSession:
        a. store.Insert(row)            // launching_at（起動中の印）を付けて先に行を作る

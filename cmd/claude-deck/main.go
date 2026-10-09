@@ -289,10 +289,14 @@ func buildManagerConfig(cfg *config.Config) (session.ManagerConfig, error) {
 	runtime := agentruntime.Runtime(agentruntime.ClaudeRuntime{Command: cfg.Commands.Claude})
 	transcriptReader := usage.NewReader("")
 	pluginDir := ""
+	var trustWorkspace func(wsPath string) error
+	var forgetProjects func(match func(dir string) bool, dryRun bool) (int, error)
 	if cfg.RuntimeProvider() == string(agentruntime.ProviderCodex) {
 		runtime = agentruntime.CodexRuntime{Command: cfg.Commands.Codex}
 		transcriptReader = usage.NewCodexReader("")
 	} else {
+		trustWorkspace = claudecode.EnsureTrusted
+		forgetProjects = claudecode.ForgetProjects
 		pluginDir, err = deckmod.Install(filepath.Join(cfg.DataDir, "plugin"))
 		if err != nil {
 			return session.ManagerConfig{}, err
@@ -316,7 +320,9 @@ func buildManagerConfig(cfg *config.Config) (session.ManagerConfig, error) {
 			CacheReadPerMTok:  cfg.Pricing.CacheReadPerMTok,
 		},
 		WorkspaceSymlinksFunc: cfg.WorkspaceSymlinks,
-		AddDirsFunc:           cfg.ResolvedAddDirs,
+		TrustWorkspaceFunc:    trustWorkspace,
+		ForgetProjectsFunc:    forgetProjects,
+		AddDirsFunc:          cfg.ResolvedAddDirs,
 		DeckCommand:           deckCommand,
 		PluginDir:             pluginDir,
 		TmuxCommand:           cfg.Tmux.Command,
