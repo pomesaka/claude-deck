@@ -119,7 +119,9 @@ All sections are optional. Unspecified values use built-in defaults.
 
 ```toml
 [defaults]
-permission_mode = "default"
+# Passed to every session as --permission-mode. Unset (the default): no flag,
+# so Claude Code's own permissions.defaultMode in settings.json decides.
+permission_mode = "plan"
 
 [ghostty]
 command = "ghostty"

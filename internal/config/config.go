@@ -91,6 +91,11 @@ type PricingConfig struct {
 
 // DefaultConfig holds default settings.
 type DefaultConfig struct {
+	// PermissionMode is passed to every session claude-deck starts
+	// (--permission-mode for Claude Code, --ask-for-approval for Codex).
+	// WHY 既定は空: 空ならフラグを付けず、ランタイム自身の設定（Claude Code なら
+	// settings.json の permissions.defaultMode）に任せる。既定値を持つと、利用者が
+	// ランタイムの側で選んだモードを毎回上書きする。
 	PermissionMode string `toml:"permission_mode"`
 }
 
@@ -151,9 +156,6 @@ func DefaultDataDir() string {
 // DefaultConfig returns the default configuration.
 func Default() *Config {
 	return &Config{
-		Defaults: DefaultConfig{
-			PermissionMode: "default",
-		},
 		Discovery: DiscoveryConfig{
 			Excludes: []string{"Library", ".cache", "node_modules", ".git"},
 		},

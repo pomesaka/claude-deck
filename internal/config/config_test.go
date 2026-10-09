@@ -8,8 +8,8 @@ import (
 
 func TestDefault(t *testing.T) {
 	cfg := Default()
-	if cfg.Defaults.PermissionMode != "default" {
-		t.Errorf("PermissionMode = %q, want 'default'", cfg.Defaults.PermissionMode)
+	if cfg.Defaults.PermissionMode != "" {
+		t.Errorf("PermissionMode = %q, want empty (the runtime's own setting decides)", cfg.Defaults.PermissionMode)
 	}
 	if cfg.Ghostty.Command != "ghostty" {
 		t.Errorf("Ghostty.Command = %q, want 'ghostty'", cfg.Ghostty.Command)
@@ -68,8 +68,8 @@ func TestLoadFrom_NonExistent(t *testing.T) {
 		t.Fatalf("expected no error for non-existent file, got: %v", err)
 	}
 	// Should return defaults
-	if cfg.Defaults.PermissionMode != "default" {
-		t.Errorf("expected default PermissionMode, got %q", cfg.Defaults.PermissionMode)
+	if cfg.Defaults.PermissionMode != "" {
+		t.Errorf("expected empty PermissionMode, got %q", cfg.Defaults.PermissionMode)
 	}
 }
 
