@@ -19,6 +19,7 @@ func TestStatus_String(t *testing.T) {
 		{StatusError, "エラー"},
 		{StatusIdle, "アイドル"},
 		{StatusUnmanaged, "外部"},
+		{StatusSubagentRunning, "サブエージェント実行中"},
 		{Status(99), "Unknown"},
 	}
 	for _, tt := range tests {
@@ -40,6 +41,7 @@ func TestStatus_IsTerminal(t *testing.T) {
 		{StatusError, true},
 		{StatusIdle, false},
 		{StatusUnmanaged, false},
+		{StatusSubagentRunning, false},
 	}
 	for _, tt := range tests {
 		if got := tt.status.IsTerminal(); got != tt.want {
@@ -60,6 +62,7 @@ func TestStatus_NeedsAttention(t *testing.T) {
 		{StatusError, false},
 		{StatusIdle, false},
 		{StatusUnmanaged, false},
+		{StatusSubagentRunning, false},
 	}
 	for _, tt := range tests {
 		if got := tt.status.NeedsAttention(); got != tt.want {
@@ -236,6 +239,7 @@ func TestDisplayChannel_Derivation(t *testing.T) {
 		{StatusRunning, DisplayTmux, true},
 		{StatusWaitingApproval, DisplayTmux, true},
 		{StatusWaitingAnswer, DisplayTmux, true},
+		{StatusSubagentRunning, DisplayTmux, true},
 		{StatusCompleted, DisplayJSONL, false},
 		{StatusError, DisplayJSONL, false},
 		{StatusUnmanaged, DisplayJSONL, false},

@@ -10,7 +10,7 @@ import (
 func StatusFromID(id string) (Status, bool) {
 	for _, s := range []Status{
 		StatusRunning, StatusWaitingApproval, StatusWaitingAnswer,
-		StatusCompleted, StatusError, StatusIdle, StatusUnmanaged,
+		StatusCompleted, StatusError, StatusIdle, StatusUnmanaged, StatusSubagentRunning,
 	} {
 		if s.ID() == id {
 			return s, true

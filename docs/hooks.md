@@ -30,9 +30,10 @@ CLI のサブコマンドやフラグを変えたら、スキルも同時に直�
 | `classic.SessionStart`（`agent_id` なし） | `hook session-start --claude-session-id <id> --source <source>` | SessionChain を更新する。モデルに claude-deck の案内を渡す |
 | `turn.start` | `hook status running` | サブエージェントの実行では発火しないので、メインループの開始を表す |
 | `tool.call`（メイン） | `running`（待ち状態のときは変えない）。`AskUserQuestion` のときは `waiting_answer`。実行中のツール呼び出しがすべて返ったら `running` | `next(e)` は承認ダイアログと質問への回答を待つので、返った時点でユーザーが答えている。並行して走る別の呼び出しの承認ダイアログが開いている間は、待ち状態を消さない |
-| `tool.call`（サブエージェント） | 実行中のツール呼び出しがすべて返り、直前が `waiting_approval` / `waiting_answer` なら `running` | サブエージェントの承認ダイアログもユーザーを待たせる |
+| `tool.call`（サブエージェント） | 実行中のツール呼び出しがすべて返り、直前が `waiting_approval` / `waiting_answer` なら `running`。メインのターンが終わった後なら `subagent_running` | サブエージェントの承認ダイアログもユーザーを待たせる |
 | `classic.PermissionRequest` | `waiting_approval`。`AskUserQuestion` のときは `waiting_answer` | サブエージェントでも書く |
-| `turn.complete`（メイン） | `idle` | 拒否・中断・API エラーでも発火する |
+| `turn.complete`（メイン） | `idle`。動いているサブエージェントがあれば `subagent_running` | 拒否・中断・API エラーでも発火する。サブエージェントは `$.agent.list()` の `pending` / `running` / `waiting` を数える（[ADR-017](adr/017-subagent-running-status.md)） |
+| `turn.complete`（サブエージェント） | 直前が `subagent_running` で、動いているサブエージェントが無くなったら `idle` | メインのターンが終わった後も、バックグラウンドのサブエージェントは動き続ける |
 | `session.measure`（`changed` に `rateLimits` があるとき） | `hook rate-limits <JSON>` | store ではなく `{DataDir}/rate-limits.json` に書く（下の節） |
 
 終了は別経路で、プラグインは関与しない（[ウィンドウの終了検知](architecture.md#プロセス終了の検知)）。

@@ -20,6 +20,8 @@ func TestApplyHookStatus(t *testing.T) {
 		{"idle to running", "idle", StatusRunning, "running", true},
 		{"running to waiting approval", "running", StatusWaitingApproval, "waiting_approval", true},
 		{"waiting answer to idle", "waiting_answer", StatusIdle, "idle", true},
+		{"running to subagent running", "running", StatusSubagentRunning, "subagent_running", true},
+		{"subagent running to idle", "subagent_running", StatusIdle, "idle", true},
 		{"same status is not a change", "running", StatusRunning, "running", false},
 		{"completed is not revived by a late hook", "completed", StatusRunning, "completed", false},
 		{"error is not revived by a late hook", "error", StatusIdle, "error", false},

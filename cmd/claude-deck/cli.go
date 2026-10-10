@@ -322,12 +322,13 @@ var hookStatuses = map[string]bool{
 	session.StatusIdle.ID():            true,
 	session.StatusWaitingApproval.ID(): true,
 	session.StatusWaitingAnswer.ID():   true,
+	session.StatusSubagentRunning.ID(): true,
 }
 
 // parseHookArgs parses `hook <event> [args] --session ID`. These are called by
 // the deck-status plugin and by the pane's exit command, not by people.
 func parseHookArgs(args []string) (cliRequest, error) {
-	usage := "Usage: claude-deck hook status <running|idle|waiting_approval|waiting_answer> | session-start --claude-session-id ID --source SOURCE | exited | rate-limits <JSON>  [--session DECK_ID]"
+	usage := "Usage: claude-deck hook status <running|idle|waiting_approval|waiting_answer|subagent_running> | session-start --claude-session-id ID --source SOURCE | exited | rate-limits <JSON>  [--session DECK_ID]"
 	if len(args) == 0 {
 		return cliRequest{}, fmt.Errorf("hook: missing event\n%s", usage)
 	}

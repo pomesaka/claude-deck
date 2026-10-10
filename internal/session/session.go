@@ -17,6 +17,9 @@ const (
 	StatusError
 	StatusIdle
 	StatusUnmanaged // 外部セッション（claude-deck が起動していない Claude Code セッション）
+	// StatusSubagentRunning: the main loop has ended its turn while subagents it
+	// started in the background still run. The session works without the user.
+	StatusSubagentRunning
 )
 
 func (s Status) String() string {
@@ -35,6 +38,8 @@ func (s Status) String() string {
 		return "アイドル"
 	case StatusUnmanaged:
 		return "外部"
+	case StatusSubagentRunning:
+		return "サブエージェント実行中"
 	default:
 		return "Unknown"
 	}
@@ -58,6 +63,8 @@ func (s Status) ID() string {
 		return "idle"
 	case StatusUnmanaged:
 		return "unmanaged"
+	case StatusSubagentRunning:
+		return "subagent_running"
 	default:
 		return "unknown"
 	}
@@ -386,7 +393,7 @@ func (s *Session) sortTime() time.Time {
 //
 //	0: Unmanaged / Completed / Error（非アクティブ）
 //	1: Idle
-//	2: Running
+//	2: Running / SubagentRunning
 //	3: WaitingApproval / WaitingAnswer（要手動介入）
 func (s *Session) sortGroup() int {
 	s.mu.RLock()
@@ -394,7 +401,7 @@ func (s *Session) sortGroup() int {
 	switch s.Status {
 	case StatusWaitingApproval, StatusWaitingAnswer:
 		return 3
-	case StatusRunning:
+	case StatusRunning, StatusSubagentRunning:
 		return 2
 	case StatusIdle:
 		return 1

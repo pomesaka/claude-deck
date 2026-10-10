@@ -54,7 +54,8 @@ Claude Code 側が割り振る UUID。`/clear` のたびに新しい ID が生�
 | 値 | 意味 | 遷移先 |
 |----|------|--------|
 | Idle | プロセス起動済みだが Claude が処理中でない (Hook turn.complete) | Running, Completed, Error |
-| Running | Claude が思考/実行中 (Hook turn.start / tool.call) | Idle, Waiting*, Completed, Error |
+| Running | Claude が思考/実行中 (Hook turn.start / tool.call) | Idle, SubagentRunning, Waiting*, Completed, Error |
+| SubagentRunning | メインのターンは終わったが、バックグラウンドのサブエージェントが動いている (Hook turn.complete) | Running, Idle, Waiting*, Completed, Error |
 | WaitingApproval | ツール承認待ち (Hook PermissionRequest) | Running, Idle, Completed, Error |
 | WaitingAnswer | ユーザー質問待ち (Hook PermissionRequest / AskUserQuestion の tool.call) | Running, Idle, Completed, Error |
 | Completed | プロセス終了 (ウィンドウのコマンドの `hook exited` / close / ウィンドウ消失の検知) | Idle (Resume 経由) |
@@ -69,7 +70,7 @@ Claude Code 側が割り振る UUID。`/clear` のたびに新しい ID が生�
 
 | 値 | 条件 | 表示内容 |
 |----|------|----------|
-| DisplayTmux | 未終了 (Idle / Running / Waiting*) | セッションの tmux ウィンドウ |
+| DisplayTmux | 未終了 (Idle / Running / SubagentRunning / Waiting*) | セッションの tmux ウィンドウ |
 | DisplayJSONL | 終了済み (Completed / Error) または外部 (Unmanaged) | preview ウィンドウの JSONL 構造化ログ |
 
 **型**: `session.DisplayChannel`

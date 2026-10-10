@@ -53,6 +53,7 @@ type ThemeConfig struct {
 	Text            string `toml:"text"`
 	TextDim         string `toml:"text_dim"`
 	StatusIdle      string `toml:"status_idle"`
+	StatusSubagent  string `toml:"status_subagent"`
 	StatusAttention string `toml:"status_attention"`
 	StatusDone      string `toml:"status_done"`
 	DiffAdd         string `toml:"diff_add"`
@@ -155,6 +156,7 @@ func Default() *Config {
 			Text:            "#CDD6F4",
 			TextDim:         "#6C7086",
 			StatusIdle:      "#808898",
+			StatusSubagent:  "#60A5FA",
 			StatusAttention: "#C08552",
 			StatusDone:      "#333346",
 			DiffAdd:         "#A6E3A1",

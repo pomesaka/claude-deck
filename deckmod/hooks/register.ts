@@ -1,7 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 
 // Statuses as the store spells them (session.Status.ID in Go).
-type DeckStatus = 'running' | 'idle' | 'waiting_approval' | 'waiting_answer'
+type DeckStatus = 'running' | 'idle' | 'waiting_approval' | 'waiting_answer' | 'subagent_running'
 
 const ASK_USER_QUESTION = 'AskUserQuestion'
 const HOOK_TIMEOUT_MS = 5_000
@@ -21,6 +21,10 @@ let lastStatus: DeckStatus | undefined
 // WHY 数える: 並行に走るツール呼び出しの 1 つが終わった時点で Running に戻すと、
 // 別の呼び出しの承認ダイアログが開いたままでも Approve 待ちが消える。
 let inFlight = 0
+
+// Whether the main loop is inside a turn. A subagent started in the background
+// outlives the turn that started it, and its events arrive while this is false.
+let inMainTurn = false
 
 /**
  * The claude-deck binary and this session's deck ID. claude-deck sets both
@@ -81,6 +85,26 @@ function isWaiting(): boolean {
   return lastStatus === 'waiting_approval' || lastStatus === 'waiting_answer'
 }
 
+/**
+ * Whether a subagent has work left.
+ * WHY 自分で数えず $.agent.list() に聞く: 開始（agent.spawn）と終了（turn.complete）を数えると、
+ * Mod の読み込み直しで数が失われ、終了を 1 つ取りこぼすだけで実行中の表示が残り続ける。
+ * 注意: ワークフローのエージェントは一覧に出ない（型定義 AgentLoop.agentId の説明）。
+ */
+async function hasActiveSubagent($: EngineInterface): Promise<boolean> {
+  try {
+    const agents = await $.agent.list()
+    return agents.some(a => a.status === 'pending' || a.status === 'running' || a.status === 'waiting')
+  } catch {
+    return false
+  }
+}
+
+/** The status of a session whose main loop is not in a turn. */
+async function restingStatus($: EngineInterface): Promise<DeckStatus> {
+  return (await hasActiveSubagent($)) ? 'subagent_running' : 'idle'
+}
+
 export const register: Register = on => {
   // The Claude session ID is linked here: on startup, resume and fork the first one,
   // on /clear and compact the new one. Those also drop the earlier context, so
@@ -95,6 +119,7 @@ export const register: Register = on => {
 
   // A subagent's run raises no turn.start, so this is the main loop.
   on('turn.start', async ($, e, next) => {
+    inMainTurn = true
     await setStatus($, 'running')
     return next(e)
   })
@@ -103,6 +128,7 @@ export const register: Register = on => {
   // the user has answered and Claude is working again.
   on('tool.call', async ($, e, next) => {
     const isMain = e.agentId === undefined
+    if (isMain) inMainTurn = true
     inFlight++
     try {
       if (isMain && e.tool === ASK_USER_QUESTION) {
@@ -116,7 +142,8 @@ export const register: Register = on => {
       // A subagent's approval dialog also waits on the user (PermissionRequest below),
       // so its end clears a wait too. Otherwise a subagent leaves the main loop's status alone.
       if (inFlight === 0 && (isMain || isWaiting())) {
-        await setStatus($, 'running')
+        // A background subagent's dialog was answered after the main loop's turn ended.
+        await setStatus($, inMainTurn ? 'running' : 'subagent_running')
       }
     }
   }).catch(($, e, next) => next(e))
@@ -132,9 +159,15 @@ export const register: Register = on => {
   // WHY classic.Stop でなく turn.complete: 承認ダイアログで拒否したターンは Stop を発火しない
   // （Claude Code 2.1.287 と 2.1.295 で確認）。turn.complete は reason に answer / aborted / refusal / error を持ち、
   // 中断や API エラーで終わったターンでも発火する（Mods の型定義 TurnCompleteReason）。
+  // WHY サブエージェントのターンでも見る: バックグラウンドのサブエージェントは、メインのターンが
+  // 終わった後も動き続ける。メインが止まっている間に最後の 1 つが終わったら idle にする。
+  // この時点で、終わったエージェントは一覧で completed になっている（Claude Code 2.1.296 で確認）。
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
-      await setStatus($, 'idle')
+      inMainTurn = false
+      await setStatus($, await restingStatus($))
+    } else if (lastStatus === 'subagent_running') {
+      await setStatus($, await restingStatus($))
     }
     return next(e)
   })

@@ -104,9 +104,13 @@ hook は環境変数の deck ID を使って store の行を特定するので�
 Idle ←→ Running ←→ WaitingApproval / WaitingAnswer
   ↓                        ↓
 Completed / Error      (hook: turn.complete → Idle)
+
+Running → SubagentRunning → Idle
 ```
 
-- Running/WaitingApproval/Answer/Idle: deck-status プラグインが `claude-deck hook status` で store に書く（[docs/hooks.md](docs/hooks.md)）
+- SubagentRunning: メインのターンは終わり、バックグラウンドのサブエージェントが動いている。最後の 1 つが終わると Idle、メインが動き出すと Running（[ADR-017](docs/adr/017-subagent-running-status.md)）
+
+- Running/SubagentRunning/WaitingApproval/Answer/Idle: deck-status プラグインが `claude-deck hook status` で store に書く（[docs/hooks.md](docs/hooks.md)）
 - Completed: ウィンドウのコマンド末尾の `claude-deck hook exited`、`x` / `claude-deck close`、ウィンドウ消失の検知のいずれか
 - 遷移の規則は `internal/session/transitions.go` の純関数。どのプロセスも store のトランザクション内で適用する。`Status` を書くのはこのファイルだけ（[ADR-015](docs/adr/015-cleanup-after-store-migration.md)）
 

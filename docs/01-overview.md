@@ -156,7 +156,7 @@ TUI は Session の Snapshot を通じてデータを読む。
        ▼ 対話中
   Hook: turn.start / tool.call   Status: Running
   Hook: PermissionRequest        Status: WaitingApproval / WaitingAnswer
-  Hook: turn.complete            Status: Idle
+  Hook: turn.complete            Status: Idle / SubagentRunning
        │
        ▼ 終了
   ペインで claude-deck hook exited   Status: Completed

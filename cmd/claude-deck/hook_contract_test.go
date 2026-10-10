@@ -77,7 +77,7 @@ func TestHookContract_Statuses(t *testing.T) {
 	}
 	slices.Sort(got)
 
-	want := []string{"idle", "running", "waiting_answer", "waiting_approval"}
+	want := []string{"idle", "running", "subagent_running", "waiting_answer", "waiting_approval"}
 	if !slices.Equal(got, want) {
 		t.Errorf("plugin statuses = %v, want %v", got, want)
 	}

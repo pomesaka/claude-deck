@@ -123,6 +123,8 @@ func sessionStatusIcon(s session.Status) string {
 		return statusRunningStyle.Render("●")
 	case session.StatusIdle:
 		return statusIdleStyle.Render("●")
+	case session.StatusSubagentRunning:
+		return statusSubagentStyle.Render("●")
 	case session.StatusWaitingApproval, session.StatusWaitingAnswer:
 		return statusApproveStyle.Render("●")
 	case session.StatusCompleted:
@@ -327,6 +329,8 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 		statusIcon = selBg(statusRunningStyle, selected).Render("●")
 	case session.StatusIdle:
 		statusIcon = selBg(statusIdleStyle, selected).Render("●")
+	case session.StatusSubagentRunning:
+		statusIcon = selBg(statusSubagentStyle, selected).Render("●")
 	case session.StatusWaitingApproval:
 		statusIcon = selBg(statusApproveStyle, selected).Render("●")
 	case session.StatusWaitingAnswer:

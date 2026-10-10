@@ -34,6 +34,7 @@ var (
 	// Status badge styles
 	statusRunningStyle  = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)
 	statusIdleStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#808898")).Bold(true)
+	statusSubagentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#60A5FA")).Bold(true)
 	statusApproveStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#C08552")).Bold(true)
 	statusQuestionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#C08552")).Bold(true)
 	statusDoneStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#333346"))
@@ -102,6 +103,7 @@ func InitStyles(theme config.ThemeConfig) {
 
 	statusRunningStyle = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)
 	statusIdleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.StatusIdle)).Bold(true)
+	statusSubagentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.StatusSubagent)).Bold(true)
 	statusApproveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.StatusAttention)).Bold(true)
 	statusQuestionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.StatusAttention)).Bold(true)
 	statusDoneStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.StatusDone))
