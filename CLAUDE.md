@@ -25,7 +25,7 @@ cmd/claude-deck/main.go   エントリポイント
 internal/
   session/       セッションライフサイクル管理（Manager が中心）
   tui/           Bubble Tea TUI（Model, View, Keys）
-  usage/         JSONL パース・ストリーミング・トークン集計（Claude / Codex の違いは format の 2 実装）
+  usage/         JSONL パース・ストリーミング（Claude / Codex の違いは format の 2 実装）
   config/        TOML 設定ファイル
   store/         セッションメタデータ永続化（SQLite）
   ghostty/       Ghostty ターミナルランチャー
@@ -112,13 +112,13 @@ Completed / Error      (hook: turn.complete → Idle)
 
 ### データソース優先度（→ [用語集: Projection](docs/00-glossary.md#projection-投影)）
 
-- **JSONL** (Claude Code 一次データ): Prompt, TokenUsage, StartedAt, LastActivity
+- **JSONL** (Claude Code 一次データ): Prompt, StartedAt, LastActivity
 - **Hook** (リアルタイム通知): Status 遷移, SessionChain 更新。`claude-deck hook` が store に書く
-- **Store** (SQLite `deck.db`, 信頼できる唯一の情報源): ID, Name, RepoPath, WorkspacePath, Status, PID, SessionChain, ForkedFrom, ClosingAt
+- **Store** (SQLite `deck.db`, 信頼できる唯一の情報源): ID, Name, Alias, RepoPath, WorkspacePath, Status, PID, SessionChain, ForkedFrom, ClosingAt
 - **Runtime** (メモリのみ): CurrentTool
 
 `Manager.sessions` は store を `Manager.Reload` で読み直した投影。TUI は `PRAGMA data_version` を 200ms ごとに見て、他プロセス（CLI・hook）の書き込みを検知する。JSONL から発見した外部セッションは store に入れずメモリだけに持つ。
-store が書く項目（Status, SessionChain, PID, ワークスペース等）は常に store に従い、JSONL・jj から TUI が投影する項目（Prompt, TokenUsage, BookmarkName 等）は、セッションが初めてメモリに現れるときだけ store から読む。
+store が書く項目（Status, SessionChain, PID, ワークスペース等）は常に store に従い、JSONL・jj から TUI が投影する項目（Prompt, LastActivity, BookmarkName 等）は、セッションが初めてメモリに現れるときだけ store から読む。
 
 ### キーバインド
 
@@ -147,9 +147,10 @@ store と tmux を直接操作するので、TUI が起動していなくても�
 | コマンド | 対応するキー |
 |------|------|
 | `claude-deck new [--dir DIR] [--no-workspace]` | `n`（`--no-workspace` は C-Enter） |
-| `claude-deck list` | 一覧表示。`session_chain` と `forked_from` で `/clear` とフォークの系譜も返す |
+| `claude-deck list [--alias TEXT]` | 一覧表示。`session_chain` と `forked_from` で `/clear` とフォークの系譜も返す。`--alias` はエイリアスの部分一致で絞る |
 | `claude-deck tree` | なし。Claude Code のセッションを `/clear` とフォークの親子関係でたどった木を、テキストで出す（[ADR-012](docs/adr/012-fork-lineage.md)） |
 | `claude-deck close <ID\|NAME>` | `x` |
+| `claude-deck alias [--session ID\|NAME] <ALIAS>` | なし。セッションに表示用の名前を付ける（英数字と `-` `_` `.`、40 文字まで）。`--session` を省くと自分のセッション（`$CLAUDE_DECK_SESSION_ID`）。空文字で消す |
 | `claude-deck gc [--dry-run]` | なし。どのセッションのものでもないワークスペースと、消えたワークスペースについての `~/.claude.json` の登録を消す |
 
 内部用に `claude-deck hook status|session-start|exited|rate-limits --session <ID>` がある。deck-status プラグインとウィンドウのコマンドが呼ぶもので、手で実行するものではない。

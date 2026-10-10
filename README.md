@@ -11,7 +11,6 @@ Integrates [jj (Jujutsu)](https://github.com/jj-vcs/jj) workspaces and [Ghostty]
 Running multiple Claude Code agents in parallel is powerful, but managing them across many terminal windows quickly becomes chaotic:
 
 - Switching between terminals to check which agent is waiting for approval
-- Losing track of token spend across sessions
 - Missing permission prompts buried in background terminals
 - No isolation between concurrent file edits
 
@@ -25,7 +24,7 @@ claude-deck solves this with a single dashboard that monitors all sessions, high
 - **tmux session hosting** — Interact with the selected agent in its managed tmux window
 - **jj workspace isolation** — Each session gets its own workspace, preventing file conflicts between agents
 - **Session discovery** — Automatically finds Claude Code sessions started outside claude-deck
-- **Token & cost tracking** — Per-session token usage with cost estimates
+- **Aliases** — Give a session a readable label with `claude-deck alias`
 - **Ghostty integration** — Open a full terminal for any session with `t`
 - **Workspace symlinks** — Auto-symlink `.env` and other untracked files into workspaces via per-project config
 - **Customizable theme** — Set your own palette via `config.toml`
@@ -165,12 +164,6 @@ max_jsonl_entries = 500
 discovery_days = 14
 refresh_interval = "5s"
 
-[pricing]
-input_per_mtok = 15.0
-output_per_mtok = 75.0
-cache_write_per_mtok = 18.75
-cache_read_per_mtok = 1.50
-
 # Per-project workspace symlinks
 # jj workspace にはリポジトリの untracked ファイル (.env 等) がコピーされない。
 # プロジェクトごとに symlink したいファイルを指定できる。
@@ -193,7 +186,7 @@ internal/
   session/       Session lifecycle management (Manager)
   tui/           Bubble Tea TUI (Model, View, Keys)
   tmux/          tmux window management
-  usage/         JSONL parsing, streaming, token aggregation
+  usage/         JSONL parsing and streaming
   config/        TOML configuration
   store/         Session metadata persistence (SQLite)
   ghostty/       Ghostty terminal launcher

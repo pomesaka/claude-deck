@@ -33,7 +33,7 @@ claude-deck は **複数の coding agent セッションを一括管理する TU
 
 | 外部システム | claude-deck との関係 |
 |-------------|---------------------|
-| **Agent runtime CLI** | tmux ウィンドウで起動する。Claude provider は deck-status プラグイン（`--plugin-dir` で渡す）が `claude-deck hook` を実行して状態変化を store に書く。Codex provider は TUI が JSONL の runtime activity を読んで store に書く。どちらも JSONL ログから対話履歴とトークン使用量を読み取る |
+| **Agent runtime CLI** | tmux ウィンドウで起動する。Claude provider は deck-status プラグイン（`--plugin-dir` で渡す）が `claude-deck hook` を実行して状態変化を store に書く。Codex provider は TUI が JSONL の runtime activity を読んで store に書く。どちらも JSONL ログから対話履歴を読み取る |
 | **jj (Jujutsu)** | セッションごとに隔離されたワークスペースを作成。ブックマーク名をセッションラベルに使用 |
 | **Ghostty** | 外部ターミナルウィンドウの起動。将来的に detail pane の外部ホスティングに使用予定 |
 | **ファイルシステム** | JSONL ログ監視 (fsnotify)、Store（SQLite `deck.db`）の読み書きと変更監視 |
@@ -80,9 +80,9 @@ claude-deck は **複数の coding agent セッションを一括管理する TU
 | Claude Code → store | deck-status プラグインが `claude-deck hook` を実行 | Status 遷移、SessionChain 更新 |
 | Codex の JSONL → store | TUI が runtime activity と JSONL の発見から書く | Status 遷移、SessionChain の最初の ID |
 | ペインのシェル → store | runtime 終了後に `claude-deck hook exited` を実行 | Completed の記録 |
-| CLI → store | `claude-deck new / list / close` | セッションの作成・一覧・close |
+| CLI → store | `claude-deck new / list / close / alias` | セッションの作成・一覧・close・表示名の設定 |
 | store → TUI | `PRAGMA data_version` を 200ms ごとに確認して `Reload` | 他プロセスの書き込みの反映 |
-| Agent runtime → ファイル | JSONL 書き込み | 対話履歴・トークン記録 |
+| Agent runtime → ファイル | JSONL 書き込み | 対話履歴 |
 | ファイル → claude-deck | fsnotify | JSONL 変更通知、外部セッション発見 |
 
 ## データフロー
@@ -97,8 +97,8 @@ Session の状態は複数のデータソースから投影 (projection) され�
   (deck.db)        │   → ID, Name, Status, SessionChain,   │
   hook/CLI が書く  │     PID, ワークスペース               │
                     │                                       │
-  JSONL ファイル ──►│ ApplyJSONLTokens()                    │
-  (Agent ログ)     │   → TokenUsage, Prompt, StartedAt     │
+  JSONL ファイル ──►│ discovery                             │
+  (Agent ログ)     │   → Prompt, StartedAt                 │
                     │ ApplyFileActivity()                   │
                     │   → LastActivity                      │
                     │ RuntimeActivity (Codex)               │
@@ -115,7 +115,7 @@ Session の状態は複数のデータソースから投影 (projection) され�
 
 同じフィールドに複数のソースが書き込む場合の優先順位:
 
-1. **JSONL** (最優先) — Claude Code の一次記録。TokenUsage, Prompt, StartedAt
+1. **JSONL** (最優先) — Claude Code の一次記録。Prompt, StartedAt, LastActivity
 2. **Hook** — リアルタイム通知。Status 遷移は Hook が最も正確。`claude-deck hook` が store に書き、TUI は Store 経由で受け取る
 3. **Store** — deck セッションの状態の信頼できる唯一の情報源。TUI 起動時の復元にも使う
 
@@ -126,7 +126,7 @@ TUI は Session の Snapshot を通じてデータを読む。
 ```
 ┌─ Session ──────────────────────────────┐
 │  Snapshot() ──► メタデータ表示          │
-│    Status, TokenUsage, Prompt, etc.    │
+│    Status, Alias, Prompt, etc.         │
 │                                        │
 └────────────────────────────────────────┘
          │

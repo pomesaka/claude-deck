@@ -11,7 +11,7 @@ claude-deck のコードと会話で使われる用語の定義。コードを�
 
 Claude Code との1つの対話セッション。claude-deck の中心概念。
 
-Claude Code のプロセスライフサイクル、トークン使用量、対話履歴、作業ディレクトリを追跡する。Session は複数のデータソースから状態を投影 (→ Projection) して構築される。
+Claude Code のプロセスライフサイクル、対話履歴、作業ディレクトリを追跡する。Session は複数のデータソースから状態を投影 (→ Projection) して構築される。
 
 **型**: `session.Session`
 
@@ -20,6 +20,12 @@ Claude Code のプロセスライフサイクル、トークン使用量、対�
 claude-deck が内部で割り振るセッション識別子。ランダム hex 文字列。Session の一生を通じて不変。
 
 **型**: `session.DeckSessionID`
+
+### Alias
+
+利用者かセッション自身が `claude-deck alias` で付ける表示用の名前。TUI の一覧では、セッション名の代わりに出る。セッション名は tmux のウィンドウ名と jj ワークスペース名を兼ねていて変えられないので、表示だけを別に持つ。使えるのは英数字と `-` `_` `.` で、一意である必要はない。CLI での指定には使えない。
+
+**フィールド**: `Session.Alias`
 
 ### ClaudeSessionID
 
@@ -77,7 +83,7 @@ Session の状態を構成するデータソース。各ソースが Session の
 | ソース | 所有フィールド | 更新タイミング |
 |--------|---------------|---------------|
 | **Store** | ID, Name, RepoPath, SessionChain, Status, PID, LastJJRevision, LastJJParentRevision | 信頼できる唯一の情報源。TUI・CLI・hook コマンドが SQLite に書き、TUI は `Reload` で読む |
-| **JSONL** | Prompt, PermissionMode, StartedAt, LastActivity, TokenUsage | Claude Code が JSONL に書き込み時 |
+| **JSONL** | Prompt, PermissionMode, StartedAt, LastActivity | Claude Code が JSONL に書き込み時 |
 | **jj** | BookmarkName | TUI が 5 秒ごとに読む |
 | **Hook** | Status 遷移, SessionChain 追加 | deck-status プラグインが `claude-deck hook` で store に書く。TUI が `WatchStore` で検知する |
 
@@ -96,27 +102,13 @@ Session の状態を構成するデータソース。各ソースが Session の
 
 ### Projection (投影)
 
-複数のデータソースから Session の統一状態を構築するパターン。store の項目は `Reload` が、JSONL と jj の項目は Session の `Apply*` メソッド群 (`ApplyJSONLTokens`, `ApplyFileActivity`, `ApplyBookmark`) が書く。
+複数のデータソースから Session の統一状態を構築するパターン。store の項目は `Reload` が、JSONL と jj の項目は Session の `Apply*` メソッド群 (`ApplyFileActivity`, `ApplyBookmark`) が書く。
 
 ### Snapshot
 
 Session のロックフリーな読み取りコピー。TUI レンダリングは常に Snapshot を通じてデータにアクセスする。DisplayChannel などの導出フィールドも含む。
 
 **型**: `session.Snapshot`
-
-## トークンとコスト
-
-### TokenUsage
-
-セッションのトークン消費量を追跡する Value Object。`EstimateCost(PricingPolicy)` で USD コストを自己計算する。
-
-**型**: `session.TokenUsage`
-
-### PricingPolicy
-
-トークン単価を定義する Value Object。config.toml の `[pricing]` セクションから読み込まれる。TokenUsage がコスト計算時にこれを受け取る (インフラ非依存)。
-
-**型**: `session.PricingPolicy`
 
 ## インフラ
 
@@ -128,7 +120,7 @@ claude-deck が起動する全セッションに `--plugin-dir` で渡す Claude
 
 ### JSONL
 
-Claude Code が `~/.claude/projects/<project>/<uuid>.jsonl` に書き出すセッションログ。対話のプロンプト、レスポンス、ツール実行、トークン使用量を含む。claude-deck の一次データソース。
+Claude Code が `~/.claude/projects/<project>/<uuid>.jsonl` に書き出すセッションログ。対話のプロンプト、レスポンス、ツール実行を含む。claude-deck の一次データソース。
 
 **関連**: `internal/usage/`
 

@@ -86,7 +86,6 @@ deck セッションの状態は複数のプロセス（TUI、CLI、hook コマ�
 | StartNotifyLoop | main | ctx.Done() | dirty flag → onChange (60fps) |
 | WatchStore | main | ctx.Done() | `data_version` を 200ms ごとに見て、変化したら `Reload` |
 | MultiWatcher.Run | main | ctx.Done() | JSONL ファイル変更監視 |
-| HydrateFromJSONL | main (init) | 完了 | 起動時トークン補完 |
 
 ## TUI から外部副作用を発行する時の順序保証
 

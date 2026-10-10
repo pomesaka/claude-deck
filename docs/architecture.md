@@ -35,7 +35,7 @@ store（`{DataDir}/deck.db`）が deck セッションの信頼できる唯一�
 `Manager.sessions` は store をメモリに投影したもので、`Manager.Reload` が store から作り直す。
 
 - store が書く項目（Status, SessionChain, PID, ワークスペース, エラーメッセージ等）は、`Reload` のたびに store に従う
-- JSONL と jj から TUI が投影する項目（Prompt, TokenUsage, BookmarkName 等）は、セッションが初めてメモリに現れるときだけ store から読む。以後はメモリの値が新しく、`PersistAll` が store に書く
+- JSONL と jj から TUI が投影する項目（Prompt, LastActivity, BookmarkName 等）は、セッションが初めてメモリに現れるときだけ store から読む。以後はメモリの値が新しく、`PersistAll` が store に書く
 - JSONL から発見した外部セッション（Unmanaged）は store に入れず、メモリだけに持つ。`ResumeSession` で再開するときに `adoptExternal` が終了済みの deck セッションとして store に入れる
 
 `Manager.WatchStore` が `PRAGMA data_version` を 200ms ごとに見て、他プロセスがコミットしたときに `Reload` を呼ぶ。`data_version` は接続ごとの値なので、専用の接続で読む。
@@ -56,10 +56,9 @@ main() → run()
   8. manager.ReconcileTmux()             ← store と生きている tmux ウィンドウの食い違いを補正
   9. tui.NewModel(manager, cfg) → Bubble Tea 起動
  10. Background:
-     a. manager.HydrateFromJSONL()      ← JSONL からトークン等を補完
-     b. manager.DiscoverExternalSessions() ← 外部セッション取り込み
-     c. manager.StartFileWatcher()      ← JSONL ファイル変更監視
-     d. manager.StartNotifyLoop()       ← UI 更新通知 (60fps)
+     a. manager.DiscoverExternalSessions() ← 外部セッション取り込み
+     b. manager.StartFileWatcher()      ← JSONL ファイル変更監視
+     c. manager.StartNotifyLoop()       ← UI 更新通知 (60fps)
      e. manager.WatchStore()            ← 他プロセスの store 書き込みを反映
 
 main() → runCLI()                       ← 第 1 引数が new / list / close / hook のとき
@@ -201,8 +200,9 @@ preview: WatchSpec → previewStreamer.Start(spec)
 
 ```
 5秒ごとの metadataTickMsg → RefreshFromJSONL()
-  1. HydrateFromJSONL()                // 既存セッションのトークン更新
-  2. DiscoverExternalSessions()        // 新規外部セッション取り込み
+  1. markVanishedSessions()            // ウィンドウの消えたセッションを終了扱いにする
+  2. refreshBookmarks()                // jj のブックマークを読み直す
+  3. DiscoverExternalSessions()        // 新規外部セッション取り込み
      - usage.ListAllSessions(14日, 30件, offset)
      - known セットで除外: 追跡中の全セッションの SessionChain（過去の ID を含む）
      - newExternalSession() で StatusUnmanaged セッション作成
