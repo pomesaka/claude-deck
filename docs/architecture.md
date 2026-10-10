@@ -139,6 +139,7 @@ User 'r' キー or Enter / Manager.ResumeSession(ctx, sessionID)
     3. store.Update(beginResume): 終了済みの行だけ Idle に戻す。PID=0 にする
        別プロセスが同時に再開しても、片方は「終了済みでない」で失敗する
     4. ワークスペースがなければ再作成（Kill 時に保存した revision から）
+       失敗したら起動せず、行を Error にする
     5. tmux ウィンドウで claude --resume <csID> を起動（新規作成と同じコマンド形式）
     6. store.Update(PID)
 ```

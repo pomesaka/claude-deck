@@ -514,17 +514,18 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 	if wsPath == "" && rec.RepoPath != "" && rec.Name != "" {
 		newWsPath, err := m.ws().recreate(rec.RepoPath, rec.Name, rec.SubProjectDir, rec.LastJJRevision, rec.LastJJParentRevision)
 		if err != nil {
-			debuglog.Printf("[ResumeSession] workspace recreate failed, falling back to repo: %v", err)
-			wsPath = rec.RepoPath
-		} else {
-			wsPath = newWsPath
-			if _, err := m.store.Update(string(sessionID), func(r *store.Record) error {
-				r.WorkspaceName = rec.Name
-				r.WorkspacePath = newWsPath
-				return nil
-			}); err != nil {
-				debuglog.Printf("[ResumeSession] recording workspace: %v", err)
-			}
+			// WHY NOT 本体リポジトリで起動する: ワークスペースで隔離していたセッションが、利用者の
+			// 作業コピーを直接書き換えることになる。一覧の表示からはその違いが分からない。
+			debuglog.Printf("[ResumeSession] workspace recreate failed: %v", err)
+			return fail(fmt.Errorf("ワークスペースを作り直せません: %w", err), true)
+		}
+		wsPath = newWsPath
+		if _, err := m.store.Update(string(sessionID), func(r *store.Record) error {
+			r.WorkspaceName = rec.Name
+			r.WorkspacePath = newWsPath
+			return nil
+		}); err != nil {
+			debuglog.Printf("[ResumeSession] recording workspace: %v", err)
 		}
 	}
 

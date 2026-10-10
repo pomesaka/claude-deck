@@ -64,6 +64,27 @@ func (r *Runner) CreateWorkspaceAt(repoPath, name, wsPath string, opts Workspace
 	}
 	debuglog.Printf("[jj.CreateWorkspaceAt] jj workspace add done")
 
+	if err := r.setUpWorkspace(repoPath, wsPath, opts); err != nil {
+		// WHY 作りかけを消す: 残すと、同じ名前での作り直し（resume）が失敗し続ける。jj workspace add は
+		// 名前が登録済みなら "Workspace named ... already exists"、ディレクトリだけ残っていても
+		// "Destination path exists and is not an empty directory" で失敗する（jj 0.37.0 で確認）。
+		// WHY NOT add の失敗でも消す: そのときの名前とディレクトリは、この呼び出しが作ったものではない。
+		if ferr := r.ForgetWorkspace(repoPath, name); ferr != nil {
+			debuglog.Printf("[jj.CreateWorkspaceAt] undoing the add: %v", ferr)
+		}
+		if rerr := os.RemoveAll(wsPath); rerr != nil {
+			debuglog.Printf("[jj.CreateWorkspaceAt] undoing the add: %v", rerr)
+		}
+		return err
+	}
+	return nil
+}
+
+// setUpWorkspace prepares the workspace jj workspace add has just created at
+// wsPath: the symlinks, and the revision to start from.
+func (r *Runner) setUpWorkspace(repoPath, wsPath string, opts WorkspaceOptions) error {
+	jjCmd := r.command()
+
 	// colocated リポジトリなら .git への symlink を作成
 	gitDir := filepath.Join(repoPath, ".git")
 	if info, err := os.Stat(gitDir); err == nil && info.IsDir() {

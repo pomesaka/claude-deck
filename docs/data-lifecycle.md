@@ -59,6 +59,8 @@ deck.db                                                  # 行の WorkspaceName/
 ```
 ワークスペース再作成時の開始 revision は `LastJJRevision → LastJJParentRevision → trunk()` の優先順で使われる（ADR 009 参照）。
 
+再作成に失敗したときは Claude を起動せず、セッションを Error にして理由を一覧に出す。本体リポジトリでは起動しない。作成の途中で失敗したワークスペースは `CreateWorkspaceAt` が消すので、原因を直してからもう一度 `r` を押せる。
+
 ### `f` — Fork
 
 **作成:**

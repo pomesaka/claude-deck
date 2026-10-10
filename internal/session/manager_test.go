@@ -302,6 +302,32 @@ func TestResumeSession_WithoutClaudeIDRestoresCompleted(t *testing.T) {
 	}
 }
 
+func TestResumeSession_FailsWhenWorkspaceCannotBeRecreated(t *testing.T) {
+	m, be := newTestManager(t)
+	m.config.JJ = &jj.Runner{Command: "false"} // every jj command fails
+	finished := time.Now()
+	// A session whose workspace a close has removed.
+	rec := store.Record{
+		ID: "s1", Name: "shoko-0001", RepoPath: t.TempDir(),
+		Status: StatusCompleted.ID(), FinishedAt: &finished,
+		SessionChain: []string{"claude-1"},
+	}
+	if err := m.store.Tx(func(tx *store.Tx) error { return tx.Put(rec) }); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if err := m.ResumeSession(context.Background(), "s1"); err == nil {
+		t.Fatal("ResumeSession succeeded without a workspace")
+	}
+	if len(be.started) != 0 {
+		t.Errorf("started a process in %q", be.started[0].WorkDir)
+	}
+	r := mustGet(t, m.store, "s1")
+	if r.Status != StatusError.ID() || r.ErrorMessage == "" || r.WorkspacePath != "" {
+		t.Errorf("after failed resume: status=%q error=%q workspace=%q", r.Status, r.ErrorMessage, r.WorkspacePath)
+	}
+}
+
 func TestResumeSession_AdoptsExternalSession(t *testing.T) {
 	m, be := newTestManager(t)
 	dir := t.TempDir()
