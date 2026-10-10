@@ -272,3 +272,43 @@ func TestStore_IgnoresColumnsNoLongerUsed(t *testing.T) {
 		t.Errorf("row = %+v, want name anna-8cc7 and alias review-pr-12", got)
 	}
 }
+
+// A newer claude-deck may have added a column this binary does not know (the
+// TUI keeps running while the CLI is rebuilt). Writing a row must leave such a
+// column as it is.
+func TestStore_PutKeepsColumnsItDoesNotKnow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	st := openTestStore(t, path)
+	if err := st.Insert(Record{ID: "a", Name: "anna-8cc7", Status: "idle"}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	newer, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer newer.Close()
+	for _, stmt := range []string{
+		"ALTER TABLE sessions ADD COLUMN added_later TEXT NOT NULL DEFAULT ''",
+		"UPDATE sessions SET added_later = 'kept' WHERE id = 'a'",
+	} {
+		if _, err := newer.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	if _, err := st.Update("a", func(r *Record) error {
+		r.Status = "running"
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	var status, addedLater string
+	if err := newer.QueryRow("SELECT status, added_later FROM sessions WHERE id = 'a'").Scan(&status, &addedLater); err != nil {
+		t.Fatal(err)
+	}
+	if status != "running" || addedLater != "kept" {
+		t.Errorf("status = %q, added_later = %q; want running, kept", status, addedLater)
+	}
+}

@@ -111,8 +111,25 @@ const columns = `id, name, repo_path, repo_name, workspace_path, workspace_name,
 	last_jj_revision, last_jj_parent_revision, prompt, permission_mode, started_at, last_activity,
 	closing_at, launching_at, forked_from, alias`
 
-// placeholders is one "?" per column of columns, for INSERT.
-var placeholders = strings.TrimSuffix(strings.Repeat("?, ", strings.Count(columns, ",")+1), ", ")
+// upsert writes one row: it inserts it, or, when the ID exists, updates the
+// columns this binary knows.
+// WHY INSERT OR REPLACE でなく ON CONFLICT DO UPDATE: REPLACE は行を消して入れ直すので、
+// この版が知らない列（より新しい版が足した列）が既定値に戻る。TUI を動かしたまま CLI を
+// 更新すると、新しい CLI が書いた列を古い TUI が消すことになる。UPDATE は名指しした列しか
+// 触らないので、知らない列はそのまま残る。
+var upsert = func() string {
+	names := strings.Split(columns, ",")
+	sets := make([]string, 0, len(names))
+	for i := range names {
+		names[i] = strings.TrimSpace(names[i])
+		if names[i] != "id" {
+			sets = append(sets, names[i]+" = excluded."+names[i])
+		}
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(names)), ", ")
+	return "INSERT INTO sessions (" + strings.Join(names, ", ") + ") VALUES (" + placeholders + ")" +
+		" ON CONFLICT(id) DO UPDATE SET " + strings.Join(sets, ", ")
+}()
 
 // Store is a handle to the session database. Safe for concurrent use.
 type Store struct {
@@ -164,8 +181,9 @@ func OpenPath(path string) (*Store, error) {
 //
 // WHY 1 つのトランザクションで確認と追加を行う: TUI・CLI・hook が同時に開く。_txlock=immediate なので
 // 2 つ目のプロセスは 1 つ目のコミットを待ち、追加済みの列を見て何もしない。
-// 注意: 列を足す前のバイナリは INSERT OR REPLACE で自分の知る列だけを書くので、古い TUI が動いている間は、
-// その TUI が書いた行の新しい列が既定値に戻る。バイナリを更新したら TUI を起動し直す。
+// 列を足す前のバイナリが同時に動いていてもよい: 書き込みは知っている列だけを更新する（upsert）。
+// 注意: alias の列を足した版までは INSERT OR REPLACE で書いていた。その版以前の TUI が動いている間は、
+// その TUI が書いた行の新しい列が既定値に戻る。
 func migrate(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -301,7 +319,7 @@ func (t *Tx) Put(r Record) error {
 	if err != nil {
 		return fmt.Errorf("marshaling session chain: %w", err)
 	}
-	_, err = t.tx.Exec(`INSERT OR REPLACE INTO sessions (`+columns+`) VALUES (`+placeholders+`)`,
+	_, err = t.tx.Exec(upsert,
 		r.ID, r.Name, r.RepoPath, r.RepoName, r.WorkspacePath, r.WorkspaceName, r.SubProjectDir,
 		string(chainJSON), r.Status, nullableTime(r.FinishedAt), r.PID, r.ErrorMessage, r.TerminalTitle, r.BookmarkName,
 		r.LastJJRevision, r.LastJJParentRevision, r.Prompt, r.PermissionMode, unixNano(r.StartedAt), unixNano(r.LastActivity),
