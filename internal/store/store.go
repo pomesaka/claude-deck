@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -29,8 +30,11 @@ var ErrNotFound = errors.New("session not found")
 // Record is one deck session row. The store does not interpret the values;
 // the session package owns their meaning (Status is a session.Status ID string).
 type Record struct {
-	ID            string
-	Name          string
+	ID   string
+	Name string
+	// Alias is a label the user or the session itself gave the session, shown in
+	// place of Name. Empty when none was given.
+	Alias         string
 	RepoPath      string
 	RepoName      string
 	WorkspacePath string
@@ -39,8 +43,8 @@ type Record struct {
 	SessionChain  []string
 	// ForkedFrom is the runtime session ID this session was forked from: an
 	// element of another record's SessionChain, or empty when it is not a fork.
-	ForkedFrom string
-	Status     string
+	ForkedFrom    string
+	Status        string
 	FinishedAt    *time.Time
 	PID           int
 	ErrorMessage  string
@@ -54,12 +58,6 @@ type Record struct {
 	PermissionMode string
 	StartedAt      time.Time
 	LastActivity   time.Time
-
-	InputTokens              int
-	OutputTokens             int
-	CacheCreationInputTokens int
-	CacheReadInputTokens     int
-	EstimatedCostUSD         float64
 
 	// ClosingAt is set while a close (TUI x / CLI close) is in progress.
 	// It guards against two processes closing the same session at once.
@@ -91,29 +89,30 @@ CREATE TABLE IF NOT EXISTS sessions (
 	permission_mode             TEXT NOT NULL DEFAULT '',
 	started_at                  INTEGER NOT NULL DEFAULT 0,
 	last_activity               INTEGER NOT NULL DEFAULT 0,
-	input_tokens                INTEGER NOT NULL DEFAULT 0,
-	output_tokens               INTEGER NOT NULL DEFAULT 0,
-	cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
-	cache_read_input_tokens     INTEGER NOT NULL DEFAULT 0,
-	estimated_cost_usd          REAL NOT NULL DEFAULT 0,
 	closing_at                  INTEGER,
 	launching_at                INTEGER,
-	forked_from                 TEXT NOT NULL DEFAULT ''
+	forked_from                 TEXT NOT NULL DEFAULT '',
+	alias                       TEXT NOT NULL DEFAULT ''
 );`
 
 // addedColumns are the columns added after the first release of the schema, in
 // the order they were added. A database created before a column existed gets it
 // from migrate; a new one gets it from schema.
 // 列を足すときは schema と columns にも足す。
+// WHY 使わなくなった列を既存の DB から消さない: 書き込みは columns の列だけを指定するので、
+// 残っていても既定値が入るだけで害が無い（トークン数とコストの 5 列が該当する）。
 var addedColumns = []struct{ name, ddl string }{
 	{"forked_from", "forked_from TEXT NOT NULL DEFAULT ''"},
+	{"alias", "alias TEXT NOT NULL DEFAULT ''"},
 }
 
 const columns = `id, name, repo_path, repo_name, workspace_path, workspace_name, sub_project_dir,
 	session_chain, status, finished_at, pid, error_message, terminal_title, bookmark_name,
 	last_jj_revision, last_jj_parent_revision, prompt, permission_mode, started_at, last_activity,
-	input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
-	estimated_cost_usd, closing_at, launching_at, forked_from`
+	closing_at, launching_at, forked_from, alias`
+
+// placeholders is one "?" per column of columns, for INSERT.
+var placeholders = strings.TrimSuffix(strings.Repeat("?, ", strings.Count(columns, ",")+1), ", ")
 
 // Store is a handle to the session database. Safe for concurrent use.
 type Store struct {
@@ -302,13 +301,11 @@ func (t *Tx) Put(r Record) error {
 	if err != nil {
 		return fmt.Errorf("marshaling session chain: %w", err)
 	}
-	_, err = t.tx.Exec(`INSERT OR REPLACE INTO sessions (`+columns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err = t.tx.Exec(`INSERT OR REPLACE INTO sessions (`+columns+`) VALUES (`+placeholders+`)`,
 		r.ID, r.Name, r.RepoPath, r.RepoName, r.WorkspacePath, r.WorkspaceName, r.SubProjectDir,
 		string(chainJSON), r.Status, nullableTime(r.FinishedAt), r.PID, r.ErrorMessage, r.TerminalTitle, r.BookmarkName,
 		r.LastJJRevision, r.LastJJParentRevision, r.Prompt, r.PermissionMode, unixNano(r.StartedAt), unixNano(r.LastActivity),
-		r.InputTokens, r.OutputTokens, r.CacheCreationInputTokens, r.CacheReadInputTokens,
-		r.EstimatedCostUSD, nullableTime(r.ClosingAt), nullableTime(r.LaunchingAt), r.ForkedFrom,
+		nullableTime(r.ClosingAt), nullableTime(r.LaunchingAt), r.ForkedFrom, r.Alias,
 	)
 	return err
 }
@@ -355,8 +352,7 @@ func scanAll(rows *sql.Rows) ([]Record, error) {
 			&r.ID, &r.Name, &r.RepoPath, &r.RepoName, &r.WorkspacePath, &r.WorkspaceName, &r.SubProjectDir,
 			&chainJSON, &r.Status, &finishedAt, &r.PID, &r.ErrorMessage, &r.TerminalTitle, &r.BookmarkName,
 			&r.LastJJRevision, &r.LastJJParentRevision, &r.Prompt, &r.PermissionMode, &startedAt, &lastActivity,
-			&r.InputTokens, &r.OutputTokens, &r.CacheCreationInputTokens, &r.CacheReadInputTokens,
-			&r.EstimatedCostUSD, &closingAt, &launchingAt, &r.ForkedFrom,
+			&closingAt, &launchingAt, &r.ForkedFrom, &r.Alias,
 		); err != nil {
 			return nil, err
 		}

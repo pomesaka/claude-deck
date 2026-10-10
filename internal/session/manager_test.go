@@ -810,13 +810,13 @@ func TestPersistAll(t *testing.T) {
 	sess.mu.Lock()
 	sess.BookmarkName = ""
 	sess.mu.Unlock()
-	sess.ApplyJSONLTokens(JSONLTokenData{InputTokens: 10, OutputTokens: 5}, PricingPolicy{})
+	sess.ApplyFileActivity(time.Unix(1_800_000_000, 0))
 
 	m.PersistAll()
 
 	r := mustGet(t, m.store, sess.ID)
-	if r.InputTokens != 10 || r.OutputTokens != 5 {
-		t.Errorf("tokens = %d/%d, want 10/5", r.InputTokens, r.OutputTokens)
+	if !r.LastActivity.Equal(time.Unix(1_800_000_000, 0)) {
+		t.Errorf("LastActivity = %v, want the in-memory value", r.LastActivity)
 	}
 	if r.BookmarkName != "feat/x" {
 		t.Errorf("BookmarkName = %q, overwritten by the empty in-memory value", r.BookmarkName)

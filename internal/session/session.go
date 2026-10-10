@@ -4,8 +4,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
 // Status represents the current state of a Claude Code session.
@@ -100,56 +98,12 @@ func (d DisplayChannel) String() string {
 	}
 }
 
-// PricingPolicy defines token pricing rates per million tokens (USD).
-// This is a Value Object: immutable, compared by value, no identity.
-// It captures the domain concept of "how much does usage cost" and allows
-// TokenUsage to calculate its own cost without depending on infrastructure.
-type PricingPolicy struct {
-	InputPerMTok      float64
-	OutputPerMTok     float64
-	CacheWritePerMTok float64
-	CacheReadPerMTok  float64
-}
-
-// TokenUsage tracks token consumption for a session.
-type TokenUsage struct {
-	InputTokens              int     `json:"input_tokens"`
-	OutputTokens             int     `json:"output_tokens"`
-	CacheCreationInputTokens int     `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int     `json:"cache_read_input_tokens"`
-	EstimatedCostUSD         float64 `json:"estimated_cost_usd"`
-}
-
-// TokenUsageFromStats converts a usage.TokenStats (read from JSONL) to a
-// TokenUsage Value Object. Centralises the field mapping between the two types
-// so callers don't need to know the structural isomorphism.
-func TokenUsageFromStats(s usage.TokenStats) TokenUsage {
-	return TokenUsage{
-		InputTokens:              s.InputTokens,
-		OutputTokens:             s.OutputTokens,
-		CacheCreationInputTokens: s.CacheCreationInputTokens,
-		CacheReadInputTokens:     s.CacheReadInputTokens,
-		EstimatedCostUSD:         s.EstimatedCostUSD,
-	}
-}
-
-// EstimateCost calculates an approximate USD cost based on token usage and pricing policy.
-// This places cost calculation in the domain type that best knows its own data,
-// rather than in infrastructure (usage package).
-func (t TokenUsage) EstimateCost(p PricingPolicy) float64 {
-	cost := float64(t.InputTokens) / 1_000_000 * p.InputPerMTok
-	cost += float64(t.OutputTokens) / 1_000_000 * p.OutputPerMTok
-	cost += float64(t.CacheCreationInputTokens) / 1_000_000 * p.CacheWritePerMTok
-	cost += float64(t.CacheReadInputTokens) / 1_000_000 * p.CacheReadPerMTok
-	return cost
-}
-
 // Session represents a single agent runtime session tracked by claude-deck.
 //
 // Data sources:
 //   - Store (persisted as JSON): ID, Name, RepoPath, RepoName, WorkspacePath,
 //     WorkspaceName, SessionChain, Status, FinishedAt, PID
-//   - JSONL (runtime primary): Prompt, PermissionMode, StartedAt, TokenUsage
+//   - JSONL (runtime primary): Prompt, PermissionMode, StartedAt, LastActivity
 //   - Runtime only: CurrentTool
 type Session struct {
 	mu sync.RWMutex
@@ -158,10 +112,13 @@ type Session struct {
 	// Fields marked "immutable after creation" are set once by CreateSession /
 	// newExternalSession and never mutated thereafter, so callers may read them
 	// without holding mu. See hasManagedSessionAtWorkspaceLocked for an example.
-	ID       DeckSessionID `json:"id"` // immutable after creation
-	Name     string        `json:"name"`
-	RepoPath string        `json:"repo_path"` // immutable after creation
-	RepoName string        `json:"repo_name"` // immutable after creation
+	ID   DeckSessionID `json:"id"` // immutable after creation
+	Name string        `json:"name"`
+	// Alias は利用者かセッション自身が付けた表示用の名前（`claude-deck alias`）。無ければ空。
+	// Name は tmux のウィンドウ名とワークスペース名を兼ねるので変えられない。
+	Alias    string `json:"-"`
+	RepoPath string `json:"repo_path"` // immutable after creation
+	RepoName string `json:"repo_name"` // immutable after creation
 	// WorkspacePath is the actual Claude Code working directory and may include a sub-project
 	// subdirectory (i.e., <wsRoot>/<SubProjectDir>). WorkspaceName is the root jj workspace
 	// name; the root can be reconstructed as DataDir/workspace/<encodedRepo>/<WorkspaceName>.
@@ -191,11 +148,10 @@ type Session struct {
 	LastJJParentRevision string `json:"last_jj_parent_revision,omitempty"`
 
 	// --- Hydrated from JSONL (JSONL が最新値を上書きするが、ストアにも保存して再起動時に即表示) ---
-	Prompt         string     `json:"prompt,omitempty"`
-	PermissionMode string     `json:"permission_mode,omitempty"`
-	StartedAt      time.Time  `json:"started_at,omitzero"`
-	LastActivity   time.Time  `json:"last_activity,omitzero"`
-	TokenUsage     TokenUsage `json:"token_usage,omitzero"`
+	Prompt         string    `json:"prompt,omitempty"`
+	PermissionMode string    `json:"permission_mode,omitempty"`
+	StartedAt      time.Time `json:"started_at,omitzero"`
+	LastActivity   time.Time `json:"last_activity,omitzero"`
 
 	// --- Runtime fields (not persisted, protected by sess.mu unless noted) ---
 	CurrentTool  string `json:"-"` // パーサー検出中のツール名
@@ -258,8 +214,10 @@ func (s *Session) IsProcessAlive() bool {
 
 // Snapshot is a read-only copy of session state, safe to use without locks.
 type Snapshot struct {
-	ID               DeckSessionID
-	Name             string
+	ID   DeckSessionID
+	Name string
+	// Alias is the label given with `claude-deck alias`, or "".
+	Alias            string
 	RepoPath         string
 	RepoName         string
 	WorkspacePath    string
@@ -281,12 +239,19 @@ type Snapshot struct {
 	StartedAt      time.Time
 	LastActivity   time.Time
 	FinishedAt     *time.Time
-	TokenUsage     TokenUsage
 	CurrentTool    string
 	ErrorMessage   string
 	TerminalTitle  string
 	BookmarkName   string
 	Elapsed        time.Duration
+}
+
+// DisplayName returns the alias, or the session name when no alias was given.
+func (s Snapshot) DisplayName() string {
+	if s.Alias != "" {
+		return s.Alias
+	}
+	return s.Name
 }
 
 // WorkDir returns the effective working directory for this session.
@@ -322,6 +287,7 @@ func (s *Session) Snapshot() Snapshot {
 	snap := Snapshot{
 		ID:               s.ID,
 		Name:             s.Name,
+		Alias:            s.Alias,
 		RepoPath:         s.RepoPath,
 		RepoName:         s.RepoName,
 		WorkspacePath:    s.WorkspacePath,
@@ -337,7 +303,6 @@ func (s *Session) Snapshot() Snapshot {
 		StartedAt:        s.StartedAt,
 		LastActivity:     s.LastActivity,
 		FinishedAt:       finishedAt,
-		TokenUsage:       s.TokenUsage,
 		CurrentTool:      s.CurrentTool,
 		ErrorMessage:     s.ErrorMessage,
 		TerminalTitle:    s.TerminalTitle,
@@ -389,7 +354,7 @@ func (s *Session) getName() string {
 }
 
 // MatchesFilter reports whether the session matches the given filter text.
-// Matching is case-insensitive substring search over "repoPath/name".
+// Matching is case-insensitive substring search over "repoPath/name alias".
 // An empty text always matches (no filter applied).
 // Uses a targeted RLock on RepoPath+Name only, avoiding a full Snapshot() call.
 func (s *Session) MatchesFilter(text string) bool {
@@ -397,7 +362,7 @@ func (s *Session) MatchesFilter(text string) bool {
 		return true
 	}
 	s.mu.RLock()
-	target := strings.ToLower(s.RepoPath + "/" + s.Name)
+	target := strings.ToLower(s.RepoPath + "/" + s.Name + " " + s.Alias)
 	s.mu.RUnlock()
 	return strings.Contains(target, text)
 }

@@ -35,6 +35,24 @@ func TestParseCLIArgs(t *testing.T) {
 			want:    cliRequest{Op: "list"},
 		},
 		{
+			name:    "list filtered by alias",
+			command: "list",
+			args:    []string{"--alias", "review"},
+			want:    cliRequest{Op: "list", Alias: "review"},
+		},
+		{
+			name:    "alias of another session",
+			command: "alias",
+			args:    []string{"--session", "anna-8cc7", "review-pr-12"},
+			want:    cliRequest{Op: "alias", Target: "anna-8cc7", Alias: "review-pr-12"},
+		},
+		{
+			name:    "alias removed",
+			command: "alias",
+			args:    []string{"--session", "anna-8cc7", ""},
+			want:    cliRequest{Op: "alias", Target: "anna-8cc7"},
+		},
+		{
 			name:    "close by name",
 			command: "close",
 			args:    []string{"anna-8cc7"},
@@ -105,6 +123,38 @@ func TestParseHookArgs_SessionFromEnv(t *testing.T) {
 	}
 }
 
+func TestAliasMatches(t *testing.T) {
+	tests := []struct {
+		alias, filter string
+		want          bool
+	}{
+		{"review-pr-12", "", true},
+		{"", "", true},
+		{"review-pr-12", "review-pr-12", true},
+		{"review-pr-12", "pr-12", true},
+		{"review-pr-12", "Review", true},
+		{"review-pr-12", "fix", false},
+		{"", "review", false},
+	}
+	for _, tt := range tests {
+		if got := aliasMatches(tt.alias, tt.filter); got != tt.want {
+			t.Errorf("aliasMatches(%q, %q) = %v, want %v", tt.alias, tt.filter, got, tt.want)
+		}
+	}
+}
+
+func TestParseAliasArgs_SessionFromEnv(t *testing.T) {
+	t.Setenv("CLAUDE_DECK_SESSION_ID", "from-env")
+	got, err := parseAliasArgs([]string{"review"})
+	if err != nil {
+		t.Fatalf("parseAliasArgs: %v", err)
+	}
+	want := cliRequest{Op: "alias", Target: "from-env", Alias: "review"}
+	if got != want {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
 func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 	t.Setenv("CLAUDE_DECK_SESSION_ID", "")
 	tests := []struct {
@@ -115,6 +165,9 @@ func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 		{name: "new with positional argument", command: "new", args: []string{"extra"}},
 		{name: "list with positional argument", command: "list", args: []string{"extra"}},
 		{name: "close without target", command: "close"},
+		{name: "alias without alias", command: "alias", args: []string{"--session", "abc"}},
+		{name: "alias with two aliases", command: "alias", args: []string{"--session", "abc", "a", "b"}},
+		{name: "alias without session", command: "alias", args: []string{"review"}},
 		{name: "close with two targets", command: "close", args: []string{"a", "b"}},
 		{name: "unknown flag", command: "new", args: []string{"--prompt", "hi"}},
 		{name: "gc with positional argument", command: "gc", args: []string{"extra"}},

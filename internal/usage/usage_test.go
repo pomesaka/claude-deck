@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func setupTestReader(t *testing.T) (*Reader, string) {
@@ -26,51 +27,6 @@ func TestNewReader_DefaultDir(t *testing.T) {
 	r := NewReader("")
 	if r.baseDir == "" {
 		t.Error("expected non-empty baseDir")
-	}
-}
-
-func TestReadTokensByID(t *testing.T) {
-	r, baseDir := setupTestReader(t)
-	projDir := filepath.Join(baseDir, "project1")
-
-	jsonl := `{"type":"user","sessionId":"sess-001","cwd":"/repo","timestamp":"2026-02-26T10:00:00Z","message":{"role":"user","content":"hello"}}
-{"type":"assistant","sessionId":"sess-001","timestamp":"2026-02-26T10:00:01Z","message":{"role":"assistant","model":"claude-opus-4-6","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}}}
-{"type":"assistant","sessionId":"sess-001","timestamp":"2026-02-26T10:00:02Z","message":{"role":"assistant","model":"claude-opus-4-6","usage":{"input_tokens":200,"output_tokens":100,"cache_creation_input_tokens":20,"cache_read_input_tokens":10}}}
-`
-	writeJSONL(t, projDir, "sess-001.jsonl", jsonl)
-
-	stats := r.ReadTokensByID("sess-001")
-	if stats == nil {
-		t.Fatal("expected non-nil stats")
-	}
-	if stats.SessionID != "sess-001" {
-		t.Errorf("SessionID = %q", stats.SessionID)
-	}
-	if stats.InputTokens != 300 {
-		t.Errorf("InputTokens = %d, want 300", stats.InputTokens)
-	}
-	if stats.OutputTokens != 150 {
-		t.Errorf("OutputTokens = %d, want 150", stats.OutputTokens)
-	}
-	if stats.CacheCreationInputTokens != 30 {
-		t.Errorf("CacheCreationInputTokens = %d, want 30", stats.CacheCreationInputTokens)
-	}
-	if stats.CacheReadInputTokens != 15 {
-		t.Errorf("CacheReadInputTokens = %d, want 15", stats.CacheReadInputTokens)
-	}
-	if stats.Model != "claude-opus-4-6" {
-		t.Errorf("Model = %q", stats.Model)
-	}
-	if stats.EstimatedCostUSD <= 0 {
-		t.Error("expected positive estimated cost")
-	}
-}
-
-func TestReadTokensByID_NotFound(t *testing.T) {
-	r, _ := setupTestReader(t)
-	stats := r.ReadTokensByID("nonexistent")
-	if stats != nil {
-		t.Error("expected nil for non-existent session")
 	}
 }
 
@@ -108,9 +64,6 @@ func TestReadSessionInfoByID(t *testing.T) {
 	if info.LastActivity.IsZero() {
 		t.Error("expected non-zero LastActivity")
 	}
-	if info.Tokens.InputTokens != 500 {
-		t.Errorf("Tokens.InputTokens = %d, want 500", info.Tokens.InputTokens)
-	}
 }
 
 // toolUseResult is a string for some tools. Reading must neither stop at such a
@@ -138,8 +91,9 @@ func TestReadSessionInfoByID_ToolUseResultShapes(t *testing.T) {
 			if info == nil {
 				t.Fatal("expected non-nil info")
 			}
-			if info.Tokens.InputTokens != 7 || info.Tokens.OutputTokens != 3 {
-				t.Errorf("tokens after the tool result = %d/%d, want 7/3", info.Tokens.InputTokens, info.Tokens.OutputTokens)
+			// The assistant line after the tool result carries the latest timestamp.
+			if want := time.Date(2026, 2, 26, 10, 0, 2, 0, time.UTC); !info.LastActivity.Equal(want) {
+				t.Errorf("LastActivity = %v, want %v (the line after the tool result)", info.LastActivity, want)
 			}
 		})
 	}
@@ -180,20 +134,6 @@ func TestListAllSessions_SkipsSubagents(t *testing.T) {
 	}
 	if results[0].SessionID != "main" {
 		t.Errorf("expected 'main' session, got %q", results[0].SessionID)
-	}
-}
-
-func TestEstimateCost(t *testing.T) {
-	stats := TokenStats{
-		InputTokens:              1_000_000,
-		OutputTokens:             1_000_000,
-		CacheCreationInputTokens: 1_000_000,
-		CacheReadInputTokens:     1_000_000,
-	}
-	cost := estimateCost(stats)
-	// 15 + 75 + 18.75 + 1.5 = 110.25
-	if cost < 110 || cost > 111 {
-		t.Errorf("estimateCost = %.2f, expected ~110.25", cost)
 	}
 }
 

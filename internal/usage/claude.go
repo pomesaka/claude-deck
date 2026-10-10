@@ -1,8 +1,6 @@
 package usage
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"os"
@@ -37,58 +35,6 @@ func (claudeFormat) logLine(s *LogStreamer, line []byte) bool {
 		return false // skip malformed lines
 	}
 	return s.processEntry(&entry)
-}
-
-// tokenOnlyEntry is a minimal struct for fast token aggregation.
-// jsonv2 は宣言されたフィールドだけデコードし、巨大な content 等をスキップする。
-type tokenOnlyEntry struct {
-	Timestamp string            `json:"timestamp"`
-	Message   *tokenOnlyMessage `json:"message,omitempty"`
-}
-
-type tokenOnlyMessage struct {
-	Model string      `json:"model"`
-	Usage *jsonlUsage `json:"usage,omitempty"`
-}
-
-// tokens reads only the token usage from a session's JSONL file.
-// 行単位で "usage" を含むかバイト検索し、該当行だけデコードすることで
-// 巨大な content を持つ行のパースを完全にスキップする。
-func (claudeFormat) tokens(path, sessionID string) *TokenStats {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-
-	stats := TokenStats{SessionID: sessionID}
-	usageMarker := []byte(`"usage"`)
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024) // max 10MB/line
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if !bytes.Contains(line, usageMarker) {
-			continue
-		}
-		var entry tokenOnlyEntry
-		if err := json.Unmarshal(line, &entry); err != nil {
-			continue
-		}
-		if entry.Message != nil && entry.Message.Usage != nil {
-			u := entry.Message.Usage
-			stats.InputTokens += u.InputTokens
-			stats.OutputTokens += u.OutputTokens
-			stats.CacheCreationInputTokens += u.CacheCreationInputTokens
-			stats.CacheReadInputTokens += u.CacheReadInputTokens
-			if entry.Message.Model != "" {
-				stats.Model = entry.Message.Model
-			}
-		}
-	}
-
-	stats.EstimatedCostUSD = estimateCost(stats)
-	return &stats
 }
 
 // quickInfo reads only the first few entries of a JSONL file
@@ -172,8 +118,6 @@ func (c claudeFormat) info(path string) *SessionInfo {
 		return nil
 	}
 
-	info.Tokens.SessionID = info.SessionID
-	info.Tokens.EstimatedCostUSD = estimateCost(info.Tokens)
 	return &info
 }
 
@@ -203,29 +147,5 @@ func accumulateEntry(info *SessionInfo, entry *jsonlEntry) {
 		if info.Prompt == "" && entry.Message != nil {
 			info.Prompt = extractTextContent(entry.Message.parseContent())
 		}
-	}
-
-	// Accumulate token usage from assistant entries
-	if entry.Message != nil {
-		accumulateUsage(&info.Tokens, entry.Message)
-		if entry.Message.Model != "" {
-			info.Model = entry.Message.Model
-		}
-	}
-}
-
-// accumulateUsage adds token counts and model from msg into stats.
-// No-op if msg or msg.Usage is nil.
-func accumulateUsage(stats *TokenStats, msg *jsonlMessage) {
-	if msg == nil || msg.Usage == nil {
-		return
-	}
-	u := msg.Usage
-	stats.InputTokens += u.InputTokens
-	stats.OutputTokens += u.OutputTokens
-	stats.CacheCreationInputTokens += u.CacheCreationInputTokens
-	stats.CacheReadInputTokens += u.CacheReadInputTokens
-	if msg.Model != "" {
-		stats.Model = msg.Model
 	}
 }

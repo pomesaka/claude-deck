@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"sort"
 	"time"
 
 	"github.com/pomesaka/claude-deck/internal/debuglog"
@@ -120,29 +119,9 @@ func (m *Manager) applyRuntimeRateLimits(limits *usage.RuntimeRateLimits) {
 	}
 }
 
-// HydrateFromJSONL reads Claude Code JSONL files and populates
-// JSONL-derived fields for sessions.
-// セッション数は DiscoverExternalSessions のページネーションで段階的に増えるため、
-// 一度に hydrate する数は自然に制限される。ReadTokensByID は "usage" マーカー行のみ
-// スキャンするため軽量。
-func (m *Manager) HydrateFromJSONL() {
-	sessions := m.copySessionsList()
-
-	// 最近のセッションから hydrate（LastActivity → StartedAt の降順）
-	sort.Slice(sessions, func(i, j int) bool {
-		ti := sessions[i].sortTime()
-		tj := sessions[j].sortTime()
-		return ti.After(tj)
-	})
-
-	for _, sess := range sessions {
-		m.hydrateSession(sess)
-	}
-}
-
-// RefreshFromJSONL re-reads Claude Code JSONL files and updates all
-// JSONL-derived fields (tokens, prompt, timestamps) for every session.
-// Also discovers any new external sessions with offset-based pagination.
+// RefreshFromJSONL is the periodic refresh: it marks sessions whose window is
+// gone as exited, re-reads the jj bookmarks, and discovers new external
+// sessions with offset-based pagination.
 // 並行呼び出し時は前回の refresh が終わるまでスキップする。
 func (m *Manager) RefreshFromJSONL() {
 	if !m.refreshing.CompareAndSwap(false, true) {
@@ -151,7 +130,6 @@ func (m *Manager) RefreshFromJSONL() {
 	defer m.refreshing.Store(false)
 
 	m.markVanishedSessions()
-	m.HydrateFromJSONL()
 	m.refreshBookmarks()
 
 	_, hasMore := m.DiscoverExternalSessions()
@@ -191,29 +169,4 @@ func (m *Manager) refreshBookmarks() {
 
 		sess.ApplyBookmark(bookmark)
 	}
-}
-
-// hydrateSession updates token usage for a single session via ApplyJSONLTokens.
-// メタデータ (prompt, timestamps 等) は Discover 時に取得済みなので、
-// ここではトークン数だけを軽量スキャンで更新する。
-func (m *Manager) hydrateSession(sess *Session) {
-	sess.mu.RLock()
-	csID := sess.CurrentRuntimeID()
-	sess.mu.RUnlock()
-
-	if csID == "" {
-		return
-	}
-
-	tokens := m.usage.ReadTokensByID(string(csID))
-	if tokens == nil {
-		return
-	}
-
-	sess.ApplyJSONLTokens(JSONLTokenData{
-		InputTokens:              tokens.InputTokens,
-		OutputTokens:             tokens.OutputTokens,
-		CacheCreationInputTokens: tokens.CacheCreationInputTokens,
-		CacheReadInputTokens:     tokens.CacheReadInputTokens,
-	}, m.config.Pricing)
 }

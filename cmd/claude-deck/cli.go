@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/pomesaka/claude-deck/internal/config"
 	"github.com/pomesaka/claude-deck/internal/ratelimits"
@@ -21,7 +22,8 @@ type cliRequest struct {
 	Op          string
 	Dir         string // new
 	NoWorkspace bool   // new
-	Target      string // close
+	Target      string // close, alias
+	Alias       string // alias: the alias to set. list: the text to filter aliases by
 	DryRun      bool   // gc
 	// hook
 	HookEvent       string
@@ -39,14 +41,17 @@ var cliCommands = map[string]func(args []string) (cliRequest, error){
 	"list":  parseListArgs,
 	"tree":  parseTreeArgs,
 	"close": parseCloseArgs,
+	"alias": parseAliasArgs,
 	"gc":    parseGCArgs,
 	"hook":  parseHookArgs,
 }
 
 // SessionInfo is the JSON form of a session printed by new / list / close.
 type SessionInfo struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Alias is the label given with `claude-deck alias`.
+	Alias           string `json:"alias,omitempty"`
 	RepoPath        string `json:"repo_path"`
 	WorkDir         string `json:"work_dir"`
 	Status          string `json:"status"`
@@ -67,6 +72,7 @@ func infoFromSnapshot(s session.Snapshot) SessionInfo {
 	return SessionInfo{
 		ID:              string(s.ID),
 		Name:            s.Name,
+		Alias:           s.Alias,
 		RepoPath:        s.RepoPath,
 		WorkDir:         s.WorkDir(),
 		Status:          s.Status.ID(),
@@ -121,11 +127,19 @@ func runCLI(name string, args []string) error {
 		if err != nil {
 			return err
 		}
-		infos := make([]SessionInfo, len(snaps))
-		for i, s := range snaps {
-			infos[i] = infoFromSnapshot(s)
+		infos := []SessionInfo{}
+		for _, s := range snaps {
+			if aliasMatches(s.Alias, req.Alias) {
+				infos = append(infos, infoFromSnapshot(s))
+			}
 		}
 		return printJSON(infos)
+	case "alias":
+		snap, err := session.SetAlias(st, req.Target, req.Alias)
+		if err != nil {
+			return err
+		}
+		return printJSON(infoFromSnapshot(snap))
 	case "tree":
 		snaps, err := session.ListStored(st)
 		if err != nil {
@@ -203,16 +217,25 @@ func parseNewArgs(args []string) (cliRequest, error) {
 func parseListArgs(args []string) (cliRequest, error) {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: claude-deck list")
+		fmt.Fprintln(fs.Output(), "Usage: claude-deck list [--alias TEXT]")
 		fmt.Fprintln(fs.Output(), "claude-deck のセッションを TUI の一覧と同じ順で JSON で返す。外部セッションは含まない。")
+		fs.PrintDefaults()
 	}
+	alias := fs.String("alias", "", "エイリアスにこの文字列を含むセッションだけを返す（大文字と小文字は区別しない）")
 	if err := fs.Parse(args); err != nil {
 		return cliRequest{}, err
 	}
 	if fs.NArg() > 0 {
 		return cliRequest{}, fmt.Errorf("list: unexpected arguments: %v", fs.Args())
 	}
-	return cliRequest{Op: "list"}, nil
+	return cliRequest{Op: "list", Alias: *alias}, nil
+}
+
+// aliasMatches reports whether a session with the alias passes `list --alias filter`.
+// An empty filter passes every session; otherwise the alias must contain the
+// filter, ignoring case, so a session without an alias never passes.
+func aliasMatches(alias, filter string) bool {
+	return filter == "" || strings.Contains(strings.ToLower(alias), strings.ToLower(filter))
 }
 
 func parseTreeArgs(args []string) (cliRequest, error) {
@@ -244,6 +267,27 @@ func parseCloseArgs(args []string) (cliRequest, error) {
 		return cliRequest{}, fmt.Errorf("close: specify exactly one session ID or name")
 	}
 	return cliRequest{Op: "close", Target: fs.Arg(0)}, nil
+}
+
+func parseAliasArgs(args []string) (cliRequest, error) {
+	fs := flag.NewFlagSet("alias", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "Usage: claude-deck alias [--session ID|NAME] <ALIAS>")
+		fmt.Fprintln(fs.Output(), "セッションに表示用の名前を付け、JSON で返す。TUI の一覧にセッション名の代わりに出る。使えるのは英数字と - _ . で 40 文字まで。ALIAS を空文字にすると消す。")
+		fs.PrintDefaults()
+	}
+	target := fs.String("session", os.Getenv(session.EnvSessionID), "対象のセッションの ID か名前（既定: $"+session.EnvSessionID+" = 自分のセッション）")
+	if err := fs.Parse(args); err != nil {
+		return cliRequest{}, err
+	}
+	if fs.NArg() != 1 {
+		fs.Usage()
+		return cliRequest{}, fmt.Errorf("alias: specify exactly one alias (\"\" removes it)")
+	}
+	if *target == "" {
+		return cliRequest{}, fmt.Errorf("alias: no session (--session or $%s)", session.EnvSessionID)
+	}
+	return cliRequest{Op: "alias", Target: *target, Alias: fs.Arg(0)}, nil
 }
 
 func parseGCArgs(args []string) (cliRequest, error) {

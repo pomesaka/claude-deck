@@ -16,8 +16,6 @@ type format interface {
 	quickInfo(path string, mtime time.Time) *SessionInfo
 	// info reads the whole transcript.
 	info(path string) *SessionInfo
-	// tokens reads the token usage of the transcript at path.
-	tokens(path, sessionID string) *TokenStats
 	// runtimeActivity reads what the runtime is doing from the tail of the transcript.
 	runtimeActivity(path string) RuntimeActivity
 	// logLine appends the log entries of one line to s and reports whether s changed.

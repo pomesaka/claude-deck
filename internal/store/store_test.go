@@ -5,8 +5,8 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,13 +38,12 @@ func TestStore_RoundTrip(t *testing.T) {
 			rec: Record{
 				ID: "b", Name: "maika-548e", RepoPath: "/repo", RepoName: "repo",
 				WorkspacePath: "/ws/maika-548e/sub", WorkspaceName: "maika-548e", SubProjectDir: "sub",
-				SessionChain: []string{"old", "new"}, ForkedFrom: "source", Status: "completed", FinishedAt: &finished, PID: 42,
+				SessionChain: []string{"old", "new"}, ForkedFrom: "source", Alias: "review-pr-12", Status: "completed", FinishedAt: &finished, PID: 42,
 				ErrorMessage: "boom", TerminalTitle: "title", BookmarkName: "feat/x",
 				LastJJRevision: "abc", LastJJParentRevision: "def",
 				Prompt: "hello", PermissionMode: "plan",
 				StartedAt: time.Unix(1_700_000_000, 1), LastActivity: time.Unix(1_700_000_050, 2),
-				InputTokens: 1, OutputTokens: 2, CacheCreationInputTokens: 3, CacheReadInputTokens: 4,
-				EstimatedCostUSD: 0.5, ClosingAt: &closing, LaunchingAt: &finished,
+				ClosingAt: &closing, LaunchingAt: &finished,
 			},
 		},
 	}
@@ -70,10 +69,14 @@ func TestStore_RoundTrip(t *testing.T) {
 func TestStore_MigratesAddedColumns(t *testing.T) {
 	path := filepath.Join(t.TempDir(), FileName)
 
-	// The schema as it was before forked_from, with one row.
-	oldSchema := strings.Replace(schema, ",\n\tforked_from                 TEXT NOT NULL DEFAULT ''", "", 1)
-	if oldSchema == schema {
-		t.Fatal("the schema no longer has the forked_from line this test removes")
+	// The schema as it was before any column was added, with one row.
+	oldSchema := schema
+	for _, c := range addedColumns {
+		line := regexp.MustCompile(`,\n\t` + c.name + ` [^\n,]*`)
+		if !line.MatchString(oldSchema) {
+			t.Fatalf("the schema has no line for the added column %s", c.name)
+		}
+		oldSchema = line.ReplaceAllString(oldSchema, "")
 	}
 	db, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {
@@ -94,11 +97,12 @@ func TestStore_MigratesAddedColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Name != "anna-8cc7" || got.ForkedFrom != "" {
-		t.Errorf("old row = %+v, want name anna-8cc7 and no ForkedFrom", got)
+	if got.Name != "anna-8cc7" || got.ForkedFrom != "" || got.Alias != "" {
+		t.Errorf("old row = %+v, want name anna-8cc7, no ForkedFrom and no Alias", got)
 	}
 	if _, err := st.Update("a", func(r *Record) error {
 		r.ForkedFrom = "source"
+		r.Alias = "review-pr-12"
 		return nil
 	}); err != nil {
 		t.Fatalf("Update: %v", err)
@@ -110,8 +114,8 @@ func TestStore_MigratesAddedColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after reopening: %v", err)
 	}
-	if got.ForkedFrom != "source" {
-		t.Errorf("ForkedFrom after reopening = %q, want source", got.ForkedFrom)
+	if got.ForkedFrom != "source" || got.Alias != "review-pr-12" {
+		t.Errorf("after reopening: ForkedFrom = %q, Alias = %q; want source, review-pr-12", got.ForkedFrom, got.Alias)
 	}
 }
 
@@ -225,5 +229,46 @@ func TestStore_DataVersionSeesOwnCommits(t *testing.T) {
 	after, _ := st.DataVersion()
 	if after == before {
 		t.Error("DataVersion did not change after own commit")
+	}
+}
+
+// A database from before the token columns were dropped from the schema still
+// has them. Rows are written and read without naming them.
+func TestStore_IgnoresColumnsNoLongerUsed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		schema,
+		"ALTER TABLE sessions ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE sessions ADD COLUMN estimated_cost_usd REAL NOT NULL DEFAULT 0",
+		"INSERT INTO sessions (id, name, status, input_tokens, estimated_cost_usd) VALUES ('a', 'anna-8cc7', 'idle', 120, 1.5)",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st := openTestStore(t, path)
+	if _, err := st.Update("a", func(r *Record) error {
+		r.Alias = "review-pr-12"
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if err := st.Insert(Record{ID: "b", Name: "emiri-78fb", Status: "idle"}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	got, err := st.Get("a")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Name != "anna-8cc7" || got.Alias != "review-pr-12" {
+		t.Errorf("row = %+v, want name anna-8cc7 and alias review-pr-12", got)
 	}
 }

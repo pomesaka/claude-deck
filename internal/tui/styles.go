@@ -45,10 +45,6 @@ var (
 			Foreground(colorTextDim).
 			Padding(0, 1)
 
-	// Token display
-	tokenStyle = lipgloss.NewStyle().
-			Foreground(colorSecondary)
-
 	// Title
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -115,9 +111,6 @@ func InitStyles(theme config.ThemeConfig) {
 	footerStyle = lipgloss.NewStyle().
 		Foreground(colorTextDim).
 		Padding(0, 1)
-
-	tokenStyle = lipgloss.NewStyle().
-		Foreground(colorSecondary)
 
 	titleStyle = lipgloss.NewStyle().
 		Bold(true).

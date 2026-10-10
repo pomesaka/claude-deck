@@ -46,9 +46,7 @@ type jsonlProgressData struct {
 
 type jsonlMessage struct {
 	Role    string         `json:"role"`
-	Model   string         `json:"model"`
 	Content jsontext.Value `json:"content,omitempty"`
-	Usage   *jsonlUsage    `json:"usage,omitempty"`
 }
 
 // parseContent lazily deserializes the raw Content JSON into a Go value.
@@ -62,13 +60,6 @@ func (m *jsonlMessage) parseContent() any {
 		return nil
 	}
 	return v
-}
-
-type jsonlUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 }
 
 // jsonlToolUseResult holds the structured result of a tool execution (Edit/Write).

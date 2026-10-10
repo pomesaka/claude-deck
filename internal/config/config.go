@@ -20,7 +20,6 @@ type Config struct {
 	Commands  CommandsConfig           `toml:"commands"`
 	Runtime   RuntimeConfig            `toml:"runtime"`
 	Session   SessionConfig            `toml:"session"`
-	Pricing   PricingConfig            `toml:"pricing"`
 	Projects  map[string]ProjectConfig `toml:"projects"`
 	DataDir   string                   `toml:"data_dir"`
 }
@@ -78,14 +77,6 @@ type SessionConfig struct {
 	MaxJSONLEntries int    `toml:"max_jsonl_entries"`
 	DiscoveryDays   int    `toml:"discovery_days"`
 	RefreshInterval string `toml:"refresh_interval"`
-}
-
-// PricingConfig holds token pricing per million tokens (USD).
-type PricingConfig struct {
-	InputPerMTok      float64 `toml:"input_per_mtok"`
-	OutputPerMTok     float64 `toml:"output_per_mtok"`
-	CacheWritePerMTok float64 `toml:"cache_write_per_mtok"`
-	CacheReadPerMTok  float64 `toml:"cache_read_per_mtok"`
 }
 
 // DefaultConfig holds default settings.
@@ -182,12 +173,6 @@ func Default() *Config {
 			MaxJSONLEntries: 500,
 			DiscoveryDays:   14,
 			RefreshInterval: "5s",
-		},
-		Pricing: PricingConfig{
-			InputPerMTok:      15.0,
-			OutputPerMTok:     75.0,
-			CacheWritePerMTok: 18.75,
-			CacheReadPerMTok:  1.50,
 		},
 		DataDir: DefaultDataDir(),
 	}

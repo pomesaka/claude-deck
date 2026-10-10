@@ -39,17 +39,11 @@ func TestCodexReadSessionInfoByID(t *testing.T) {
 	if info.CWD != "/repo" {
 		t.Errorf("CWD = %q, want /repo", info.CWD)
 	}
-	if info.Model != "gpt-5.5" {
-		t.Errorf("Model = %q, want gpt-5.5", info.Model)
-	}
 	if info.PermissionMode != "on-request" {
 		t.Errorf("PermissionMode = %q, want on-request", info.PermissionMode)
 	}
 	if info.Prompt != "implement codex support" {
 		t.Errorf("Prompt = %q", info.Prompt)
-	}
-	if info.Tokens.InputTokens != 100 || info.Tokens.OutputTokens != 50 {
-		t.Errorf("Tokens = %+v, want input=100 output=50", info.Tokens)
 	}
 }
 

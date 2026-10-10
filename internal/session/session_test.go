@@ -68,36 +68,6 @@ func TestStatus_NeedsAttention(t *testing.T) {
 	}
 }
 
-func TestTokenUsage_EstimateCost(t *testing.T) {
-	pricing := PricingPolicy{
-		InputPerMTok:      15.0,
-		OutputPerMTok:     75.0,
-		CacheWritePerMTok: 18.75,
-		CacheReadPerMTok:  1.50,
-	}
-
-	tu := TokenUsage{
-		InputTokens:              1_000_000,
-		OutputTokens:             500_000,
-		CacheCreationInputTokens: 200_000,
-		CacheReadInputTokens:     300_000,
-	}
-
-	cost := tu.EstimateCost(pricing)
-	// 1M * 15/1M + 0.5M * 75/1M + 0.2M * 18.75/1M + 0.3M * 1.5/1M
-	// = 15.0 + 37.5 + 3.75 + 0.45 = 56.7
-	expected := 56.7
-	if cost < expected-0.01 || cost > expected+0.01 {
-		t.Errorf("EstimateCost = %f, want ~%f", cost, expected)
-	}
-
-	// Zero pricing returns 0
-	zeroCost := tu.EstimateCost(PricingPolicy{})
-	if zeroCost != 0 {
-		t.Errorf("EstimateCost with zero pricing = %f, want 0", zeroCost)
-	}
-}
-
 func TestNewSession(t *testing.T) {
 	sess := NewSession("/repo", "my-repo")
 
@@ -175,7 +145,6 @@ func TestSession_Elapsed_Completed(t *testing.T) {
 func TestSession_Snapshot(t *testing.T) {
 	sess := NewSession("/repo", "my-repo")
 	sess.SetCurrentTool("read")
-	sess.TokenUsage = TokenUsage{InputTokens: 500, OutputTokens: 200}
 
 	snap := sess.Snapshot()
 	if snap.ID != sess.ID {
@@ -186,9 +155,6 @@ func TestSession_Snapshot(t *testing.T) {
 	}
 	if snap.CurrentTool != "read" {
 		t.Errorf("snapshot CurrentTool = %q", snap.CurrentTool)
-	}
-	if snap.TokenUsage.InputTokens != 500 {
-		t.Errorf("snapshot InputTokens = %d", snap.TokenUsage.InputTokens)
 	}
 }
 

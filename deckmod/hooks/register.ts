@@ -57,12 +57,15 @@ function deck($: EngineInterface, args: string[]): Promise<boolean> {
  * What the model is told when the session starts.
  * WHY 実際のパスと ID を書く: バイナリは PATH に無いことがあり、close は自分の ID を避ける必要がある。
  * 使い方はスキル（skills/claude-deck）に置き、ここには要るときにスキルを読むための手がかりだけを書く。
+ * WHY alias だけはここにも書く: スキルは CLI を使う用事ができたときにしか読まれない。
+ * 頼まれなくても付けてほしい操作は、最初から見える場所に書かないと実行されない。
  */
 function deckContext(env: { bin: string; id: string }): string {
   return [
     'このセッションは claude-deck（Claude Code のセッションを tmux と jj ワークスペースで管理するダッシュボード）が起動している。',
     `deck のセッション ID: ${env.id}`,
     `CLI: ${env.bin} new | list | close で、別のセッションを作る・一覧する・閉じることができる。`,
+    `作業の内容が分かったら、頼まれなくても ${env.bin} alias <英数字と - _ .> でこのセッションに名前を付け、内容が変わったら付け直す。利用者は一覧のこの名前でセッションを探す。`,
     '使う前に deck-status:claude-deck スキルを読む。',
   ].join('\n')
 }

@@ -53,13 +53,6 @@ func TestDefault(t *testing.T) {
 	if cfg.Session.RefreshInterval != "5s" {
 		t.Errorf("Session.RefreshInterval = %q, want '5s'", cfg.Session.RefreshInterval)
 	}
-	// Pricing defaults
-	if cfg.Pricing.InputPerMTok != 15.0 {
-		t.Errorf("Pricing.InputPerMTok = %f, want 15.0", cfg.Pricing.InputPerMTok)
-	}
-	if cfg.Pricing.OutputPerMTok != 75.0 {
-		t.Errorf("Pricing.OutputPerMTok = %f, want 75.0", cfg.Pricing.OutputPerMTok)
-	}
 }
 
 func TestLoadFrom_NonExistent(t *testing.T) {
@@ -124,6 +117,7 @@ max_log_lines = 2000 # 読む側の無い古いキー。あっても読み込み
 discovery_days = 7
 refresh_interval = "10s"
 
+# 読む側の無い古いセクション。あっても読み込みは失敗しない
 [pricing]
 input_per_mtok = 10.0
 output_per_mtok = 50.0
@@ -171,16 +165,6 @@ output_per_mtok = 50.0
 	// Unset session fields should keep defaults
 	if cfg.Session.MaxJSONLEntries != 500 {
 		t.Errorf("Session.MaxJSONLEntries = %d, want default 500", cfg.Session.MaxJSONLEntries)
-	}
-	if cfg.Pricing.InputPerMTok != 10.0 {
-		t.Errorf("Pricing.InputPerMTok = %f, want 10.0", cfg.Pricing.InputPerMTok)
-	}
-	if cfg.Pricing.OutputPerMTok != 50.0 {
-		t.Errorf("Pricing.OutputPerMTok = %f, want 50.0", cfg.Pricing.OutputPerMTok)
-	}
-	// Unset pricing fields should keep defaults
-	if cfg.Pricing.CacheWritePerMTok != 18.75 {
-		t.Errorf("Pricing.CacheWritePerMTok = %f, want default 18.75", cfg.Pricing.CacheWritePerMTok)
 	}
 }
 

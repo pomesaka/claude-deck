@@ -26,32 +26,28 @@ func (s *Session) recordLocked() store.Record {
 		chain[i] = string(id)
 	}
 	return store.Record{
-		ID:                       string(s.ID),
-		Name:                     s.Name,
-		RepoPath:                 s.RepoPath,
-		RepoName:                 s.RepoName,
-		WorkspacePath:            s.WorkspacePath,
-		WorkspaceName:            s.WorkspaceName,
-		SubProjectDir:            s.SubProjectDir,
-		SessionChain:             chain,
-		ForkedFrom:               string(s.ForkedFrom),
-		Status:                   s.Status.ID(),
-		FinishedAt:               copyTimePtr(s.FinishedAt),
-		PID:                      s.PID,
-		ErrorMessage:             s.ErrorMessage,
-		TerminalTitle:            s.TerminalTitle,
-		BookmarkName:             s.BookmarkName,
-		LastJJRevision:           s.LastJJRevision,
-		LastJJParentRevision:     s.LastJJParentRevision,
-		Prompt:                   s.Prompt,
-		PermissionMode:           s.PermissionMode,
-		StartedAt:                s.StartedAt,
-		LastActivity:             s.LastActivity,
-		InputTokens:              s.TokenUsage.InputTokens,
-		OutputTokens:             s.TokenUsage.OutputTokens,
-		CacheCreationInputTokens: s.TokenUsage.CacheCreationInputTokens,
-		CacheReadInputTokens:     s.TokenUsage.CacheReadInputTokens,
-		EstimatedCostUSD:         s.TokenUsage.EstimatedCostUSD,
+		ID:                   string(s.ID),
+		Name:                 s.Name,
+		Alias:                s.Alias,
+		RepoPath:             s.RepoPath,
+		RepoName:             s.RepoName,
+		WorkspacePath:        s.WorkspacePath,
+		WorkspaceName:        s.WorkspaceName,
+		SubProjectDir:        s.SubProjectDir,
+		SessionChain:         chain,
+		ForkedFrom:           string(s.ForkedFrom),
+		Status:               s.Status.ID(),
+		FinishedAt:           copyTimePtr(s.FinishedAt),
+		PID:                  s.PID,
+		ErrorMessage:         s.ErrorMessage,
+		TerminalTitle:        s.TerminalTitle,
+		BookmarkName:         s.BookmarkName,
+		LastJJRevision:       s.LastJJRevision,
+		LastJJParentRevision: s.LastJJParentRevision,
+		Prompt:               s.Prompt,
+		PermissionMode:       s.PermissionMode,
+		StartedAt:            s.StartedAt,
+		LastActivity:         s.LastActivity,
 	}
 }
 
@@ -74,6 +70,7 @@ func newSessionFromRecord(r store.Record) *Session {
 // Caller must hold s.mu (write) or own s exclusively.
 func (s *Session) applyControlRecordLocked(r store.Record) {
 	s.Name = r.Name
+	s.Alias = r.Alias
 	s.WorkspacePath = r.WorkspacePath
 	s.WorkspaceName = r.WorkspaceName
 	s.SessionChain = s.SessionChain[:0]
@@ -103,13 +100,6 @@ func (s *Session) applyProjectionRecordLocked(r store.Record) {
 	s.PermissionMode = r.PermissionMode
 	s.StartedAt = r.StartedAt
 	s.LastActivity = r.LastActivity
-	s.TokenUsage = TokenUsage{
-		InputTokens:              r.InputTokens,
-		OutputTokens:             r.OutputTokens,
-		CacheCreationInputTokens: r.CacheCreationInputTokens,
-		CacheReadInputTokens:     r.CacheReadInputTokens,
-		EstimatedCostUSD:         r.EstimatedCostUSD,
-	}
 }
 
 // copyProjection copies the TUI-projected fields of src into r.
@@ -125,11 +115,6 @@ func copyProjection(r *store.Record, src store.Record) {
 	r.PermissionMode = src.PermissionMode
 	r.StartedAt = src.StartedAt
 	r.LastActivity = src.LastActivity
-	r.InputTokens = src.InputTokens
-	r.OutputTokens = src.OutputTokens
-	r.CacheCreationInputTokens = src.CacheCreationInputTokens
-	r.CacheReadInputTokens = src.CacheReadInputTokens
-	r.EstimatedCostUSD = src.EstimatedCostUSD
 }
 
 func copyTimePtr(t *time.Time) *time.Time {

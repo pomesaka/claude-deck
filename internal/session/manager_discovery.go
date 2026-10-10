@@ -79,7 +79,6 @@ func newExternalSession(info *usage.SessionInfo) *Session { //nolint:unparam
 		PermissionMode: info.PermissionMode,
 		StartedAt:      info.StartedAt,
 		LastActivity:   info.LastActivity,
-		TokenUsage:     TokenUsageFromStats(info.Tokens),
 	}
 	// FinishedAt は「プロセスが終了した時刻」であり、「最後に JSONL が更新された時刻」ではない。
 	// 外部セッションはプロセスが終了したかどうか不明（JSONL が止まっているだけかもしれない）。

@@ -1,6 +1,6 @@
 ---
 name: claude-deck
-description: claude-deck の CLI で、別の Claude Code セッションを作る・一覧する・閉じる。 - 「別セッションを立てて」「新しいワークスペースで始めたい」「いま動いているセッションを見せて」「あのセッションを閉じて」と言われたとき。
+description: claude-deck の CLI で、別の Claude Code セッションを作る・一覧する・閉じる、セッションに表示用の名前を付ける。 - 「別セッションを立てて」「新しいワークスペースで始めたい」「いま動いているセッションを見せて」「あのセッションを閉じて」「このセッションに名前を付けて」と言われたとき。
 ---
 
 # claude-deck
@@ -14,17 +14,19 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
 | コマンド | 動作 |
 |---|---|
 | `new [--dir DIR] [--no-workspace]` | 新しいセッションを作り、tmux のウィンドウで Claude Code を起動する |
-| `list` | claude-deck のセッションを TUI の一覧と同じ順で返す。claude-deck の外で起動したセッションは含まない |
+| `list [--alias TEXT]` | claude-deck のセッションを TUI の一覧と同じ順で返す。claude-deck の外で起動したセッションは含まない。`--alias` を付けると、エイリアスにその文字列を含むものだけを返す |
 | `tree` | Claude Code のセッションを、`/clear` とフォークの親子関係でたどった木としてテキストで出す |
 | `close <ID\|NAME>` | プロセスを止め、ワークスペースを消す。JSONL とメタデータは残り、TUI から再開できる |
+| `alias [--session ID\|NAME] <ALIAS>` | セッションに表示用の名前を付ける。TUI の一覧に、セッション名の代わりに出る |
 | `gc [--dry-run]` | どのセッションのものでもないワークスペースと、消えたワークスペースについての Claude Code の記録を消す |
 
-出力は JSON。`new` と `close` は次の形で 1 件、`list` はその配列を返す。
+出力は JSON。`new`・`close`・`alias` は次の形で 1 件、`list` はその配列を返す。
 
 ```json
 {
   "id": "deck のセッション ID",
   "name": "セッション名",
+  "alias": "alias で付けた表示用の名前（付けていなければ無い）",
   "repo_path": "リポジトリのルート",
   "work_dir": "Claude Code が動いているディレクトリ",
   "status": "idle | running | waiting_approval | waiting_answer | completed | error",
@@ -54,6 +56,33 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
 - 待機の通知は完了の合図ではない。相手が裏で走らせたコマンドの終了を待っているあいだにも届く。通知が来たのに報告が届いていなければ、`list` の `status` で相手の状態を確かめる
 - `status` が `idle` で報告が届いていなければ、相手は止まっている。報告を自分の画面に書いただけで終えていることが多いので、SendMessage で「報告が届いていない」と伝えて送り直させる。`running` なら作業中なので待つ
 - 相手が画面に書いた文はこちらに届かない。依頼文に「結果は SendMessage で返す」と書く
+
+## alias
+
+- `--session` を省くと、自分のセッション（環境変数 `CLAUDE_DECK_SESSION_ID`）に付ける
+- **自分のセッションのエイリアスは、頼まれなくても付けて、こまめに付け直す**。利用者は一覧のエイリアスを見て、目当てのセッションを探す。古いままだと探せない
+  - 最初の依頼で作業の内容が分かった時点で付ける
+  - 作業の内容が変わったら付け直す（レビューが終わって実装に入った、別の issue に移った、など）
+  - 何をしているセッションかが分かる短い名前にする。対象と作業を入れる（`review-pr-12`、`fix-login-bug`、`deck-alias-feature`）。`work` や `task` のような、どのセッションにも当てはまる名前は付けない
+  - 付けたことを利用者に報告しなくてよい
+- 使えるのは英数字と `-` `_` `.` だけで、40 文字まで（`review-pr-12`、`fix-login-bug` など）。日本語と空白は使えない
+- 付け直すと上書きされ、`""` を渡すと消える
+- フラグは名前より前に書く（`alias --session anna-8cc7 review-pr-12`）
+- 変わるのは表示だけ。`name` は変わらないので、SendMessage の宛先と `close` の指定には `name` を使う
+
+## エイリアスで指されたセッションに頼む
+
+利用者は、セッションをエイリアスで呼ぶ（「`review-pr-12` に聞いて」「あの `fix-login` のセッションに頼んで」）。SendMessage の宛先はエイリアスではなく `name` なので、先に対応する `name` を調べる。
+
+```bash
+"$CLAUDE_DECK_BIN" list --alias review-pr-12 | jq -r '.[] | "\(.name)\t\(.alias)\t\(.status)"'
+```
+
+- `--alias` は部分一致で、大文字と小文字を区別しない。利用者がうろ覚えの名前を言ったときは、短い語で探す
+- 1 件に決まったら、その `name` を SendMessage の宛先にする
+- 複数見つかったら、推測で選ばずに候補（`name`、`alias`、`work_dir`）を利用者に見せて確かめる
+- 0 件なら、利用者の言った語が `name`（`shoko-677b` のような形）のことかもしれない。`list` の全件から `name` で探す
+- `status` が `completed` か `error` のセッションは動いていないので、送っても届かない。利用者に、TUI で再開するよう伝える
 
 ## close
 

@@ -85,7 +85,6 @@ func run() error {
 
 	// Apply config to package-level settings
 	tui.InitStyles(cfg.Theme)
-	usage.SetPricing(cfg.Pricing.InputPerMTok, cfg.Pricing.OutputPerMTok, cfg.Pricing.CacheWritePerMTok, cfg.Pricing.CacheReadPerMTok)
 	usage.MaxEntries = cfg.Session.MaxJSONLEntries
 
 	// Ensure data directory
@@ -135,13 +134,10 @@ func run() error {
 	// Must run after LoadExisting so deck sessions are populated.
 	mgr.ReconcileTmux()
 
-	// Heavy JSONL reads はバックグラウンドで実行し TUI を即座に表示する。
-	// 初回は offset=0 で最初の30件だけ discover して即表示。
+	// JSONL の読み取りはバックグラウンドで行い、TUI をすぐに表示する。
+	// 初回は offset=0 で最初の30件だけ discover する。
 	// 続きは 5秒 tick の RefreshFromJSONL に委ねて段階的に読み込む。
-	go func() {
-		mgr.HydrateFromJSONL()
-		mgr.DiscoverExternalSessions()
-	}()
+	go mgr.DiscoverExternalSessions()
 
 	// Handle signals
 	sigCh := make(chan os.Signal, 1)
@@ -235,7 +231,6 @@ func runPreview() error {
 	}
 
 	tui.InitStyles(cfg.Theme)
-	usage.SetPricing(cfg.Pricing.InputPerMTok, cfg.Pricing.OutputPerMTok, cfg.Pricing.CacheWritePerMTok, cfg.Pricing.CacheReadPerMTok)
 	usage.MaxEntries = cfg.Session.MaxJSONLEntries
 
 	if err := cfg.EnsureDataDir(); err != nil {
@@ -313,16 +308,10 @@ func buildManagerConfig(cfg *config.Config) (session.ManagerConfig, error) {
 		MaxSessions:           cfg.Session.MaxSessions,
 		DiscoveryDays:         cfg.Session.DiscoveryDays,
 		RefreshInterval:       refreshInterval,
-		Pricing: session.PricingPolicy{
-			InputPerMTok:      cfg.Pricing.InputPerMTok,
-			OutputPerMTok:     cfg.Pricing.OutputPerMTok,
-			CacheWritePerMTok: cfg.Pricing.CacheWritePerMTok,
-			CacheReadPerMTok:  cfg.Pricing.CacheReadPerMTok,
-		},
 		WorkspaceSymlinksFunc: cfg.WorkspaceSymlinks,
 		TrustWorkspaceFunc:    trustWorkspace,
 		ForgetProjectsFunc:    forgetProjects,
-		AddDirsFunc:          cfg.ResolvedAddDirs,
+		AddDirsFunc:           cfg.ResolvedAddDirs,
 		DeckCommand:           deckCommand,
 		PluginDir:             pluginDir,
 		TmuxCommand:           cfg.Tmux.Command,

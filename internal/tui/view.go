@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/pomesaka/claude-deck/internal/session"
 )
 
@@ -273,6 +274,34 @@ func selBg(s lipgloss.Style, selected bool) lipgloss.Style {
 	return s
 }
 
+// renderWorkDir renders where the session works, as "<path to the repository>/<repository>[/<sub project>]",
+// cut on the left to width. The home directory is shown as "~".
+// The repository and the sub project are emphasized; the path before them is dimmed.
+func renderWorkDir(snap session.Snapshot, width int, dim, emph lipgloss.Style) string {
+	repoPath := snap.RepoPath
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(repoPath, home) {
+		repoPath = "~" + repoPath[len(home):]
+	}
+	if repoPath == "" {
+		return dim.Render(truncateLeft(snap.WorkDir(), width))
+	}
+	full := repoPath
+	if snap.SubProjectDir != "" {
+		full += "/" + snap.SubProjectDir
+	}
+	// 強調するのは、リポジトリ名から後ろ（サブプロジェクトを含む）。
+	emphLen := len([]rune(snap.RepoName))
+	if snap.SubProjectDir != "" {
+		emphLen += 1 + len([]rune(snap.SubProjectDir))
+	}
+	if !strings.HasSuffix(repoPath, snap.RepoName) {
+		emphLen = 0
+	}
+	runes := []rune(truncateLeft(full, width))
+	split := max(0, len(runes)-emphLen)
+	return dim.Render(string(runes[:split])) + emph.Render(string(runes[split:]))
+}
+
 func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	// width は sessionItemStyle の外寸（border-box）。
 	// Padding(0,1) の内側がコンテンツ領域なので 2 を引く。
@@ -291,7 +320,7 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 
 	// ステータスアイコン（セッション名の前に付ける、全ステータスで幅を揃える）
 	var statusIcon string
-	// statusMessage: line2 末尾に表示するメッセージ（Approve待ち、エラー等）
+	// statusMessage: line2 末尾に表示するメッセージ（エラーの理由）
 	var statusMessage string
 	switch snap.Status {
 	case session.StatusRunning:
@@ -306,108 +335,62 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 		statusIcon = selBg(statusDoneStyle, selected).Render("●")
 	case session.StatusError:
 		statusIcon = selBg(statusErrorStyle, selected).Render("●")
-		if snap.ErrorMessage != "" {
-			statusMessage = selBg(statusErrorStyle, selected).Render(truncate(snap.ErrorMessage, cw-20))
-		} else {
-			statusMessage = selBg(statusErrorStyle, selected).Render("エラー")
+		statusMessage = snap.ErrorMessage
+		if statusMessage == "" {
+			statusMessage = "エラー"
 		}
 	case session.StatusUnmanaged:
 		statusIcon = selBg(unmanagedIconStyle, selected).Render("●")
 	}
 
-	// line1: [icon] [repoPath/session 固定幅] [title 残り幅]
+	// line1: [icon] 作業ディレクトリ@bookmark ……… セッション名（右寄せ）
 	iconCol := statusIcon + bg.Render(" ")
 	iconWidth := lipgloss.Width(iconCol)
 
-	// RepoPath を短縮表示（ホームディレクトリを ~ に置換）
-	repoPath := snap.RepoPath
-	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(repoPath, home) {
-		repoPath = "~" + repoPath[len(home):]
-	}
-
-	// パスを3層に分解: repoPrefix / repoName{/subProjectDir} / sessionName
-	// repoName+subProjectDir を最も強調し、sessionName はやや控えめ
-	repoName := snap.RepoName
-	var repoPrefix string // repoName の前のパス部分（末尾 / 含む）
-	if repoPath != "" && repoName != "" {
-		if idx := strings.LastIndex(repoPath, repoName); idx > 0 {
-			repoPrefix = repoPath[:idx]
-		}
-	}
-
-	// 強調部分: repoName + subProjectDir
-	emphasized := repoName
-	if snap.SubProjectDir != "" {
-		emphasized += "/" + snap.SubProjectDir
-	}
-
-	// パスカラム: 全体幅の50%を固定確保し、truncateLeft で末尾を残す
-	pathWidth := (cw - iconWidth) / 2
-	if pathWidth < 10 {
-		pathWidth = 10
-	}
-
-	// フルパス組み立て: prefix + emphasized + / + sessionName
-	fullPath := repoPrefix + emphasized + "/" + snap.Name
-	if repoPath == "" {
-		fullPath = snap.Name
-	}
-	truncated := truncateLeft(fullPath, pathWidth)
-
-	// truncate 後の文字列をスタイル適用
-	// セッション名（末尾）→ 強調部分（中間）→ プレフィックス（先頭）の順でマッチ
 	emphStyle := selBg(lipgloss.NewStyle().Foreground(colorPrimary).Bold(true), selected)
 	nameStyle := selBg(lipgloss.NewStyle().Foreground(colorSecondary), selected)
 	dim := selBg(dimStyle, selected)
-
-	var pathCol string
-	if lastSlash := strings.LastIndex(truncated, "/"); lastSlash >= 0 {
-		sessionPart := truncated[lastSlash+1:]
-		beforeSession := truncated[:lastSlash+1]
-		// beforeSession 内で強調部分を探す
-		if empIdx := strings.Index(beforeSession, repoName); empIdx >= 0 {
-			prefix := beforeSession[:empIdx]
-			empPart := beforeSession[empIdx:]
-			pathCol = dim.Render(prefix) + emphStyle.Render(empPart) + nameStyle.Render(sessionPart)
-		} else {
-			// truncateLeft で prefix が切られた場合、全体を強調+セッション名
-			pathCol = emphStyle.Render(beforeSession) + nameStyle.Render(sessionPart)
-		}
-	} else {
-		pathCol = nameStyle.Render(truncated)
-	}
-	pathCol = padRightBg(pathCol, pathWidth, bg)
-
-	// タイトルカラム: BookmarkName を優先、なければ TerminalTitle にフォールバック
-	titleWidth := cw - iconWidth - pathWidth - 1
-	var titleCol string
-	displayTitle := snap.BookmarkName
-	if displayTitle == "" {
-		displayTitle = snap.TerminalTitle
-	}
-	if displayTitle != "" && titleWidth > 4 {
-		titleCol = bg.Render(" ") + selBg(lipgloss.NewStyle().Foreground(colorText), selected).Render(truncate(displayTitle, titleWidth))
-	}
-
-	line1 := padRightBg(iconCol+pathCol+titleCol, cw, bg)
-
-	// line2
-	const timeWidth = 14
-	lastAct := padRightBg(dim.Render(formatTimeCompact(snap)), timeWidth, bg)
-	const costWidth = 7
-	cost := padRightBg(selBg(tokenStyle, selected).Render(fmt.Sprintf("$%.2f", snap.TokenUsage.EstimatedCostUSD)), costWidth, bg)
-	tokens := dim.Render(formatTokens(snap.TokenUsage.InputTokens, snap.TokenUsage.OutputTokens))
-
-	// line2: インデント(icon幅) + 時間 + コスト + トークン + [メッセージ]
-	indent := bg.Render(strings.Repeat(" ", iconWidth))
 	sp := bg.Render(" ")
-	var line2 string
-	if statusMessage != "" {
-		line2 = indent + lastAct + sp + cost + sp + tokens + sp + statusMessage
-	} else {
-		line2 = indent + lastAct + sp + cost + sp + tokens
+
+	// 幅の配分: セッション名とブックマークは切らずに出し、作業ディレクトリを先に省略する。
+	// WHY: 作業ディレクトリは左を省略しても末尾（リポジトリ名）で見分けがつく。ブックマークと
+	// セッション名は、末尾が切れると別のものと区別できなくなる。
+	// 作業ディレクトリが minWorkDirWidth を下回るときだけ、ブックマークを切る。
+	const minWorkDirWidth = 10
+	avail := cw - iconWidth
+	nameCol := nameStyle.Render(truncate(snap.Name, avail-1))
+	avail -= lipgloss.Width(nameCol) + 1 // 名前の前に最低 1 桁あける
+	var bookmarkCol string
+	if room := avail - 1 - minWorkDirWidth; snap.BookmarkName != "" && room > 0 {
+		bookmarkCol = dim.Render("@") + selBg(lipgloss.NewStyle().Foreground(colorText), selected).Render(truncate(snap.BookmarkName, room))
+		avail -= lipgloss.Width(bookmarkCol)
 	}
-	line2 = padRightBg(line2, cw, bg)
+	line1 := joinEnds(iconCol+renderWorkDir(snap, avail, dim, emphStyle)+bookmarkCol, nameCol, cw, bg)
+
+	// line2: インデント(icon幅) + 起動時間 + 最終更新 + [メッセージ] ……… [エイリアス]（右寄せ）
+	const (
+		uptimeWidth = 6  // "23h59m" / "99d23h"
+		timeWidth   = 11 // "01/02 15:04"
+	)
+	indent := bg.Render(strings.Repeat(" ", iconWidth))
+	uptime := padRightBg(nameStyle.Render(formatUptime(snap)), uptimeWidth, bg)
+	lastAct := padRightBg(dim.Render(formatLastActivity(snap)), timeWidth, bg)
+	left2 := indent + uptime + sp + lastAct
+
+	var aliasCol string
+	if snap.Alias != "" {
+		alias := truncate(snap.Alias, cw-lipgloss.Width(left2)-1)
+		aliasCol = selBg(lipgloss.NewStyle().Foreground(colorText).Bold(true), selected).Render(alias)
+	}
+	// メッセージは、日時とエイリアスのあいだに残った幅に収める。
+	rest := cw - lipgloss.Width(left2) - 1
+	if aliasCol != "" {
+		rest -= lipgloss.Width(aliasCol) + 1
+	}
+	if statusMessage != "" && rest > 4 {
+		left2 += sp + selBg(statusErrorStyle, selected).Render(truncate(statusMessage, rest))
+	}
+	line2 := joinEnds(left2, aliasCol, cw, bg)
 
 	content := lipgloss.JoinVertical(lipgloss.Left, line1, line2)
 
@@ -500,7 +483,18 @@ func formatDuration(d time.Duration) string {
 	}
 }
 
-func formatTimeCompact(snap session.Snapshot) string {
+// formatUptime formats how long the session has been running: from its start to
+// now, or to when it finished. "-" when the start is unknown.
+func formatUptime(snap session.Snapshot) string {
+	if snap.StartedAt.IsZero() {
+		return "-"
+	}
+	return formatDuration(snap.Elapsed)
+}
+
+// formatLastActivity formats when the session was last active, falling back to
+// when it finished and then to when it started. "-" when none is known.
+func formatLastActivity(snap session.Snapshot) string {
 	t := snap.LastActivity
 	if t.IsZero() && snap.FinishedAt != nil {
 		t = *snap.FinishedAt
@@ -514,49 +508,39 @@ func formatTimeCompact(snap session.Snapshot) string {
 	return t.Format("01/02 15:04")
 }
 
-// formatCompact formats a number in compact form: 0, 1, 999, 1.2k, 12k, 123k, 1.2M etc.
-func formatCompact(n int) string {
-	switch {
-	case n < 1000:
-		return fmt.Sprintf("%d", n)
-	case n < 10_000:
-		return fmt.Sprintf("%.1fK", float64(n)/1000)
-	case n < 1_000_000:
-		return fmt.Sprintf("%dK", n/1000)
-	case n < 10_000_000:
-		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
-	default:
-		return fmt.Sprintf("%dM", n/1_000_000)
-	}
-}
-
-// formatTokens formats token counts as "N/M".
-func formatTokens(in, out int) string {
-	return fmt.Sprintf("%s/%s", formatCompact(in), formatCompact(out))
-}
-
+// truncate cuts s to at most maxLen terminal cells, ending it with "…".
+// WHY 文字数でなく表示幅で切る: 全角文字は 2 桁を使う。文字数で切ると行が幅を超えて折り返し、
+// 1 セッション 2 行の前提が崩れる。
 func truncate(s string, maxLen int) string {
 	if maxLen <= 0 {
 		return ""
 	}
-	runes := []rune(s)
-	if len(runes) <= maxLen {
-		return s
-	}
-	return string(runes[:maxLen-1]) + "…"
+	return ansi.Truncate(s, maxLen, "…")
 }
 
-// truncateLeft truncates from the left, keeping the trailing (more important) part.
+// truncateLeft cuts s from the left to at most maxLen terminal cells, keeping
+// the trailing (more important) part.
 // e.g. "~/github.com/org/repo/session" → "…org/repo/session"
 func truncateLeft(s string, maxLen int) string {
 	if maxLen <= 0 {
 		return ""
 	}
-	runes := []rune(s)
-	if len(runes) <= maxLen {
+	over := lipgloss.Width(s) - maxLen
+	if over <= 0 {
 		return s
 	}
-	return "…" + string(runes[len(runes)-maxLen+1:])
+	return ansi.TruncateLeft(s, over+1, "…")
+}
+
+// joinEnds puts left at the start and right at the end of a line w cells wide,
+// filling the gap with spaces in the bg style. With an empty right it only pads.
+// The caller makes sure the two fit; when they do not, they are joined with one space.
+func joinEnds(left, right string, w int, bg lipgloss.Style) string {
+	if right == "" {
+		return padRightBg(left, w, bg)
+	}
+	gap := max(1, w-lipgloss.Width(left)-lipgloss.Width(right))
+	return left + bg.Render(strings.Repeat(" ", gap)) + right
 }
 
 // padRightBg pads a (possibly styled) string to exactly w cell-width with trailing spaces,

@@ -47,7 +47,6 @@ type ManagerConfig struct {
 	MaxSessions           int
 	DiscoveryDays         int
 	RefreshInterval       time.Duration
-	Pricing               PricingPolicy
 	WorkspaceSymlinksFunc func(repoPath string) []string
 	// TrustWorkspaceFunc tells the runtime that a workspace claude-deck created is
 	// trusted, so the session does not open on a trust dialog. Nil does nothing.

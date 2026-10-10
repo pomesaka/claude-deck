@@ -13,29 +13,16 @@ import (
 	"time"
 )
 
-// TokenStats holds aggregated token usage for a single Claude Code session.
-type TokenStats struct {
-	SessionID                string  `json:"session_id"`
-	Model                    string  `json:"model"`
-	InputTokens              int     `json:"input_tokens"`
-	OutputTokens             int     `json:"output_tokens"`
-	CacheCreationInputTokens int     `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int     `json:"cache_read_input_tokens"`
-	EstimatedCostUSD         float64 `json:"estimated_cost_usd"`
-}
-
 // SessionInfo holds session metadata extracted from a Claude Code JSONL file.
 // This is the primary data source; claude-deck's store only holds supplementary metadata.
 type SessionInfo struct {
 	SessionID      string
 	CWD            string
-	Model          string
 	PermissionMode string
 	GitBranch      string
 	Prompt         string // first user message content
 	StartedAt      time.Time
 	LastActivity   time.Time
-	Tokens         TokenStats
 }
 
 // Reader reads local JSONL session transcripts.
@@ -98,15 +85,6 @@ func (r *Reader) HasConversation(sessionID string) bool {
 		}
 	}
 	return false
-}
-
-// ReadTokensByID reads only the token usage of a session.
-func (r *Reader) ReadTokensByID(sessionID string) *TokenStats {
-	path := r.ResolveSessionPath(sessionID)
-	if path == "" {
-		return nil
-	}
-	return r.format.tokens(path, sessionID)
 }
 
 // ReadRuntimeActivity reads what the runtime is doing from the tail of its transcript.
@@ -202,30 +180,4 @@ func scanLines(r io.Reader, fn func(line []byte) (more bool)) {
 // isSubagentPath returns true if the path is inside a "subagents" directory.
 func isSubagentPath(path string) bool {
 	return strings.Contains(path, string(filepath.Separator)+"subagents"+string(filepath.Separator))
-}
-
-// Pricing variables (per million tokens, USD). Override via SetPricing.
-var (
-	inputPricePerMTok      = 15.0
-	outputPricePerMTok     = 75.0
-	cacheWritePricePerMTok = 18.75
-	cacheReadPricePerMTok  = 1.50
-)
-
-// SetPricing overrides the default token pricing (per million tokens, USD).
-func SetPricing(input, output, cacheWrite, cacheRead float64) {
-	inputPricePerMTok = input
-	outputPricePerMTok = output
-	cacheWritePricePerMTok = cacheWrite
-	cacheReadPricePerMTok = cacheRead
-}
-
-// estimateCost calculates an approximate USD cost based on token usage.
-func estimateCost(stats TokenStats) float64 {
-	cost := float64(stats.InputTokens) / 1_000_000 * inputPricePerMTok
-	cost += float64(stats.OutputTokens) / 1_000_000 * outputPricePerMTok
-	cost += float64(stats.CacheCreationInputTokens) / 1_000_000 * cacheWritePricePerMTok
-	cost += float64(stats.CacheReadInputTokens) / 1_000_000 * cacheReadPricePerMTok
-
-	return cost
 }

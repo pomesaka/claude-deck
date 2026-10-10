@@ -528,7 +528,7 @@ func (m *Model) buildPreviewSpecFromSnap(snap session.Snapshot) preview.PreviewS
 	jsonlPath, priorPaths := m.manager.ResolveJSONLPaths(snap.ID)
 	return preview.PreviewSpec{
 		DeckSessionID:    snap.ID,
-		Name:             snap.Name,
+		Name:             snap.DisplayName(),
 		RepoName:         snap.RepoName,
 		WorkspacePath:    snap.WorkspacePath,
 		RuntimeSessionID: snap.RuntimeSessionID,

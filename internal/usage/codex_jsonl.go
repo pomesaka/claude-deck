@@ -63,31 +63,16 @@ type codexSessionMeta struct {
 
 type codexTurnContext struct {
 	CWD            string `json:"cwd"`
-	Model          string `json:"model"`
 	ApprovalPolicy string `json:"approval_policy"`
 }
 
 type codexEventMsg struct {
-	Type        string          `json:"type"`
-	Message     string          `json:"message"`
-	LastMessage string          `json:"last_agent_message"`
-	StartedAt   int64           `json:"started_at"`
-	CompletedAt int64           `json:"completed_at"`
-	Info        *codexTokenInfo `json:"info"`
-	RateLimits  jsontext.Value  `json:"rate_limits,omitempty"`
-}
-
-type codexTokenInfo struct {
-	TotalTokenUsage codexTokenUsage `json:"total_token_usage"`
-	LastTokenUsage  codexTokenUsage `json:"last_token_usage"`
-	ContextWindow   int             `json:"model_context_window"`
-}
-
-type codexTokenUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	Type        string         `json:"type"`
+	Message     string         `json:"message"`
+	LastMessage string         `json:"last_agent_message"`
+	StartedAt   int64          `json:"started_at"`
+	CompletedAt int64          `json:"completed_at"`
+	RateLimits  jsontext.Value `json:"rate_limits,omitempty"`
 }
 
 type codexRateLimits struct {
@@ -206,8 +191,6 @@ func (c codexFormat) info(path string) *SessionInfo {
 	if info.CWD == "" {
 		return nil
 	}
-	info.Tokens.SessionID = info.SessionID
-	info.Tokens.EstimatedCostUSD = estimateCost(info.Tokens)
 	return &info
 }
 
@@ -234,10 +217,6 @@ func accumulateCodexEntry(info *SessionInfo, entry *codexEntry) {
 			if tc.CWD != "" {
 				info.CWD = tc.CWD
 			}
-			if tc.Model != "" {
-				info.Model = tc.Model
-				info.Tokens.Model = tc.Model
-			}
 			if tc.ApprovalPolicy != "" {
 				info.PermissionMode = tc.ApprovalPolicy
 			}
@@ -250,9 +229,6 @@ func accumulateCodexEntry(info *SessionInfo, entry *codexEntry) {
 		if ev.Type == "user_message" && info.Prompt == "" {
 			info.Prompt = ev.Message
 		}
-		if ev.Info != nil {
-			applyCodexTokenUsage(&info.Tokens, ev.Info.TotalTokenUsage)
-		}
 		if ev.StartedAt > 0 && info.StartedAt.IsZero() {
 			info.StartedAt = time.Unix(ev.StartedAt, 0)
 		}
@@ -263,27 +239,6 @@ func accumulateCodexEntry(info *SessionInfo, entry *codexEntry) {
 			}
 		}
 	}
-}
-
-// tokens reads the whole transcript: Codex reports running totals, so the last
-// token_count event is the session's usage. The session ID is the one the
-// transcript names, not the caller's.
-func (c codexFormat) tokens(path, _ string) *TokenStats {
-	info := c.info(path)
-	if info == nil {
-		return nil
-	}
-	stats := info.Tokens
-	stats.SessionID = info.SessionID
-	stats.EstimatedCostUSD = estimateCost(stats)
-	return &stats
-}
-
-func applyCodexTokenUsage(stats *TokenStats, usage codexTokenUsage) {
-	stats.InputTokens = usage.InputTokens
-	stats.OutputTokens = usage.OutputTokens
-	stats.CacheCreationInputTokens = usage.CacheCreationInputTokens
-	stats.CacheReadInputTokens = usage.CacheReadInputTokens
 }
 
 func processCodexEntry(line []byte, entries *[]LogEntry) bool {
