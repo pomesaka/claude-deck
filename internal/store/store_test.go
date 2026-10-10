@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -64,12 +65,10 @@ func TestStore_RoundTrip(t *testing.T) {
 	}
 }
 
-// A database created before a column was added gets the column when it is
-// opened, and keeps its rows.
-func TestStore_MigratesAddedColumns(t *testing.T) {
-	path := filepath.Join(t.TempDir(), FileName)
-
-	// The schema as it was before any column was added, with one row.
+// createOldDatabase creates, at path, a database with the schema as it was before
+// any of addedColumns existed, holding one row (id a, name anna-8cc7).
+func createOldDatabase(t *testing.T, path string) {
+	t.Helper()
 	oldSchema := schema
 	for _, c := range addedColumns {
 		line := regexp.MustCompile(`,\n\t` + c.name + ` [^\n,]*`)
@@ -78,7 +77,8 @@ func TestStore_MigratesAddedColumns(t *testing.T) {
 		}
 		oldSchema = line.ReplaceAllString(oldSchema, "")
 	}
-	db, err := sql.Open("sqlite", "file:"+path)
+	// WAL, as the binary that created such a database set it.
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +91,13 @@ func TestStore_MigratesAddedColumns(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// A database created before a column was added gets the column when it is
+// opened, and keeps its rows.
+func TestStore_MigratesAddedColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	createOldDatabase(t, path)
 
 	st := openTestStore(t, path)
 	got, err := st.Get("a")
@@ -310,5 +317,98 @@ func TestStore_PutKeepsColumnsItDoesNotKnow(t *testing.T) {
 	}
 	if status != "running" || addedLater != "kept" {
 		t.Errorf("status = %q, added_later = %q; want running, kept", status, addedLater)
+	}
+}
+
+// Opening the store and reading it must not wait for a writer: in WAL mode a
+// reader runs beside one. `claude-deck list` and every hook command open the
+// store while the TUI or another hook may be in a write transaction.
+func TestStore_OpenAndReadDoNotWaitForAWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	writer := openTestStore(t, path)
+	if err := writer.Insert(Record{ID: "a", Status: "idle"}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	// How long the open and the read took while the writer held its transaction.
+	var took time.Duration
+	err := writer.Tx(func(tx *Tx) error {
+		if err := tx.Put(Record{ID: "a", Status: "running"}); err != nil {
+			return err
+		}
+		start := time.Now()
+		reader, err := OpenPath(path)
+		if err != nil {
+			return fmt.Errorf("OpenPath beside a writer: %w", err)
+		}
+		defer reader.Close()
+		r, err := reader.Get("a")
+		if err != nil {
+			return fmt.Errorf("Get beside a writer: %w", err)
+		}
+		// The writer has not committed, so the reader sees the row as it was.
+		if r.Status != "idle" {
+			return fmt.Errorf("Status = %q, want idle", r.Status)
+		}
+		took = time.Since(start)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// busy_timeout is 5 seconds: an open that waited for the lock takes that long.
+	if took > time.Second {
+		t.Errorf("open and read took %v beside a writer", took)
+	}
+}
+
+// The TUI, the CLI and the hook commands of a new version may open a database of
+// the old schema at the same moment. Each sees the columns missing; only one adds them.
+func TestStore_ConcurrentOpensMigrateOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	createOldDatabase(t, path)
+
+	const openers = 8
+	start := make(chan struct{})
+	errs := make([]error, openers)
+	var wg sync.WaitGroup
+	for i := range openers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			// Each handle has its own connections, as each process does.
+			st, err := OpenPath(path)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			errs[i] = st.Close()
+		}()
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("opener %d: %v", i, err)
+		}
+	}
+
+	st := openTestStore(t, path)
+	for _, c := range addedColumns {
+		var n int
+		if err := st.db.QueryRow("SELECT count(*) FROM pragma_table_info('sessions') WHERE name = ?", c.name).Scan(&n); err != nil {
+			t.Fatalf("counting column %s: %v", c.name, err)
+		}
+		if n != 1 {
+			t.Errorf("column %s appears %d times, want 1", c.name, n)
+		}
+	}
+	got, err := st.Get("a")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Name != "anna-8cc7" {
+		t.Errorf("Name = %q after the migration, want anna-8cc7", got.Name)
 	}
 }

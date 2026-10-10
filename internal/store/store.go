@@ -179,43 +179,63 @@ func OpenPath(path string) (*Store, error) {
 
 // migrate adds the columns of addedColumns that the sessions table lacks.
 //
-// WHY 1 つのトランザクションで確認と追加を行う: TUI・CLI・hook が同時に開く。_txlock=immediate なので
-// 2 つ目のプロセスは 1 つ目のコミットを待ち、追加済みの列を見て何もしない。
+// WHY 先にトランザクションの外で確かめる: db.Begin は _txlock=immediate で書き込みロックを取る。
+// hook はツール呼び出しのたびに store を開くので、足す列が無い普通の起動でロックを取ると、
+// 読むだけのコマンド（list）まで書き込み中のプロセスを待ち、busy_timeout を過ぎると開けずに失敗する。
+// WAL では読み取りは書き込みを待たない（TestStore_OpenAndReadDoNotWaitForAWriter）。
+// WHY 足すときは 1 つのトランザクションで確認し直す: TUI・CLI・hook が同時に開く。2 つ目のプロセスは
+// 1 つ目のコミットを待ち、追加済みの列を見て何もしない。
 // 列を足す前のバイナリが同時に動いていてもよい: 書き込みは知っている列だけを更新する（upsert）。
 // 注意: alias の列を足した版までは INSERT OR REPLACE で書いていた。その版以前の TUI が動いている間は、
 // その TUI が書いた行の新しい列が既定値に戻る。
 func migrate(db *sql.DB) error {
+	if missing, err := missingColumns(db); err != nil || len(missing) == 0 {
+		return err
+	}
+
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	rows, err := tx.Query("SELECT name FROM pragma_table_info('sessions')")
+	missing, err := missingColumns(tx)
 	if err != nil {
 		return err
 	}
+	for _, ddl := range missing {
+		if _, err := tx.Exec("ALTER TABLE sessions ADD COLUMN " + ddl); err != nil {
+			return fmt.Errorf("adding column: %s: %w", ddl, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// missingColumns returns the DDL of the addedColumns the sessions table lacks.
+func missingColumns(q querier) ([]string, error) {
+	rows, err := q.Query("SELECT name FROM pragma_table_info('sessions')")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	have := make(map[string]bool)
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			rows.Close()
-			return err
+			return nil, err
 		}
 		have[name] = true
 	}
-	if err := rows.Close(); err != nil {
-		return err
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
+	var missing []string
 	for _, c := range addedColumns {
-		if have[c.name] {
-			continue
-		}
-		if _, err := tx.Exec("ALTER TABLE sessions ADD COLUMN " + c.ddl); err != nil {
-			return fmt.Errorf("adding column %s: %w", c.name, err)
+		if !have[c.name] {
+			missing = append(missing, c.ddl)
 		}
 	}
-	return tx.Commit()
+	return missing, nil
 }
 
 // Close releases the database.
