@@ -155,9 +155,10 @@ func Save(dataDir string, s Status) error {
 	return nil
 }
 
-// Watch monitors DataDir/rate-limits.json via fsnotify and calls onUpdate whenever
-// the file is written with valid rate limit data. Blocks in a background goroutine
-// until ctx is cancelled.
+// Watch monitors DataDir/rate-limits.json via fsnotify. It calls onUpdate with
+// what the file holds when the watch starts, and then whenever the file is
+// written with valid rate limit data. It runs in a background goroutine until
+// ctx is cancelled.
 //
 // If the file does not exist yet, the parent directory is watched instead and
 // monitoring switches to the file once it appears.
@@ -183,6 +184,13 @@ func Watch(ctx context.Context, dataDir string, onUpdate func(Status)) error {
 	go func() {
 		defer watcher.Close()
 		watchingDir := watchTarget == dataDir
+
+		// WHY 監視を始めた時点の中身も報告する: セッションは値が変わったときにしか報告しない
+		// （session.measure の changed）。変更だけを待つと、TUI を起動してから次の報告まで何も出ない。
+		// WHY watcher.Add の後に読む: 先に読むと、読んでから監視を始めるまでの書き込みを取りこぼす。
+		if s := Load(dataDir); s.FiveHourAvailable || s.SevenDayAvailable {
+			onUpdate(s)
+		}
 
 		for {
 			select {

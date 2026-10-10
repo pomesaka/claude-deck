@@ -53,7 +53,7 @@ TUI のヘッダーに出す 5 時間枠と 7 日枠の使用率は、プラグ�
 
 - `session.measure` は、メインスレッドのターンが終わるたびと、枠が 1 ポイント動いたときに発火する。`changed` に `rateLimits` が無いときと、枠が 1 つも無いとき（サブスクリプションでないとき）は報告しない
 - 引数の JSON は `rateLimits` の配列（`kind`・`percentUsed`・`resetsAt`）をそのまま文字列にしたもの。`ratelimits.ParseMeasured` が読む
-- アカウント単位の値なので store の行には入れない。どのセッションも `{DataDir}/rate-limits.json` に書き、最後の報告が残る。TUI は `ratelimits.Watch` でこのファイルを監視する
+- アカウント単位の値なので store の行には入れない。どのセッションも `{DataDir}/rate-limits.json` に書き、最後の報告が残る。TUI は `ratelimits.Watch` でこのファイルを監視する。監視を始めた時点の中身も読むので、起動してすぐに前回の値が出る
 - claude-deck の外で起動したセッションは報告しない
 
 ## なぜ Stop でなく turn.complete か
