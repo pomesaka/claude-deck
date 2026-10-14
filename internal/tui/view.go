@@ -378,7 +378,7 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	)
 	indent := bg.Render(strings.Repeat(" ", iconWidth))
 	uptime := padRightBg(nameStyle.Render(formatUptime(snap)), uptimeWidth, bg)
-	lastAct := padRightBg(dim.Render(formatLastActivity(snap)), timeWidth, bg)
+	lastAct := padRightBg(dim.Render(formatLastActivity(snap, time.Now())), timeWidth, bg)
 	left2 := indent + uptime + sp + lastAct
 
 	var aliasCol string
@@ -498,7 +498,10 @@ func formatUptime(snap session.Snapshot) string {
 
 // formatLastActivity formats when the session was last active, falling back to
 // when it finished and then to when it started. "-" when none is known.
-func formatLastActivity(snap session.Snapshot) string {
+// Within the last hour it is relative to now ("12m"), otherwise a date and time.
+// WHY 1 時間で切り替える: 直前に止まったセッションは「何分前か」を知りたいが、時刻だと
+// 今の時刻から引き算しないと分からない。古いものは、時刻のほうが「昨日の夕方」のように探しやすい。
+func formatLastActivity(snap session.Snapshot, now time.Time) string {
 	t := snap.LastActivity
 	if t.IsZero() && snap.FinishedAt != nil {
 		t = *snap.FinishedAt
@@ -508,6 +511,10 @@ func formatLastActivity(snap session.Snapshot) string {
 	}
 	if t.IsZero() {
 		return "-"
+	}
+	// WHY 未来の時刻を除く: 時計のずれで LastActivity が now より後になると、負の分数が出る。
+	if ago := now.Sub(t); ago >= 0 && ago < time.Hour {
+		return fmt.Sprintf("%dm", int(ago.Minutes()))
 	}
 	return t.Format("01/02 15:04")
 }

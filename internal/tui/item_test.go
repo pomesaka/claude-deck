@@ -154,6 +154,7 @@ func TestFormatUptime(t *testing.T) {
 func TestFormatLastActivity(t *testing.T) {
 	at := func(day, hour, min int) time.Time { return time.Date(2026, 10, day, hour, min, 0, 0, time.Local) }
 	finished := at(10, 11, 0)
+	now := at(10, 12, 0)
 	tests := []struct {
 		name string
 		snap session.Snapshot
@@ -163,10 +164,15 @@ func TestFormatLastActivity(t *testing.T) {
 		{"finished without activity", session.Snapshot{StartedAt: at(10, 9, 2), FinishedAt: &finished}, "10/10 11:00"},
 		{"only started", session.Snapshot{StartedAt: at(10, 9, 2)}, "10/10 09:02"},
 		{"nothing known", session.Snapshot{}, "-"},
+		{"minutes ago", session.Snapshot{StartedAt: at(10, 9, 2), LastActivity: at(10, 11, 48)}, "12m"},
+		{"just now", session.Snapshot{StartedAt: at(10, 9, 2), LastActivity: now}, "0m"},
+		{"59 minutes ago", session.Snapshot{StartedAt: at(10, 9, 2), LastActivity: at(10, 11, 1)}, "59m"},
+		{"exactly an hour ago", session.Snapshot{StartedAt: at(10, 9, 2), LastActivity: at(10, 11, 0)}, "10/10 11:00"},
+		{"in the future", session.Snapshot{StartedAt: at(10, 9, 2), LastActivity: at(10, 12, 5)}, "10/10 12:05"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := formatLastActivity(tt.snap); got != tt.want {
+			if got := formatLastActivity(tt.snap, now); got != tt.want {
 				t.Errorf("formatLastActivity = %q, want %q", got, tt.want)
 			}
 		})
