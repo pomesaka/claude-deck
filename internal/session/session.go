@@ -108,7 +108,7 @@ func (d DisplayChannel) String() string {
 // Session represents a single agent runtime session tracked by claude-deck.
 //
 // Data sources:
-//   - Store (persisted as JSON): ID, Name, RepoPath, RepoName, WorkspacePath,
+//   - Store (SQLite deck.db): ID, Name, RepoPath, RepoName, WorkspacePath,
 //     WorkspaceName, SessionChain, Status, FinishedAt, PID
 //   - JSONL (runtime primary): Prompt, PermissionMode, StartedAt, LastActivity
 //   - Runtime only: CurrentTool
@@ -122,8 +122,11 @@ type Session struct {
 	ID   DeckSessionID `json:"id"` // immutable after creation
 	Name string        `json:"name"`
 	// Alias は利用者かセッション自身が付けた表示用の名前（`claude-deck alias`）。無ければ空。
-	// Name は tmux のウィンドウ名とワークスペース名を兼ねるので変えられない。
-	Alias    string `json:"-"`
+	// WHY NOT Name を書き換える: Name は jj ワークスペースの名前とディレクトリ名、Claude Code の --name を兼ねる。
+	// 再開はこの名前でワークスペースを作り直し、gc はこの名前で持ち主を判定する。
+	Alias string `json:"-"`
+	// Pinned は一覧の一番下の組に置くかどうか（TUI の p）。
+	Pinned   bool   `json:"-"`
 	RepoPath string `json:"repo_path"` // immutable after creation
 	RepoName string `json:"repo_name"` // immutable after creation
 	// WorkspacePath is the actual Claude Code working directory and may include a sub-project
@@ -142,14 +145,16 @@ type Session struct {
 	// ForkedFrom は、このセッションがフォークで作られたときの分岐元の runtime セッション ID。
 	// 別のセッションの SessionChain の要素を指す。フォークでなければ空。immutable after creation.
 	// WHY deck の ID でなく runtime の ID で持つ: 分岐元のセッションはその後 /clear で先へ進むので、
-	// deck の ID だけではどの文脈から分かれたかが分からなくなる（ADR 012）。
+	// deck の ID だけではどの文脈から分かれたかが分からなくなる。
+	// WHY NOT JSONL から復元する: フォーク先の JSONL に分岐元の ID は残らない（2026-10-09、Claude Code 2.1.295 で
+	// ~/.claude/projects の 48 ファイルを確認）。
 	ForkedFrom    RuntimeSessionID `json:"forked_from,omitempty"`
 	Status        Status           `json:"status"`
 	FinishedAt    *time.Time       `json:"finished_at,omitempty"`
 	PID           int              `json:"pid,omitempty"`
 	TerminalTitle string           `json:"terminal_title,omitempty"` // OSC 0/2 で設定されたターミナルタイトル（セッション一覧表示用）
 	BookmarkName  string           `json:"bookmark_name,omitempty"`  // jj の最近接ブックマーク名（セッション一覧表示用）
-	// Kill 時に保存した @ / @- の change_id。Resume 時のワークスペース再作成で使う（ADR 009）。
+	// Kill 時に保存した @ / @- の change_id。Resume 時のワークスペース再作成で使う。
 	// 常にペアで更新すること。
 	LastJJRevision       string `json:"last_jj_revision,omitempty"`
 	LastJJParentRevision string `json:"last_jj_parent_revision,omitempty"`
@@ -225,6 +230,7 @@ type Snapshot struct {
 	Name string
 	// Alias is the label given with `claude-deck alias`, or "".
 	Alias            string
+	Pinned           bool
 	RepoPath         string
 	RepoName         string
 	WorkspacePath    string
@@ -295,6 +301,7 @@ func (s *Session) Snapshot() Snapshot {
 		ID:               s.ID,
 		Name:             s.Name,
 		Alias:            s.Alias,
+		Pinned:           s.Pinned,
 		RepoPath:         s.RepoPath,
 		RepoName:         s.RepoName,
 		WorkspacePath:    s.WorkspacePath,
@@ -385,6 +392,12 @@ func (s *Session) sortTime() time.Time {
 		return *s.FinishedAt
 	}
 	return s.StartedAt
+}
+
+func (s *Session) isPinned() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Pinned
 }
 
 // sortGroup returns a numeric priority for status-based sorting.

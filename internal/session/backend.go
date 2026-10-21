@@ -12,7 +12,7 @@ package session
 //   - jj workspace management
 //   - JSONL streaming and status tracking
 //   - Recording that a process exited: the command passed in ProcessStartOpts.OnExit
-//     does that from inside the hosting environment (ADR-011)
+//     does that from inside the hosting environment (see the tmux backend's StartProcess)
 type SessionBackend interface {
 	// StartProcess launches a Claude Code process for the session and returns its PID.
 	StartProcess(sessionID DeckSessionID, opts ProcessStartOpts) (pid int, err error)

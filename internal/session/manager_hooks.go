@@ -43,6 +43,9 @@ var aliasPattern = regexp.MustCompile(`^[A-Za-z0-9._-]*$`)
 // SetAlias gives the deck session key (an ID, or a name that only one session
 // has) the alias, and returns the session. An empty alias removes it.
 // Used by `claude-deck alias`; needs no Manager.
+// WHY NOT Claude Code の /rename と同期する: /rename で宛先名はすぐ変わる（Claude Code 2.1.296 で確認）が、
+// 別のプロセスから相手のセッションを改名するには、tmux でキー入力を送って入力欄の書きかけを壊すか、
+// 相手のプラグインが次に動くのを待つしかない。
 func SetAlias(st *store.Store, key, alias string) (Snapshot, error) {
 	if !aliasPattern.MatchString(alias) {
 		return Snapshot{}, fmt.Errorf("alias %q: use only ASCII letters, digits, '-', '_' and '.'", alias)

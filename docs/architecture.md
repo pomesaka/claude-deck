@@ -1,24 +1,5 @@
 # アーキテクチャ詳細
 
-## モジュール依存関係
-
-```
-cmd/claude-deck
-  ├→ internal/tui        (TUI アプリケーション)
-  │    ├→ session         (セッション管理)
-  │    ├→ ghostty         (ターミナルランチャー)
-  │    └→ config          (設定)
-  ├→ deckmod             (deck-status プラグインの埋め込みと書き出し)
-  └→ internal/session    (CLI サブコマンドと hook コマンド)
-
-internal/session (Manager)
-  ├→ usage            (JSONL パース・ストリーミング)
-  ├→ store            (SQLite 永続化)
-  ├→ jj               (Jujutsu ワークスペース)
-  ├→ tmux             (ウィンドウの作成・削除・生存確認)
-  └→ debuglog         (ログ)
-```
-
 ## プロセスと store
 
 store（`{DataDir}/deck.db`）が deck セッションの信頼できる唯一の情報源で、次のプロセスが書き手になる。
@@ -30,9 +11,9 @@ store（`{DataDir}/deck.db`）が deck セッションの信頼できる唯一�
 | `claude-deck hook status` / `session-start` | ステータス、SessionChain（deck-status プラグインが呼ぶ） |
 | `claude-deck hook exited` | Completed、`/clear` 直後に終了したときの SessionChain の巻き戻し（tmux ウィンドウのコマンドが呼ぶ） |
 
-書き込みはすべて `BEGIN IMMEDIATE` のトランザクション内の読み書きで、別プロセスの更新を上書きしない。状態遷移の規則は `internal/session/transitions.go` の純関数（`applyHookStatus`, `applySessionStart`, `applyExited`, `beginClose`, `beginResume`）で、どのプロセスも同じ関数を使う。
+書き込みはすべて `BEGIN IMMEDIATE` のトランザクション内の読み書きで、別プロセスの更新を上書きしない。状態遷移の規則は `internal/session/transitions.go` の関数にまとめ、どのプロセスもトランザクション内で同じ関数を使う。
 
-`Manager.sessions` は store をメモリに投影したもので、`Manager.Reload` が store から作り直す。
+`Manager.sessions` は store をメモリに写したもので、`Manager.Reload` が store から作り直す。どの項目を store に従わせるかは項目ごとに決まっていて、複数のソースの値を優先順位で選ぶ処理は無い。
 
 - store が書く項目（Status, SessionChain, PID, ワークスペース, エラーメッセージ等）は、`Reload` のたびに store に従う
 - JSONL と jj から TUI が投影する項目（Prompt, LastActivity, BookmarkName 等）は、セッションが初めてメモリに現れるときだけ store から読む。以後はメモリの値が新しく、`PersistAll` が store に書く
@@ -44,31 +25,12 @@ store の初回オープン時に、旧形式の `{DataDir}/sessions/*.json` が
 
 ## 初期化フロー
 
-```
-main() → run()
-  1. debuglog.Init()
-  2. config.Load() → Config (TOML)
-  3. claudecode.EnsureDataDirTrusted(), RestoreStatusLine()  ← 後者は以前の版が入れた statusLine を元に戻す（ADR-013）
-  4. session.OpenStore(dataDir)          ← deck.db を開く（旧 JSON の取り込み含む）
-  5. buildManagerConfig()                ← deckmod.Install(dataDir/plugin)
-  6. session.NewManager(ctx, store, cfg)
-  7. manager.LoadExisting()              ← 重複除去・古いセッションの prune → Reload
-  8. manager.ReconcileTmux()             ← store と生きている tmux ウィンドウの食い違いを補正
-  9. tui.NewModel(manager, cfg) → Bubble Tea 起動
- 10. Background:
-     a. manager.DiscoverExternalSessions() ← 外部セッション取り込み
-     b. manager.StartFileWatcher()      ← JSONL ファイル変更監視
-     c. manager.StartNotifyLoop()       ← UI 更新通知 (60fps)
-     e. manager.WatchStore()            ← 他プロセスの store 書き込みを反映
+第 1 引数が CLI サブコマンドの名前なら `runCLI` に入り、TUI は起動しない。CLI と hook コマンドは TUI が起動していなくても動く。
 
-main() → runCLI()                       ← 第 1 引数が new / list / close / hook のとき
-  config.Load() → session.OpenStore(dataDir)
-    list / hook: store だけを使う
-    new / close: NewManager → Reload → CreateSession / Kill（tmux を直接操作）
-    gc: session.CollectGarbage（Manager も tmux も使わない）
-```
+TUI の起動で順序に意味があるのは次の 2 点。
 
-CLI と hook コマンドは TUI が起動していなくても動く。
+- `ReconcileTmux` は `LoadExisting` の後に呼ぶ。`LoadExisting` が重複した行と古い行を消した後の store を、生きている tmux のウィンドウと突き合わせる
+- 外部セッションの発見（`DiscoverExternalSessions`）はバックグラウンドで始め、TUI を先に表示する。続きは 5 秒ごとの更新で少しずつ読む
 
 ## セッションライフサイクル
 
@@ -146,25 +108,13 @@ User 'r' キー or Enter / Manager.ResumeSession(ctx, sessionID)
 
 ## TUI アーキテクチャ
 
-### ビューモード
+### 画面の構成
 
-| モード | 画面構成 | キー処理 |
-|--------|----------|----------|
-| viewDashboard | リスト (35%) + 詳細 (65%) | handleDashboardKey |
-| viewSelectRepo | リポジトリ選択 (全画面) | handleRepoSelectKey |
+claude-deck の TUI は端末の幅全体にセッションの一覧を描く。`n` のリポジトリ選択も同じ領域を置き換えて出す。
 
-### 右ペイン表示
+一覧の右に出るのは claude-deck が描く画面ではなく、tmux セッション（既定は `claude-deck`）に attach したペインだ。起動時に tmux に `__preview__` ウィンドウを作り、Ghostty の中で起動していれば右にペインを分割して `tmux attach-session` を実行する。左の幅は `[ghostty] deck_width` で決め、フォーカスは一覧に戻す。Ghostty の外では attach のコマンドを表示するだけで、利用者が別のペインで実行する。終了時に `__preview__` ウィンドウと、自分で分割した Ghostty のペインを閉じる。
 
-| セッション状態 | 内容 |
-|--------------|------|
-| 未終了 (DisplayTmux) | セッションの tmux ウィンドウ |
-| 終了済み・外部 (DisplayJSONL) | preview ウィンドウ（`claude-deck --preview`）の JSONL 構造化ログ |
-
-### vim マルチキーシーケンス
-
-```go
-pendingG = true → 次の 'g' で gg 実行
-```
+カーソルを動かすと、TUI が右のペインに出す tmux のウィンドウを切り替える。プロセスがあるセッション（終了済みでも外部でもない）はそのセッションのウィンドウを出す。それ以外は `__preview__` ウィンドウを出し、preview サブプロセス（`claude-deck --preview`）がそのセッションの JSONL のログを描く。切り替えの順序の規則は [concurrency.md](concurrency.md#tui-から外部副作用を発行する時の順序保証) にある。
 
 ## JSONL ストリーミングシステム
 
@@ -183,17 +133,13 @@ preview: WatchSpec → previewStreamer.Start(spec)
         → 新しい行をパース → LogEntry に変換
 ```
 
-### LogEntry 種別
+### Claude Code の JSONL について前提にしていること
 
-| 種別 | 内容 |
-|------|------|
-| LogEntryUser | ユーザーの入力（最初の行） |
-| LogEntryText | アシスタントのテキスト出力 |
-| LogEntryToolUse | ツール呼び出し（名前 + 引数概要） |
-| LogEntryThinking | 思考ブロック (折りたたみ) |
-| LogEntryDiff | ファイル編集の diff |
+Claude Code 2.1.305 が書いた `~/.claude/projects` の JSONL を読んで確かめた（2026-10-21）。
 
-サブエージェントの JSONL も再帰的に読み込む (Depth=1)。
+- サブエージェントの JSONL は `<project>/<session UUID>/subagents/agent-<id>.jsonl` にある。メインの JSONL には、サブエージェントの中のツール呼び出しは入らない（サブエージェントの JSONL の `tool_use` の ID が、メインの JSONL に 1 件も無いことで確かめた）。preview は、メインの JSONL の `progress` エントリ（`data.type` が `agent_progress`）の `agentId` を手がかりにこのファイルを読み、Depth=1 で差し込む（`usage.LogStreamer.inlineAgent`）。手元に残っている JSONL には `agent_progress` のエントリが 1 件も無く、`agentId` は `toolUseResult` に入っているので、いまはサブエージェントのログが差し込まれない
+- 承認のイベントは JSONL に残らない（エントリの `type` を数えて、承認に当たるものが無いことで確かめた）。WaitingApproval と WaitingAnswer は deck-status プラグインの `PermissionRequest` だけから出す（[hooks.md](hooks.md)）
+- 外部セッションの発見とファイル監視は `<project>/*.jsonl` を Glob で集める（`usage.claudeFormat.files`）ので、`subagents/` の下のファイルは対象にならない。どちらも念のため `subagents` を含むパスを除く（`usage.isSubagentPath`）
 
 ## 外部セッション Discovery
 

@@ -18,13 +18,13 @@ var statusLineChain = regexp.MustCompile(`(?m)^printf '%s' "\$input" \| '(.+)'$`
 // RestoreStatusLine undoes what claude-deck used to do to the user's status
 // line: it had put a wrapper script (dataDir/statusline.sh) under "statusLine"
 // in ~/.claude/settings.json to read the rate limits. The deck-status plugin
-// reports them now (ADR-013), so the setting goes back to the command the
+// reports them now (docs/hooks.md), so the setting goes back to the command the
 // wrapper chained to, or away when there was none, and the script is removed.
 //
 // Does nothing once the script is gone.
 //
 // FIXME: 古い版を使っていた全部のマシンでこの版を一度起動し終えたら、このファイルと
-// main.go の呼び出しを削除する（ADR-013 の「悪い点」も直す）。
+// main.go の呼び出しを削除する。docs/data-lifecycle.md の settings.json の行も直す。
 func RestoreStatusLine(dataDir string) error {
 	settPath, err := claudeSettingsPath()
 	if err != nil {

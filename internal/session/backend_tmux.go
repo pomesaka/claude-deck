@@ -43,7 +43,9 @@ func newTmuxBackend(runner *tmux.Runner) *tmuxBackend {
 // The window runs "<claude ...>; <OnExit ...>" through the shell, so OnExit runs in
 // the same pane after Claude Code exits.
 // WHY tmux の hook を使わない: ウィンドウやペインに付けた pane-exited hook は、
-// tmux 3.6a ではペインが自然に終了しても発火しなかった（ADR-011）。
+// tmux 3.6a ではペインが自然に終了しても発火しなかった（2026-10-09、専用ソケット tmux -L で確認）。
+// WHY NOT グローバル（-g）の pane-exited: tmux サーバーのすべてのペインに効くので、
+// claude-deck 以外のペインでも動く。発火するかは確かめていない。
 func (b *tmuxBackend) StartProcess(sessionID DeckSessionID, opts ProcessStartOpts) (int, error) {
 	windowName := string(sessionID)
 

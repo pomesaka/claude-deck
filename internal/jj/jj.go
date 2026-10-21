@@ -18,7 +18,7 @@ type Runner struct {
 
 // WorkspaceOptions configures revision-restoration behavior for CreateWorkspaceAt.
 // AtRev and ParentRev are empty when creating a new session (trunk() is used).
-// On resume they carry the change_ids captured at Kill time (ADR 009).
+// On resume they carry the change_ids captured at Kill time.
 type WorkspaceOptions struct {
 	ExtraSymlinks []string // repo-relative paths to symlink into the workspace
 	AtRev         string   // change_id of @ at kill time; jj edit attempts direct restore
@@ -36,7 +36,7 @@ func (r *Runner) command() string {
 // The parent directory is created automatically if it doesn't exist.
 // For colocated repos a .git symlink is created so git-dependent tools work.
 //
-// Revision restore order on resume (ADR 009):
+// Revision restore order on resume:
 //  1. opts.AtRev non-empty: try jj edit <AtRev>. Restores the exact commit
 //     including any in-progress changes, without creating an extra commit.
 //     jj workspace add creates an initial empty @; jj edit abandons it (expected).
@@ -111,7 +111,7 @@ func (r *Runner) setUpWorkspace(repoPath, wsPath string, opts WorkspaceOptions) 
 	fetchOut, fetchErr := fetch.CombinedOutput()
 	debuglog.Printf("[jj.CreateWorkspaceAt] jj git fetch done: err=%v output=%q", fetchErr, strings.TrimSpace(string(fetchOut)))
 
-	// revision 復元: AtRev → ParentRev → trunk() の順で試みる（ADR 009）。
+	// revision 復元: AtRev → ParentRev → trunk() の順で試みる。
 	// @ の change_id が保存されている場合は jj edit で直接そのコミットに戻す。
 	// jj new と異なり余分なコミットが増えず、変更中だったファイルもそのまま復元できる。
 	if opts.AtRev != "" {
@@ -182,6 +182,7 @@ func createExtraSymlink(repoPath, wsPath, rel string) error {
 }
 
 // GetWorkspaceRevisions returns the change_ids of the working copy (@) and its parent (@-).
+// WHY change_id: commit ID と違い、rebase で書き換わっても同じ ID のまま辿れる。
 // Called before jj workspace forget to preserve the revision for later restore via ResumeSession.
 // @ may be abandoned on workspace forget if it has no changes; @- is always preserved.
 //

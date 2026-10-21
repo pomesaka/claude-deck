@@ -100,7 +100,7 @@ func run() error {
 		}
 
 		// 以前の版が ~/.claude/settings.json の statusLine に入れたラッパーを外す。
-		// レート制限は deck-status プラグインが報告する（ADR-013）。
+		// レート制限は deck-status プラグインが session.measure で報告する（docs/hooks.md）。
 		if err := claudecode.RestoreStatusLine(cfg.DataDir); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: statusline restore: %v\n", err)
 		}
@@ -130,8 +130,7 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "warning: failed to load existing sessions: %v\n", err)
 	}
 
-	// Reconcile in-memory state with live tmux windows.
-	// Must run after LoadExisting so deck sessions are populated.
+	// Reconcile the store with live tmux windows.
 	mgr.ReconcileTmux()
 
 	// JSONL の読み取りはバックグラウンドで行い、TUI をすぐに表示する。
@@ -219,6 +218,9 @@ func run() error {
 //
 // Unlike the main process, preview owns no session.Manager — it is a read-only
 // view driven entirely by the IPC payload from the main process.
+// WHY NOT preview にも Manager と discovery を持たせる: 外部セッションの deck ID は発見したプロセスが
+// 振って store に入れないので、2 プロセスが別々に発見すると同じセッションに別の ID が付き、
+// main が選んだ ID を preview が引けなくなる。
 func runPreview() error {
 	if err := debuglog.Init(); err != nil {
 		return fmt.Errorf("debuglog init: %w", err)

@@ -35,7 +35,7 @@ type cliRequest struct {
 }
 
 // cliCommands are the subcommands. Each one works on the store directly, so the
-// TUI does not need to be running (ADR-011).
+// TUI does not need to be running.
 var cliCommands = map[string]func(args []string) (cliRequest, error){
 	"new":   parseNewArgs,
 	"list":  parseListArgs,
@@ -238,6 +238,7 @@ func aliasMatches(alias, filter string) bool {
 	return filter == "" || strings.Contains(strings.ToLower(alias), strings.ToLower(filter))
 }
 
+// WHY NOT list --tree: フラグの有無で list の出力が JSON とテキストに分かれる。
 func parseTreeArgs(args []string) (cliRequest, error) {
 	fs := flag.NewFlagSet("tree", flag.ContinueOnError)
 	fs.Usage = func() {

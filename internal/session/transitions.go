@@ -48,6 +48,7 @@ var ErrLaunching = errors.New("session is still being launched")
 // The functions below are the state transitions on a store row. Every process
 // (TUI, CLI, hook commands, the pane's exit command) applies them inside a
 // store transaction, so the rules live here rather than in any one process.
+// 既存の行の Status を書き換えるのはこのファイルの関数だけにする（rg 'r\.Status = ' internal/session で確かめる）。
 
 // applyHookStatus sets the status reported by a Claude Code hook.
 // Hooks only come from a live process, so a terminal or external session is left
@@ -209,7 +210,7 @@ func reviveForLiveWindow(r *store.Record, pid int) (changed bool) {
 }
 
 // recordWorkspaceRemoved clears the workspace a close has just removed and
-// records where its working copy was, for the resume to recreate it (ADR 009).
+// records where its working copy was, for the resume to recreate it.
 // atRev and parentRev are both empty when they could not be read: an older pair
 // must not be used for a workspace that has moved on since.
 // WHY 消したときだけ呼ぶ: ワークスペースの無い行（すでに close 済み）をもう一度 close しても

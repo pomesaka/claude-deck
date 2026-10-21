@@ -162,6 +162,9 @@ export const register: Register = on => {
   // WHY サブエージェントのターンでも見る: バックグラウンドのサブエージェントは、メインのターンが
   // 終わった後も動き続ける。メインが止まっている間に最後の 1 つが終わったら idle にする。
   // この時点で、終わったエージェントは一覧で completed になっている（Claude Code 2.1.296 で確認）。
+  // メインの turn.complete の時点では、バックグラウンドのサブエージェントは一覧に running で出る（同じ版で確認）。
+  // WHY NOT classic.Stop の background_tasks で数える: シェルやワークフローも入るが、メインが止まったまま
+  // サブエージェントが終わったときに読み直す契機が無い。
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       inMainTurn = false

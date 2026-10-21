@@ -32,6 +32,18 @@ func TestRenderSessionItem(t *testing.T) {
 			},
 		},
 		{
+			name: "pinned: a bar in the left padding",
+			snap: session.Snapshot{
+				Name: "shoko-677b", RepoPath: "/src/pomesaka/claude-deck", RepoName: "claude-deck", Pinned: true,
+				Status: session.StatusIdle, BookmarkName: "main", StartedAt: started, LastActivity: updated, Elapsed: 18*time.Hour + 54*time.Minute,
+			},
+			width: 60,
+			want: []string{
+				"▎● /src/pomesaka/claude-deck@main                shoko-677b",
+				"▎  18h54m 10/10 10:13",
+			},
+		},
+		{
 			name: "alias on the second line",
 			snap: session.Snapshot{
 				Name: "shoko-677b", Alias: "review-pr-12", RepoPath: "/src/pomesaka/claude-deck", RepoName: "claude-deck",

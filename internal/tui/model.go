@@ -118,6 +118,12 @@ type sessionKilledMsg struct {
 	err error
 }
 
+// pinToggledMsg is sent when an async pin or unpin completes. The list itself
+// is refreshed through WatchStore, so only the error is carried.
+type pinToggledMsg struct {
+	err error
+}
+
 // NewModel creates the initial TUI model.
 func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context) Model {
 	delegate := newRepoDelegate()
@@ -287,16 +293,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionKilledMsg:
 		m.killing = false
+		// refreshSessions は呼ばない: Kill は store を書いた後に Reload し、その notifyChange が
+		// SessionRefreshMsg を届ける。StopProcess が失敗したときも同じ。beginClose で失敗したときは何も書いていない。
 		if msg.err != nil {
-			// Kill() が StopProcess エラーで早期 return した場合、notifyChange は呼ばれず
-			// SessionRefreshMsg も届かない。セッション状態は変化していないため refreshSessions は不要。
 			m.statusMsg = "終了エラー: " + msg.err.Error()
 		} else {
 			m.statusMsg = "セッションを終了しました (workspace削除済)"
-			// Kill() 末尾の notifyChange がデバウンスループ経由で SessionRefreshMsg を発行するため
-			// refreshSessions の明示呼び出しは不要。
 		}
 		cmds = append(cmds, clearStatusCmd())
+
+	case pinToggledMsg:
+		if msg.err != nil {
+			m.statusMsg = "ピンの変更エラー: " + msg.err.Error()
+			cmds = append(cmds, clearStatusCmd())
+		}
 
 	case repoListMsg:
 		if msg.err != nil {
@@ -340,7 +350,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.(type) {
 		case tea.KeyPressMsg,
 			metadataTickMsg, SessionRefreshMsg, statusClearMsg,
-			sessionCreatedMsg, sessionResumedMsg, sessionForkedMsg, sessionKilledMsg, repoListMsg,
+			sessionCreatedMsg, sessionResumedMsg, sessionForkedMsg, sessionKilledMsg, pinToggledMsg, repoListMsg,
 			RateLimitsUpdatedMsg:
 			// skip: 処理済み or repoList に無関係
 		default:
@@ -597,6 +607,9 @@ func (m *Model) buildRightPaneSwitchFromSnap(snap session.Snapshot, focusRight b
 	return sw
 }
 
+// rightPaneTargetForDisplay は、カーソル移動でも明示的な操作でも、右ペインに出す先を Display だけで決める。
+// WHY NOT 実行中のセッションを preview の JSONL で見せる: preview は Display が tmux のときログを流さない
+// （tui/preview.go）ので、実行中のセッションが空の画面になる。
 func rightPaneTargetForDisplay(display session.DisplayChannel) rightPaneTarget {
 	if display == session.DisplayTmux {
 		return rightPaneTmux

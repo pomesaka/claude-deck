@@ -16,7 +16,7 @@ claude-deck は **複数の coding agent セッションを一括管理する TU
 │                     claude-deck                          │
 │                  (TUI ダッシュボード)                      │
 │                                                          │
-│  セッション一覧 / detail pane / tmux window 管理           │
+│  セッション一覧 / tmux ウィンドウ管理                      │
 └────┬─────────┬──────────┬──────────┬─────────────────────┘
      │         │          │          │
      ▼         ▼          ▼          ▼
@@ -33,9 +33,9 @@ claude-deck は **複数の coding agent セッションを一括管理する TU
 
 | 外部システム | claude-deck との関係 |
 |-------------|---------------------|
-| **Agent runtime CLI** | tmux ウィンドウで起動する。Claude provider は deck-status プラグイン（`--plugin-dir` で渡す）が `claude-deck hook` を実行して状態変化を store に書く。Codex provider は TUI が JSONL の runtime activity を読んで store に書く。どちらも JSONL ログから対話履歴を読み取る |
+| **Agent runtime CLI** | tmux ウィンドウで起動する。Claude provider は deck-status プラグイン（`--plugin-dir` で渡す）が `claude-deck hook` を実行して状態変化を store に書く。Codex provider は TUI が JSONL の runtime activity を読んで store に書く。Codex で出るステータスは Running と Idle だけで、承認待ち・質問待ちは出ない。Codex の `/clear` の後の ID も SessionChain に足さない（最初の ID だけを、同じワークスペースで起動した行に結び付ける）。どちらも JSONL ログから対話履歴を読み取る |
 | **jj (Jujutsu)** | セッションごとに隔離されたワークスペースを作成。ブックマーク名をセッションラベルに使用 |
-| **Ghostty** | 外部ターミナルウィンドウの起動。将来的に detail pane の外部ホスティングに使用予定 |
+| **Ghostty** | Ghostty の中で起動すると、右にペインを分割して tmux に attach する（[画面の構成](architecture.md#画面の構成)）。`t` で別のターミナルウィンドウを開く |
 | **ファイルシステム** | JSONL ログ監視 (fsnotify)、Store（SQLite `deck.db`）の読み書きと変更監視 |
 
 ## C4 Container: プロセスとデータストア
@@ -53,7 +53,7 @@ claude-deck は **複数の coding agent セッションを一括管理する TU
 └─────────────────────────────────────────────────────────┘
 
 ┌─ claude-deck CLI / hook プロセス（短命） ───────────────┐
-│  new / list / close / hook status|session-start|exited  │
+│  CLI サブコマンドと hook コマンド                        │
 │  store を直接読み書きする。new / close は tmux も操作    │
 └─────────────────────────────────────────────────────────┘
 
@@ -80,14 +80,14 @@ claude-deck は **複数の coding agent セッションを一括管理する TU
 | Claude Code → store | deck-status プラグインが `claude-deck hook` を実行 | Status 遷移、SessionChain 更新 |
 | Codex の JSONL → store | TUI が runtime activity と JSONL の発見から書く | Status 遷移、SessionChain の最初の ID |
 | ペインのシェル → store | runtime 終了後に `claude-deck hook exited` を実行 | Completed の記録 |
-| CLI → store | `claude-deck new / list / close / alias` | セッションの作成・一覧・close・表示名の設定 |
+| CLI → store | CLI サブコマンド（一覧は [CLAUDE.md](../CLAUDE.md#cli-サブコマンド)） | セッションの作成・一覧・close など |
 | store → TUI | `PRAGMA data_version` を 200ms ごとに確認して `Reload` | 他プロセスの書き込みの反映 |
 | Agent runtime → ファイル | JSONL 書き込み | 対話履歴 |
 | ファイル → claude-deck | fsnotify | JSONL 変更通知、外部セッション発見 |
 
 ## データフロー
 
-Session の状態は複数のデータソースから投影 (projection) される。
+Session の状態は store、JSONL、jj から組み立てる。項目ごとの書き手は [architecture.md の「プロセスと store」](architecture.md#プロセスと-store) にある。
 
 ```
                     ┌───────────────────────────────────────┐
@@ -103,38 +103,7 @@ Session の状態は複数のデータソースから投影 (projection) され�
                     │   → LastActivity                      │
                     │ RuntimeActivity (Codex)               │
                     │   → CurrentTool（Status は store へ） │
-                    │                                       │
-                    │           ┌──────────┐                │
-                    │           │ Snapshot  │───────► TUI   │
-                    │           │ (ロック   │  レンダリング  │
-                    │           │  フリー)  │                │
-                    └───────────┴──────────┘────────────────┘
-```
-
-### データソースの優先度
-
-同じフィールドに複数のソースが書き込む場合の優先順位:
-
-1. **JSONL** (最優先) — Claude Code の一次記録。Prompt, StartedAt, LastActivity
-2. **Hook** — リアルタイム通知。Status 遷移は Hook が最も正確。`claude-deck hook` が store に書き、TUI は Store 経由で受け取る
-3. **Store** — deck セッションの状態の信頼できる唯一の情報源。TUI 起動時の復元にも使う
-
-## 表示モデル
-
-TUI は Session の Snapshot を通じてデータを読む。
-
-```
-┌─ Session ──────────────────────────────┐
-│  Snapshot() ──► メタデータ表示          │
-│    Status, Alias, Prompt, etc.         │
-│                                        │
-└────────────────────────────────────────┘
-         │
-         ▼ DisplayChannel で分岐
-┌─ 右ペイン ────────────────────────────┐
-│  DisplayTmux  → セッションの tmux ウィンドウ                     │
-│  DisplayJSONL → preview ウィンドウが JSONL を読んでログを表示    │
-└────────────────────────────────────────┘
+                    └───────────────────────────────────────┘
 ```
 
 ## セッションライフサイクル (概要)
@@ -166,7 +135,7 @@ TUI は Session の Snapshot を通じてデータを読む。
   User 'r' キー → ResumeSession() → --resume で Claude Code 再起動
 ```
 
-詳細は `architecture.md` を参照。
+詳細は [architecture.md](architecture.md) を参照。
 
 ## パッケージマップ
 
@@ -179,12 +148,14 @@ internal/
     Session               集約ルート
     Manager               オーケストレータ（store の投影を持つ）
     transitions           store の行に適用する状態遷移の純関数
-    Snapshot              ロックフリー投影
 
-  tui/                    Bubble Tea TUI (表示層)
+  tui/                    Bubble Tea TUI (表示層)。preview サブプロセス（`claude-deck --preview`）の描画も持つ
     Model                 TUI 状態
-    View                  レンダリング (Snapshot 経由)
+    View                  レンダリング
     Keys                  キーバインド → Manager 操作
+
+  agentruntime/           新規・再開・フォークの起動を Claude Code と Codex それぞれのコマンドと引数に変換する
+  preview/                一覧のプロセスと preview サブプロセスの間で、表示する JSONL を受け渡す
 
   usage/                  JSONL パース・ストリーミング (インフラ)
   store/                  SQLite 永続化 (インフラ)
@@ -193,10 +164,10 @@ internal/
   jj/                     Jujutsu ワークスペース (インフラ)
   ghostty/                Ghostty ランチャー (インフラ)
   claudecode/             Claude Code パス解決・trust 設定 (インフラ)
-  ratelimits/             レートリミット監視 (インフラ)
+  ratelimits/             アカウントのレート制限の保存と監視 (インフラ)
   debuglog/               デバッグログ (インフラ)
 ```
 
-依存の方向: `tui → session → {usage, store, tmux, jj}`
+依存の方向: `tui → {session, preview}`、`preview → session`、`session → {agentruntime, usage, store, tmux, jj, ratelimits}`
 
 session パッケージがドメインの中心。インフラパッケージはドメインに依存しない。

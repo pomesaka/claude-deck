@@ -43,7 +43,7 @@ func OpenStore(dataDir string) (*store.Store, error) {
 	return st, nil
 }
 
-// legacySessionsDir is where the JSON store (before ADR-011) kept one file per session.
+// legacySessionsDir is where the JSON store (before the SQLite store) kept one file per session.
 func legacySessionsDir(dataDir string) string {
 	return filepath.Join(dataDir, "sessions")
 }
@@ -397,7 +397,7 @@ func recordSortTime(r store.Record) time.Time {
 	return r.StartedAt
 }
 
-// PersistAll saves the TUI-projected fields (tokens, prompt, timestamps, bookmark)
+// PersistAll saves the TUI-projected fields (title, bookmark, prompt, permission mode, timestamps)
 // of every deck session, so the next start shows them before JSONL is read again.
 func (m *Manager) PersistAll() {
 	for _, s := range m.copySessionsList() {
@@ -415,4 +415,15 @@ func (m *Manager) PersistAll() {
 			debuglog.Printf("[PersistAll] %s: %v", src.ID, err)
 		}
 	}
+}
+
+// SetPinned pins or unpins the deck session id. External sessions are not in
+// the store, so pinning one returns store.ErrNotFound. The list picks the change
+// up through WatchStore.
+func (m *Manager) SetPinned(id DeckSessionID, pinned bool) error {
+	_, err := m.store.Update(string(id), func(r *store.Record) error {
+		r.Pinned = pinned
+		return nil
+	})
+	return err
 }

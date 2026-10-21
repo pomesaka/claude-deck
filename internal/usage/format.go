@@ -5,6 +5,8 @@ import "time"
 // format is what differs between the transcripts of the agent runtimes: where
 // the files are, how a session ID is read from a path, and how a line is read.
 // Reader, MultiWatcher and LogStreamer hold one and never ask which runtime it is.
+// WHY NOT Codex の transcript を Claude Code の形式のファイルに変換して読む: 変換したファイルの作成と
+// 削除を別に管理することになり、一次データの JSONL とずれる。
 type format interface {
 	// files returns every transcript under baseDir.
 	files(baseDir string) []string

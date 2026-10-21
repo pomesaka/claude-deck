@@ -8,7 +8,7 @@
 │  ID: "81f7f486f1df6345"  (deck 内部、不変)           │
 │                                                      │
 │  SessionChain: ["0c0a0bb5-...", "fbbc0487-..."]      │
-│    (Claude Code UUID の履歴、古い順。末尾が現在)     │
+│    (ランタイムセッション ID の履歴。末尾が現在)      │
 │                                                      │
 │  環境変数: CLAUDE_DECK_SESSION_ID=81f7f486f1df6345   │
 └─────────────────────────────────────────────────────┘
@@ -20,7 +20,7 @@
 └─────────────────────────────────────────────────────┘
 ```
 
-deck-status プラグインは `CLAUDE_DECK_SESSION_ID` を使って `claude-deck hook session-start --session <ID>` を実行する。Claude Code のセッション ID を知らなくても、store の行を直接特定できる。
+deck-status プラグインは `CLAUDE_DECK_SESSION_ID` を使って `claude-deck hook session-start --session <ID>` を実行する。ランタイムセッション ID を知らなくても、store の行を直接特定できる。
 
 ## /clear による ID 変遷
 
@@ -40,7 +40,7 @@ deck-status プラグインは `CLAUDE_DECK_SESSION_ID` を使って `claude-dec
 
 ## 重複防止
 
-同じ Claude Code セッションを 2 つの deck セッションが指さないようにする。
+同じランタイムセッション ID を 2 つの deck セッションが持たないようにする。
 
 - Discovery は、追跡中の全セッションの SessionChain（過去の ID を含む）を known として扱い、`/clear` 前の ID を外部セッションとして取り込まない。SessionChain は store に保存されるので、再起動しても残る
 - `Reload` は、外部セッション（メモリのみ）の SessionChain の ID を deck セッションが持つようになったら、その外部セッションを消す。hook で ID が届く前に Discovery が取り込んでいた場合に起こる

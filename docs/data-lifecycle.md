@@ -4,18 +4,20 @@ claude-deck が読み書き・作成・削除する外部データの一覧と�
 
 ## データ場所と所有者
 
+`{DataDir}` は `config.toml` の `data_dir` で、環境変数 `CLAUDE_DECK_DATA_DIR` があればそちらを使う。既定は `$XDG_DATA_HOME/claude-deck`、`XDG_DATA_HOME` が無ければ `~/.local/share/claude-deck`。provider が `codex` なら既定の末尾に `-codex` が付く。
+
 | パス | 内容 | 所有者 |
 |------|------|--------|
-| `~/.local/share/claude-deck/deck.db` | セッションメタデータ（SQLite） | claude-deck |
-| `~/.local/share/claude-deck/workspace/<encoded-repo>/<name>/` | jj ワークスペースディレクトリ | claude-deck |
-| `~/.local/share/claude-deck/plugin/` | deck-status プラグイン（バイナリから書き出す） | claude-deck |
-| `~/.local/share/claude-deck/rate-limits.json` | アカウントのレート制限（5 時間枠と 7 日枠）。セッションが報告するたびに上書きする | claude-deck |
-| `~/.local/share/claude-deck/debug.log` | デバッグログ（`CLAUDE_DECK_DEBUG=1` 時のみ） | claude-deck |
+| `{DataDir}/deck.db` | セッションメタデータ（SQLite） | claude-deck |
+| `{DataDir}/workspace/<encoded-repo>/<name>/` | jj ワークスペースディレクトリ | claude-deck |
+| `{DataDir}/plugin/` | deck-status プラグイン（バイナリから書き出す） | claude-deck |
+| `{DataDir}/rate-limits.json` | アカウントのレート制限（5 時間枠と 7 日枠）。セッションが報告するたびに上書きする | claude-deck |
+| `~/.local/share/claude-deck/debug.log` | デバッグログ。`CLAUDE_DECK_DEBUG` を設定したときだけ書く。値が `1` か `true` ならこのパス（`XDG_DATA_HOME` があればその下。`data_dir` には従わない）、それ以外ならその値のパスに書く | claude-deck |
 | `~/.claude/projects/<project>/<uuid>.jsonl` | 会話履歴 | **Claude Code**（deck は読み取り専用） |
 | `~/.claude.json` | Claude Code の設定。`projects[<パス>].hasTrustDialogAccepted` が trust の登録 | **Claude Code**（deck はデータディレクトリと、作ったワークスペースの trust 登録だけを足す） |
-| `~/.claude/settings.json` | 利用者の Claude Code の設定 | **利用者**（deck は書かない。以前の版が `statusLine` に入れたラッパーを、起動時に一度だけ元に戻す。[ADR 013](adr/013-rate-limits-from-plugin.md)） |
+| `~/.claude/settings.json` | 利用者の Claude Code の設定 | **利用者**（deck は書かない。以前の版が `statusLine` に入れたラッパーを、起動時に一度だけ元に戻す（`claudecode.RestoreStatusLine`）） |
 
-`deck.db` は TUI、CLI サブコマンド、hook コマンドが共有する。初回オープン時に旧形式の `sessions/*.json` があれば取り込み、`sessions.migrated-<timestamp>` に改名する。
+`deck.db` は TUI、CLI サブコマンド、hook コマンドが共有する。store を開くときに旧形式の `{DataDir}/sessions/*.json` があれば、store が空のときだけ取り込み（外部セッションは除く）、ディレクトリを `sessions.migrated-<timestamp>` に改名する。
 
 `<encoded-repo>` はリポジトリの絶対パスを `-` で繋いだ文字列（例: `-Users-pomesaka-github.com-Accel-Hack-ADeT`）。
 
@@ -26,7 +28,7 @@ claude-deck が読み書き・作成・削除する外部データの一覧と�
 **作成:**
 ```
 deck.db                                                  # セッションの行を挿入
-~/.local/share/claude-deck/workspace/<encoded>/<name>/
+{DataDir}/workspace/<encoded>/<name>/
   ├─ .jj/                                               # jj workspace add
   ├─ .git → <repo>/.git                                 # symlink（colocated repos のみ）
   ├─ <workspace_symlinks の設定分>                       # config で指定した symlink
@@ -53,11 +55,11 @@ deck.db                                                  # セッションの行
 **ワークスペースが削除済み**（`x` で終了後）の場合:
 ```
 # workspaces.recreate が走る
-~/.local/share/claude-deck/workspace/<encoded>/<name>/   # 再作成
+{DataDir}/workspace/<encoded>/<name>/                    # 再作成
 deck.db                                                  # 行の WorkspaceName/Path を更新
 ~/.claude/projects/.../<uuid>.jsonl                      # Claude Code が追記
 ```
-ワークスペース再作成時の開始 revision は `LastJJRevision → LastJJParentRevision → trunk()` の優先順で使われる（ADR 009 参照）。
+ワークスペース再作成時の開始 revision は `LastJJRevision → LastJJParentRevision → trunk()` の優先順で使われる。
 
 再作成に失敗したときは Claude を起動せず、セッションを Error にして理由を一覧に出す。本体リポジトリでは起動しない。作成の途中で失敗したワークスペースは `CreateWorkspaceAt` が消すので、原因を直してからもう一度 `r` を押せる。
 
@@ -65,8 +67,8 @@ deck.db                                                  # 行の WorkspaceName/
 
 **作成:**
 ```
-deck.db                                                  # 新セッションの行を挿入（forked_from に分岐元の ClaudeSessionID）
-~/.local/share/claude-deck/workspace/<encoded>/<new-name>/
+deck.db                                                  # 新セッションの行を挿入（forked_from に分岐元のランタイムセッション ID）
+{DataDir}/workspace/<encoded>/<new-name>/
 ~/.claude/projects/.../<new-uuid>.jsonl                  # Claude Code が作成
 ```
 
@@ -76,7 +78,7 @@ deck.db                                                  # 新セッションの
 
 **削除:**
 ```
-~/.local/share/claude-deck/workspace/<encoded>/<name>/   # os.RemoveAll で完全削除
+{DataDir}/workspace/<encoded>/<name>/                    # os.RemoveAll で完全削除
 ```
 
 **jj から登録解除:**
@@ -87,7 +89,6 @@ jj workspace forget <name>    # jj のワークスペース一覧から除去
 **更新（persist）:**
 ```
 deck.db の行
-  ClosingAt = <時刻>               # 処理中に立て、完了時にクリア
   WorkspaceName = ""             # クリア
   WorkspacePath = ""             # クリア
   Status = Completed
@@ -95,7 +96,7 @@ deck.db の行
   LastJJParentRevision = <change_id>  # @- の change_id（取得成功時のみ）
 ```
 
-`LastJJRevision` / `LastJJParentRevision` は `r` で resume するときに jj ワークスペースを再作成する際の開始 revision として使われる。取得に失敗した場合は両フィールドをクリア（空文字列）し、resume 時に `jj new trunk()` にフォールバックする。
+`LastJJRevision` / `LastJJParentRevision` は `r` で resume するときに jj ワークスペースを再作成する際の開始 revision として使われる。`@` が空だと `jj workspace forget` で abandon されるので、`@-` も保存しておく。取得に失敗した場合は両フィールドをクリア（空文字列）し、resume 時に `jj new trunk()` にフォールバックする。
 
 **触らないもの:**
 ```
@@ -105,12 +106,12 @@ deck.db の行
 
 ### prune — 上限を超えた終了済みセッションの削除（自動）
 
-利用者の操作ではない。store のセッションが `max_sessions`（既定 30）を超えると、終了済みのうち古いものから消す。TUI の起動時と、セッションを作った直後に動く。消されたセッションは一覧から消え、再開できない。動いているセッションと close 中のセッションは消さない。
+利用者の操作ではない。store のセッションが `max_sessions`（既定 30）を超えると、終了済みのうち古いものから消す。TUI の起動時と、セッションを作った直後に動く。消されたセッションは一覧から消え、再開できない。動いているセッションと close 中のセッションは消さない。ピンしたセッションも、終了済みで古ければ消す。
 
 **削除:**
 ```
 deck.db の行
-~/.local/share/claude-deck/workspace/<encoded>/<name>/   # x を押さずに終えたセッションの分。jj workspace forget も行う
+{DataDir}/workspace/<encoded>/<name>/                    # x を押さずに終えたセッションの分。jj workspace forget も行う
 ~/.claude.json の projects[<ワークスペースとその配下>]      # Claude のみ
 ```
 
@@ -129,7 +130,7 @@ prune が消しきれなかったものを片付ける。prune の途中でプ�
 
 **削除:**
 ```
-~/.local/share/claude-deck/workspace/<encoded>/<name>/   # store に同じリポジトリ・同じ名前の行が無いもの
+{DataDir}/workspace/<encoded>/<name>/                    # store に同じリポジトリ・同じ名前の行が無いもの
 ~/.claude.json の projects[<ワークスペースとその配下>]      # 上で消したものと、ディレクトリが既に無いもの（Claude のみ）
 ```
 

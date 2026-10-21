@@ -2,7 +2,7 @@
 //
 // The store is the source of truth shared by every claude-deck process: the TUI,
 // the CLI subcommands, and the hook commands run from inside Claude Code
-// sessions (ADR-011). Every mutation is a read-modify-write inside a
+// sessions. Every mutation is a read-modify-write inside a
 // BEGIN IMMEDIATE transaction, so concurrent writers from different processes
 // never lose each other's updates.
 package store
@@ -65,6 +65,8 @@ type Record struct {
 	// LaunchingAt is set from the moment a launch (new / fork / resume) claims the
 	// row until its process has started.
 	LaunchingAt *time.Time
+	// Pinned keeps the session in the group at the bottom of the list.
+	Pinned bool
 }
 
 const schema = `
@@ -92,7 +94,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 	closing_at                  INTEGER,
 	launching_at                INTEGER,
 	forked_from                 TEXT NOT NULL DEFAULT '',
-	alias                       TEXT NOT NULL DEFAULT ''
+	alias                       TEXT NOT NULL DEFAULT '',
+	pinned                      INTEGER NOT NULL DEFAULT 0
 );`
 
 // addedColumns are the columns added after the first release of the schema, in
@@ -104,12 +107,13 @@ CREATE TABLE IF NOT EXISTS sessions (
 var addedColumns = []struct{ name, ddl string }{
 	{"forked_from", "forked_from TEXT NOT NULL DEFAULT ''"},
 	{"alias", "alias TEXT NOT NULL DEFAULT ''"},
+	{"pinned", "pinned INTEGER NOT NULL DEFAULT 0"},
 }
 
 const columns = `id, name, repo_path, repo_name, workspace_path, workspace_name, sub_project_dir,
 	session_chain, status, finished_at, pid, error_message, terminal_title, bookmark_name,
 	last_jj_revision, last_jj_parent_revision, prompt, permission_mode, started_at, last_activity,
-	closing_at, launching_at, forked_from, alias`
+	closing_at, launching_at, forked_from, alias, pinned`
 
 // upsert writes one row: it inserts it, or, when the ID exists, updates the
 // columns this binary knows.
@@ -343,7 +347,7 @@ func (t *Tx) Put(r Record) error {
 		r.ID, r.Name, r.RepoPath, r.RepoName, r.WorkspacePath, r.WorkspaceName, r.SubProjectDir,
 		string(chainJSON), r.Status, nullableTime(r.FinishedAt), r.PID, r.ErrorMessage, r.TerminalTitle, r.BookmarkName,
 		r.LastJJRevision, r.LastJJParentRevision, r.Prompt, r.PermissionMode, unixNano(r.StartedAt), unixNano(r.LastActivity),
-		nullableTime(r.ClosingAt), nullableTime(r.LaunchingAt), r.ForkedFrom, r.Alias,
+		nullableTime(r.ClosingAt), nullableTime(r.LaunchingAt), r.ForkedFrom, r.Alias, r.Pinned,
 	)
 	return err
 }
@@ -390,7 +394,7 @@ func scanAll(rows *sql.Rows) ([]Record, error) {
 			&r.ID, &r.Name, &r.RepoPath, &r.RepoName, &r.WorkspacePath, &r.WorkspaceName, &r.SubProjectDir,
 			&chainJSON, &r.Status, &finishedAt, &r.PID, &r.ErrorMessage, &r.TerminalTitle, &r.BookmarkName,
 			&r.LastJJRevision, &r.LastJJParentRevision, &r.Prompt, &r.PermissionMode, &startedAt, &lastActivity,
-			&closingAt, &launchingAt, &r.ForkedFrom, &r.Alias,
+			&closingAt, &launchingAt, &r.ForkedFrom, &r.Alias, &r.Pinned,
 		); err != nil {
 			return nil, err
 		}

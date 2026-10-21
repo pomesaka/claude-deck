@@ -73,7 +73,7 @@ type ManagerConfig struct {
 
 // Manager coordinates multiple Claude Code sessions.
 //
-// The store is the source of truth for deck sessions (ADR-011). The sessions map
+// The store is the source of truth for deck sessions. The sessions map
 // is an in-memory projection of the store plus external sessions discovered from
 // JSONL, which are never stored. Every operation that changes a deck session
 // writes the store first and then reloads the projection.
@@ -508,7 +508,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 	}
 
 	// ワークスペースがなければ（Kill で削除済み）再作成する。
-	// Kill 時に保存した @ / @- の change_id を渡す（ADR 009）。
+	// Kill 時に保存した @ / @- の change_id を渡す。
 	// CreateWorkspaceAt が jj edit <@> → jj new <@-> → jj new trunk() の順で試みる。
 	wsPath := rec.WorkspacePath
 	if wsPath == "" && rec.RepoPath != "" && rec.Name != "" {
@@ -706,8 +706,9 @@ func (m *Manager) GetSession(id DeckSessionID) *Session {
 	return m.sessions[id]
 }
 
-// ListSessions returns all sessions sorted by status group, then by last activity (newest first).
-// Group order (top→bottom): Unmanaged/Completed/Error → Idle → Running → WaitingApproval/Answer.
+// ListSessions returns all sessions sorted by pin, status group, then by last activity (newest last).
+// Unpinned sessions come first, then the pinned ones; within each, the group order (top→bottom) is
+// Unmanaged/Completed/Error → Idle → Running → WaitingApproval/Answer.
 func (m *Manager) ListSessions() []*Session {
 	list := m.copySessionsList()
 	sortSessions(list)
@@ -733,13 +734,18 @@ func ListStored(st *store.Store) ([]Snapshot, error) {
 	return snaps, nil
 }
 
-// sortSessions sorts by status group, then by last activity (newest last).
+// sortSessions sorts by pin, status group, then by last activity (newest last).
+// WHY ピンの組を一番下に置く: 一番下は初回のカーソル位置で目に近く、利用者が何度も戻る
+// セッションを置く場所にした。代わりに、ピンがあるとピンしていない要介入のセッションは
+// 一番下でなくなる（tab で移れる）。
+// WHY NOT 一番上: 要介入を一番下に保てるが、よく戻るセッションがカーソルから遠くなる。
 func sortSessions(list []*Session) {
 	// ソートキーを事前計算（比較ごとのロック取得を排除）
 	// sort.Slice は list 内の要素をスワップするが、別配列の keys はスワップしないため
 	// キーと要素がずれる。session とキーをペアにした構造体をソートする。
 	type sortItem struct {
 		session *Session
+		pinned  bool
 		group   int
 		t       time.Time
 		name    string
@@ -748,12 +754,16 @@ func sortSessions(list []*Session) {
 	for i, s := range list {
 		items[i] = sortItem{
 			session: s,
+			pinned:  s.isPinned(),
 			group:   s.sortGroup(),
 			t:       s.sortTime(),
 			name:    s.getName(),
 		}
 	}
 	sort.Slice(items, func(i, j int) bool {
+		if items[i].pinned != items[j].pinned {
+			return items[j].pinned
+		}
 		if items[i].group != items[j].group {
 			return items[i].group < items[j].group
 		}

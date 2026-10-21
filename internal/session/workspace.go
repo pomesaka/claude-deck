@@ -47,7 +47,7 @@ func CollectGarbage(st *store.Store, cfg ManagerConfig, dryRun bool) (GCReport, 
 }
 
 // remove removes the workspace of a session being closed and returns where its
-// working copy was (@ and @-), for the resume to recreate it (ADR 009). Both
+// working copy was (@ and @-), for the resume to recreate it. Both
 // are empty when they could not be read.
 func (ws workspaces) remove(repoPath, wsName string) (atRev, parentRev string) {
 	wsRoot := ws.root(repoPath, wsName)
@@ -136,7 +136,7 @@ func (ws workspaces) discard(repoPath, wsName string) {
 }
 
 // recreate creates a new jj workspace for a session whose workspace was deleted.
-// atRev/parentRev は Kill 時に保存した @ / @- の change_id（ADR 009）。
+// atRev/parentRev は Kill 時に保存した @ / @- の change_id。復元の順序は jj.Runner.CreateWorkspaceAt。
 // Returns the effective work directory (wsPath/subProjectDir if subProjectDir is set).
 func (ws workspaces) recreate(repoPath, sessName, subProjectDir, atRev, parentRev string) (string, error) {
 	debuglog.Printf("[recreateWorkspace] repoPath=%q sessName=%q atRev=%q parentRev=%q", repoPath, sessName, atRev, parentRev)

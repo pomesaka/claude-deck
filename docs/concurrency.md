@@ -27,44 +27,17 @@ for _, s := range sessions {
 }
 ```
 
-### パターン 2: ソートのロック回避
+### パターン 2: Session.mu を取る関数は Manager.mu を放してから呼ぶ
 
-sortTime() や getName() は Session.mu を取るため、Manager.mu 保持中にソートしない。
+`sortTime()` のように Session.mu を中で取る関数は、Manager.mu を放してから呼ぶ。ソートの比較関数で呼ぶときも同じ。
 
-```go
-m.mu.RLock()
-list := make([]*Session, 0, len(m.sessions))
-for _, s := range m.sessions {
-    list = append(list, s)
-}
-m.mu.RUnlock()  // ← ソート前に解放
+### パターン 3: TUI は Snapshot を読む
 
-sort.Slice(list, func(i, j int) bool {
-    return list[i].sortTime().After(list[j].sortTime())  // s.mu を内部で取得
-})
-```
+TUI は Session のフィールドを直接読まず、`Session.Snapshot()` が Session.mu の読み取りロックの下で作るコピーを読む。描画の間はどのロックも持たない。
 
-### パターン 3: notifyChange() のデバウンス
+### パターン 4: 変更通知はまとめて渡す
 
-notifyChange は変更されたセッション ID を pendingChanges に蓄積し、バッファ 1 のチャネルで通知をデバウンスする。
-
-```go
-func (m *Manager) notifyChange(sessionIDs ...DeckSessionID) {
-    if len(sessionIDs) > 0 {
-        m.pendingMu.Lock()
-        for _, id := range sessionIDs {
-            m.pendingChanges[id] = true
-        }
-        m.pendingMu.Unlock()
-    }
-    select {
-    case m.notifyCh <- struct{}{}:
-    default: // already pending; coalesce
-    }
-}
-```
-
-StartNotifyLoop が 16ms (≈60fps) 間隔でドレインし、onChange コールバックに変更セット全体を渡す。TUI 側は ChangedIDs に選択中セッションが含まれる場合のみ viewport を更新する。
+Manager の変更通知は、変わったセッションの ID をためておき、16ms ごとにまとめて TUI に渡す。TUI は一覧を描き直し、選択中のセッションが含まれるとき（空ならすべてが変わった扱い）だけ preview の指定（`preview-selection`）を書き直す。
 
 ## プロセス間の排他
 
@@ -72,20 +45,11 @@ deck セッションの状態は複数のプロセス（TUI、CLI、hook コマ�
 
 - 書き込みはすべて `BEGIN IMMEDIATE` のトランザクション内で「読んで、変えて、書く」。同時に書くプロセスは `busy_timeout`（5 秒）の範囲で順番を待つ
 - 状態遷移の規則は `transitions.go` の純関数で、トランザクション内で行に適用する。二重 close や二重 resume は、遷移関数が前提の状態（`closing_at` が空、終了済み）を確かめて失敗することで防ぐ
-- `closing_at` は close 中のセッションの印で、2 分でタイムアウトする。close の途中でプロセスが落ちても、後から close できる
 - `Manager.reloadMu` が `Reload` を直列化する。`WatchStore` と各操作の直後の `Reload` が同時に走っても、メモリの投影は 1 つずつ更新される
-- `launching_at` は起動中のセッションの印で、2 分でタイムアウトする。起動中の行は、ウィンドウがまだ無くても終了扱いにせず、close もできない
+- close 中（`closing_at`）と起動中（`launching_at`）の印の規則は [architecture.md の「close の排他」](architecture.md#close-の排他) にある
 - ウィンドウの一覧と store を読む順序は判定ごとに決めている。終了扱いにするときは store を先に読み、トランザクション内で行を読み直してから書く。孤立ウィンドウを消すときはウィンドウを先に読む（行は必ずウィンドウより先に作られるので、後から読んだ store に含まれる）
 
 `PRAGMA data_version` は接続ごとの値で、自分以外の接続がコミットしたときだけ変わる。`Store` は専用の接続で読む。
-
-## Background Goroutine 一覧
-
-| goroutine | 起動元 | 終了条件 | 役割 |
-|-----------|--------|----------|------|
-| StartNotifyLoop | main | ctx.Done() | dirty flag → onChange (60fps) |
-| WatchStore | main | ctx.Done() | `data_version` を 200ms ごとに見て、変化したら `Reload` |
-| MultiWatcher.Run | main | ctx.Done() | JSONL ファイル変更監視 |
 
 ## TUI から外部副作用を発行する時の順序保証
 
@@ -94,14 +58,8 @@ deck セッションの状態は複数のプロセス（TUI、CLI、hook コマ�
 
 対処: 右ペイン切替のような最新状態同期は、単一 worker / queue / coalescing loop で逐次化する。worker は「最新リクエストだけ」を読み、古いリクエストは I/O 開始前に破棄する。選択なし・repo 選択モードへの遷移も generation を進めるだけでなく、queue 上の pending request を無効化する。
 
-## Context キャンセレーション
+## goroutine の停止
 
-```
-main の ctx (signal: SIGINT/SIGTERM)
-  └→ Manager.ctx (全 goroutine の親)
-       ├→ WatchStore goroutine
-       ├→ MultiWatcher.Run goroutine
-       └→ NotifyLoop goroutine
-```
+TUI プロセスのバックグラウンドの goroutine（`WatchStore`、JSONL のファイル監視、変更通知のループ、レート制限の監視）は、`run` が作る ctx を受け取り、ctx がキャンセルされると止まる。ctx は SIGINT と SIGTERM でキャンセルする。
 
 JSONL のログを読む goroutine は preview サブプロセスにある（`tui/preview.go` の `previewStreamer`）。選択が変わるたびに前のストリームをキャンセルするので、動いているのは常に 1 つ。

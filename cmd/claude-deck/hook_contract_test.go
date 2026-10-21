@@ -14,6 +14,7 @@ import (
 // command line only by convention, and the plugin drops every failure: if one
 // side changes alone, statuses stop updating with no error anywhere. These tests
 // read the plugin's source and run what it would run through parseHookArgs.
+// WHY Go の側に置く: プラグインには package.json もテストの実行環境も無い。Go のテストは go test ./... で必ず走る。
 
 const registerTS = "../../deckmod/hooks/register.ts"
 

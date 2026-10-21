@@ -217,7 +217,7 @@ func TestKill(t *testing.T) {
 }
 
 // A session closed earlier has no workspace left; closing it again must not
-// drop the revisions the first close saved for resume (ADR 009).
+// drop the revisions the first close saved for resume.
 func TestKill_AlreadyClosedKeepsSavedRevisions(t *testing.T) {
 	m, _ := newTestManager(t)
 	finished := time.Now().Add(-time.Hour)

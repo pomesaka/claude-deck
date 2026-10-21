@@ -25,7 +25,7 @@ claude-deck solves this with a single dashboard that monitors all sessions, high
 - **jj workspace isolation** — Each session gets its own workspace, preventing file conflicts between agents
 - **Session discovery** — Automatically finds Claude Code sessions started outside claude-deck
 - **Aliases** — Give a session a readable label with `claude-deck alias`
-- **Ghostty integration** — Open a full terminal for any session with `t`
+- **Ghostty integration** — Inside Ghostty, claude-deck splits the window and attaches the right pane to the tmux session; `t` opens a full terminal for any session
 - **Workspace symlinks** — Auto-symlink `.env` and other untracked files into workspaces via per-project config
 - **Customizable theme** — Set your own palette via `config.toml`
 
@@ -45,7 +45,7 @@ claude-deck solves this with a single dashboard that monitors all sessions, high
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude` command) or Codex CLI (`codex` command)
 - [jj (Jujutsu)](https://github.com/jj-vcs/jj)
 - [tmux](https://github.com/tmux/tmux)
-- [Ghostty](https://ghostty.org/) (optional, for `t` key terminal launch)
+- [Ghostty](https://ghostty.org/) (optional, for the split pane and the `t` key terminal launch)
 
 ### Install
 
@@ -65,7 +65,7 @@ GOEXPERIMENT=jsonv2 go build -o claude-deck ./cmd/claude-deck
 
 ### Status tracking
 
-With `runtime.provider = "claude"` (the default), claude-deck tracks session status (running, waiting for approval, idle) with the `deck-status` plugin embedded in the binary. On startup it is written to `~/.local/share/claude-deck/plugin/` and passed to every Claude Code session claude-deck launches with `--plugin-dir`. No separate install is needed.
+With `runtime.provider = "claude"` (the default), claude-deck tracks session status (running, waiting for approval, idle) with the `deck-status` plugin embedded in the binary. On startup it is written to `plugin/` in the [data directory](#data-directories) and passed to every Claude Code session claude-deck launches with `--plugin-dir`. No separate install is needed.
 
 With `runtime.provider = "codex"`, the status is read from the Codex JSONL instead.
 
@@ -102,6 +102,7 @@ Existing Claude Code sessions running outside claude-deck are automatically disc
 | `r` | Resume session |
 | `f` | Fork session |
 | `x` | Kill the process and remove its workspace (JSONL and metadata are kept) |
+| `p` | Pin / unpin the session (pinned sessions stay together at the bottom of the list) |
 | `t` | Open Ghostty terminal |
 | `/` | Filter sessions (`Esc` clears the filter) |
 | `Tab` | Jump to next session needing attention |
@@ -114,11 +115,14 @@ Existing Claude Code sessions running outside claude-deck are automatically disc
 
 ## Configuration
 
-Config file: `~/.config/claude-deck/config.toml`
+Config file: `$XDG_CONFIG_HOME/claude-deck/config.toml` (`~/.config/claude-deck/config.toml` when `XDG_CONFIG_HOME` is unset)
 
 All sections are optional. Unspecified values use built-in defaults.
 
 ```toml
+# Data directory. See "Data directories" below for the default.
+data_dir = "/path/to/claude-deck-data"
+
 [defaults]
 # Passed to every session as --permission-mode. Unset (the default): no flag,
 # so Claude Code's own permissions.defaultMode in settings.json decides.
@@ -126,6 +130,19 @@ permission_mode = "plan"
 
 [ghostty]
 command = "ghostty"
+# Width in pixels of the claude-deck pane when it runs inside Ghostty.
+# The right split attaches to the tmux session.
+deck_width = 400
+
+[tmux]
+command = "tmux"
+# Letters, digits, "-" and "_". Default: "claude-deck" ("claude-deck-codex" with provider = "codex").
+session_name = "claude-deck"
+
+[keybinds]
+# Only these two keys can be rebound.
+fork = "f"
+open_term = "t"
 
 [theme]
 primary = "#7C3AED"
@@ -160,50 +177,66 @@ project_markers = ["go.mod", "package.json", "Cargo.toml"]
 excludes = ["Library", ".cache", "node_modules", ".git"]
 
 [session]
+# Finished sessions beyond this count are pruned, oldest first, along with their workspaces.
 max_sessions = 30
 max_jsonl_entries = 500
+# Discovery reads transcripts modified within this many days.
 discovery_days = 14
 refresh_interval = "5s"
 
-# Per-project workspace symlinks
-# jj workspace にはリポジトリの untracked ファイル (.env 等) がコピーされない。
-# プロジェクトごとに symlink したいファイルを指定できる。
 [projects."/Users/you/your-repo"]
+# Untracked files to symlink into each new jj workspace.
 workspace_symlinks = [".env", ".env.local", "secrets/"]
+# Extra directories passed to Claude Code as --add-dir.
+add_dirs = ["../shared-lib", "/absolute/path/to/docs"]
 ```
+
+### Runtime provider
+
+- `claude`: status and `/clear` are reported by the deck-status plugin. Transcripts are read from `~/.claude/projects`.
+- `codex`: Codex has no hooks. claude-deck reads the status from the Codex JSONL (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`) and writes it to its store, so the status is not updated while the TUI is not running.
+- With `codex`, unless `data_dir` and `[tmux] session_name` are set explicitly, the data directory gets a `-codex` suffix and the tmux session is `claude-deck-codex`. Each provider has its own `deck.db`.
+
+### Project discovery
+
+- With `project_markers` empty (the default), only repository roots are offered.
+- With `project_markers` set, claude-deck searches each repository with `fd` and also offers the directories that contain a marker. The repository root is always offered.
+- A nested repository with its own `.jj` is not a subproject of the outer one. It is offered as a repository of its own.
+
+### Workspace symlinks
+
+`jj workspace add` does not copy untracked files such as `.env` into the new workspace. `workspace_symlinks` lists files and directories to symlink from the repository root instead.
+
+- Paths are relative to the repository root.
+- A missing source is skipped, so the same list works for repositories without `.env`.
+- An existing destination is skipped (for example, a file jj already checked out).
+- Absolute paths and paths containing `..` are ignored.
+
+### Additional directories
+
+`add_dirs` is passed as `--add-dir` when claude-deck creates, resumes or forks a session in that repository. Relative paths are resolved from the repository root. Absolute paths are used as-is.
 
 ## Known Limitations
 
 - **jj required** — Workspace isolation relies on jj. Git-only repositories need `jj git init --colocate` first.
 - **macOS / Linux only** — Sessions run in tmux. Windows is not supported.
-- **Ghostty-specific** — The `t` key terminal launch assumes Ghostty. Other terminals can be used manually.
+- **Ghostty-specific** — The split pane and the `t` key terminal launch assume Ghostty. In other terminals, run `tmux attach-session -t claude-deck` in another pane yourself (claude-deck prints the command on start).
 - **Single machine** — Sessions are local. No remote or Docker-based background execution yet.
 
 ## Architecture
 
-```
-cmd/claude-deck/main.go   Entry point
-internal/
-  session/       Session lifecycle management (Manager)
-  tui/           Bubble Tea TUI (Model, View, Keys)
-  tmux/          tmux window management
-  usage/         JSONL parsing and streaming
-  config/        TOML configuration
-  store/         Session metadata persistence (SQLite)
-  ghostty/       Ghostty terminal launcher
-  jj/            Jujutsu workspace management
-  claudecode/    Claude Code path resolution & trust settings
-  debuglog/      Debug logging
-deckmod/         deck-status Claude Code plugin (embedded)
-```
-
-See [docs/architecture.md](docs/architecture.md) for details.
+See the package map in [docs/01-overview.md](docs/01-overview.md).
 
 ## Data directories
 
+The data directory is, in order of precedence:
+
+1. `$CLAUDE_DECK_DATA_DIR`
+2. `data_dir` in `config.toml`
+3. `$XDG_DATA_HOME/claude-deck`, or `~/.local/share/claude-deck` when `XDG_DATA_HOME` is unset (with a `-codex` suffix when `provider = "codex"`)
+
 ```
-~/.config/claude-deck/config.toml          Configuration
-~/.local/share/claude-deck/
+{data directory}/
   deck.db                                  Session metadata (SQLite)
   plugin/                                  deck-status plugin
   rate-limits.json                         Account rate limits reported by the sessions
@@ -212,6 +245,8 @@ See [docs/architecture.md](docs/architecture.md) for details.
 ~/.claude/projects/<project>/<uuid>.jsonl              Claude Code JSONL (read by claude-deck)
 ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl           Codex JSONL (read by claude-deck when provider = "codex")
 ```
+
+When each of these is created and removed is described in [docs/data-lifecycle.md](docs/data-lifecycle.md).
 
 ## Q&A
 

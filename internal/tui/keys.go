@@ -147,6 +147,9 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "x":
 		return m.killSelected()
 
+	case "p":
+		return m.togglePinSelected()
+
 	case m.config.Keybinds.OpenTerm:
 		return m.openTerminal()
 
@@ -164,7 +167,7 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 
 	case "?":
-		m.statusMsg = "j/k:移動 gg/G:先頭/末尾 /:フィルタ tab:要注意 n:新規 Enter/r:再開 f:フォーク t:ターミナル x:終了 R:再描画 C-c:quit"
+		m.statusMsg = "j/k:移動 gg/G:先頭/末尾 /:フィルタ tab:要注意 n:新規 Enter/r:再開 f:フォーク t:ターミナル p:ピン x:終了 R:再描画 C-c:quit"
 		return clearStatusCmd()
 	}
 
@@ -338,6 +341,8 @@ func (m *Model) forkSelected() tea.Cmd {
 // Unlike resumeSelected/forkSelected (which complete quickly and are guarded at the Manager
 // layer by status checks), removing the workspace can take many seconds on large directories.
 // m.killing prevents concurrent workspace deletions while one is already in flight.
+// WHY プロセス内のフラグで足りる: CLI の close など別プロセスとの同時 close は、
+// store の closing_at（beginClose）が ErrClosing で止める。
 func (m *Model) killSelected() tea.Cmd {
 	if m.selectedID == "" || m.killing {
 		return nil
@@ -353,6 +358,29 @@ func (m *Model) killSelected() tea.Cmd {
 	m.statusMsg = "セッション終了中..."
 	return func() tea.Msg {
 		return sessionKilledMsg{err: mgr.Kill(sid)}
+	}
+}
+
+// togglePinSelected pins the selected session, or unpins it when it is pinned.
+func (m *Model) togglePinSelected() tea.Cmd {
+	if m.selectedID == "" {
+		return nil
+	}
+	sess := m.manager.GetSession(m.selectedID)
+	if sess == nil {
+		return nil
+	}
+	snap := sess.Snapshot()
+	// WHY NOT adoptExternal で store に取り込む: ピンのためだけに store の行が増え、
+	// resume 以外の経路から取り込みが起きる。メモリだけに持つと、外部セッションは発見の
+	// たびに ID が変わるのでピンが残らない。
+	if snap.Status == session.StatusUnmanaged {
+		m.statusMsg = "外部セッションはピンできません"
+		return clearStatusCmd()
+	}
+	mgr := m.manager
+	return func() tea.Msg {
+		return pinToggledMsg{err: mgr.SetPinned(snap.ID, !snap.Pinned)}
 	}
 }
 

@@ -29,6 +29,7 @@ func (s *Session) recordLocked() store.Record {
 		ID:                   string(s.ID),
 		Name:                 s.Name,
 		Alias:                s.Alias,
+		Pinned:               s.Pinned,
 		RepoPath:             s.RepoPath,
 		RepoName:             s.RepoName,
 		WorkspacePath:        s.WorkspacePath,
@@ -71,6 +72,7 @@ func newSessionFromRecord(r store.Record) *Session {
 func (s *Session) applyControlRecordLocked(r store.Record) {
 	s.Name = r.Name
 	s.Alias = r.Alias
+	s.Pinned = r.Pinned
 	s.WorkspacePath = r.WorkspacePath
 	s.WorkspaceName = r.WorkspaceName
 	s.SessionChain = s.SessionChain[:0]

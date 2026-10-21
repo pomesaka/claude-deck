@@ -371,7 +371,7 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	}
 	line1 := joinEnds(iconCol+renderWorkDir(snap, avail, dim, emphStyle)+bookmarkCol, nameCol, cw, bg)
 
-	// line2: インデント(icon幅) + 起動時間 + 最終更新 + [メッセージ] ……… [エイリアス]（右寄せ）
+	// line2: インデント(icon幅、ピンならその印) + 起動時間 + 最終更新 + [メッセージ] ……… [エイリアス]（右寄せ）
 	const (
 		uptimeWidth = 6  // "23h59m" / "99d23h"
 		timeWidth   = 11 // "01/02 15:04"
@@ -401,6 +401,13 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	style := sessionItemStyle
 	if selected {
 		style = sessionItemSelectedStyle
+	}
+	// ピンした行は、左の余白の 1 桁に縦線を引く。余白を使うので行の中身の桁は動かない。
+	// ▎ は ● と同じ East Asian Ambiguous で、● が 1 桁で出る端末なら 1 桁で出る。
+	if snap.Pinned {
+		bar := selBg(lipgloss.NewStyle().Foreground(colorWarning), selected).Render("▎")
+		content = lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.JoinVertical(lipgloss.Left, bar, bar), content)
+		style = style.PaddingLeft(0)
 	}
 	// width は border-box 外寸。Padding(0,1) 込みで width セル幅にする。
 	return style.Width(width).Render(content)

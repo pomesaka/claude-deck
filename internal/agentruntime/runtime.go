@@ -45,6 +45,10 @@ type StartSpec struct {
 
 // Runtime translates deck lifecycle operations into runtime-specific CLI
 // commands and arguments.
+// WHY NOT Manager で provider を分岐する: 起動引数・transcript・状態の取り方が provider ごとに違い、
+// provider を足すたびにセッションのライフサイクルの中心が膨らむ。provider を選ぶのは
+// buildManagerConfig（cmd/claude-deck/main.go）と usage.formatFor だけにする。例外は、hook の有無で
+// 分かれる Manager.adoptRuntimeID。
 type Runtime interface {
 	Provider() Provider
 	StartSpec(StartRequest) StartSpec

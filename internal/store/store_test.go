@@ -44,7 +44,7 @@ func TestStore_RoundTrip(t *testing.T) {
 				LastJJRevision: "abc", LastJJParentRevision: "def",
 				Prompt: "hello", PermissionMode: "plan",
 				StartedAt: time.Unix(1_700_000_000, 1), LastActivity: time.Unix(1_700_000_050, 2),
-				ClosingAt: &closing, LaunchingAt: &finished,
+				ClosingAt: &closing, LaunchingAt: &finished, Pinned: true,
 			},
 		},
 	}
@@ -104,12 +104,13 @@ func TestStore_MigratesAddedColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Name != "anna-8cc7" || got.ForkedFrom != "" || got.Alias != "" {
-		t.Errorf("old row = %+v, want name anna-8cc7, no ForkedFrom and no Alias", got)
+	if got.Name != "anna-8cc7" || got.ForkedFrom != "" || got.Alias != "" || got.Pinned {
+		t.Errorf("old row = %+v, want name anna-8cc7, no ForkedFrom, no Alias and not pinned", got)
 	}
 	if _, err := st.Update("a", func(r *Record) error {
 		r.ForkedFrom = "source"
 		r.Alias = "review-pr-12"
+		r.Pinned = true
 		return nil
 	}); err != nil {
 		t.Fatalf("Update: %v", err)
@@ -121,8 +122,8 @@ func TestStore_MigratesAddedColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after reopening: %v", err)
 	}
-	if got.ForkedFrom != "source" || got.Alias != "review-pr-12" {
-		t.Errorf("after reopening: ForkedFrom = %q, Alias = %q; want source, review-pr-12", got.ForkedFrom, got.Alias)
+	if got.ForkedFrom != "source" || got.Alias != "review-pr-12" || !got.Pinned {
+		t.Errorf("after reopening: ForkedFrom = %q, Alias = %q, Pinned = %v; want source, review-pr-12, true", got.ForkedFrom, got.Alias, got.Pinned)
 	}
 }
 
