@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"reflect"
 	"testing"
 )
 
@@ -75,6 +76,30 @@ func TestParseCLIArgs(t *testing.T) {
 			want:    cliRequest{Op: "gc", DryRun: true},
 		},
 		{
+			name:    "project list",
+			command: "project",
+			args:    []string{"list"},
+			want:    cliRequest{Op: "project", ProjectOp: "list"},
+		},
+		{
+			name:    "project args shown",
+			command: "project",
+			args:    []string{"args", "/tmp/repo"},
+			want:    cliRequest{Op: "project", ProjectOp: "show-args", Dir: "/tmp/repo"},
+		},
+		{
+			name:    "project args set, flags after -- kept as arguments",
+			command: "project",
+			args:    []string{"args", "/tmp/repo", "--", "--dangerously-load-development-channels", "server:xwb", "--clear"},
+			want:    cliRequest{Op: "project", ProjectOp: "set-args", Dir: "/tmp/repo", ClaudeArgs: []string{"--dangerously-load-development-channels", "server:xwb", "--clear"}},
+		},
+		{
+			name:    "project args cleared",
+			command: "project",
+			args:    []string{"args", "--clear", "/tmp/repo"},
+			want:    cliRequest{Op: "project", ProjectOp: "clear-args", Dir: "/tmp/repo"},
+		},
+		{
 			name:    "hook status",
 			command: "hook",
 			args:    []string{"status", "waiting_approval", "--session", "abc"},
@@ -105,7 +130,7 @@ func TestParseCLIArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse %s %v: %v", tt.command, tt.args, err)
 			}
-			if got != tt.want {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("parse %s %v = %+v, want %+v", tt.command, tt.args, got, tt.want)
 			}
 		})
@@ -150,7 +175,7 @@ func TestParseAliasArgs_SessionFromEnv(t *testing.T) {
 		t.Fatalf("parseAliasArgs: %v", err)
 	}
 	want := cliRequest{Op: "alias", Target: "from-env", Alias: "review"}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
 }
@@ -172,6 +197,13 @@ func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 		{name: "unknown flag", command: "new", args: []string{"--prompt", "hi"}},
 		{name: "gc with positional argument", command: "gc", args: []string{"extra"}},
 		{name: "tree with positional argument", command: "tree", args: []string{"extra"}},
+		{name: "project without operation", command: "project"},
+		{name: "project unknown operation", command: "project", args: []string{"bogus"}},
+		{name: "project list with positional argument", command: "project", args: []string{"list", "extra"}},
+		{name: "project args without dir", command: "project", args: []string{"args"}},
+		{name: "project args without -- before arguments", command: "project", args: []string{"args", "/tmp/repo", "--verbose"}},
+		{name: "project args with nothing after --", command: "project", args: []string{"args", "/tmp/repo", "--"}},
+		{name: "project args cleared and set", command: "project", args: []string{"args", "--clear", "/tmp/repo", "--", "--verbose"}},
 		{name: "hook without event", command: "hook"},
 		{name: "hook unknown event", command: "hook", args: []string{"bogus", "--session", "abc"}},
 		{name: "hook status without status", command: "hook", args: []string{"status"}},

@@ -19,6 +19,8 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
 | `close <ID\|NAME>` | プロセスを止め、ワークスペースを消す。JSONL とメタデータは残り、TUI から再開できる |
 | `alias [--session ID\|NAME] <ALIAS>` | セッションに表示用の名前を付ける。TUI の一覧で、セッション名と並べて出る |
 | `gc [--dry-run]` | どのセッションのものでもないワークスペースと、消えたワークスペースについての Claude Code の記録を消す |
+| `project list` | 設定ファイルにある、プロジェクトごとの設定を返す |
+| `project args [--clear] <DIR> [-- <ARG>...]` | そのリポジトリで Claude Code を起動するときに足す引数を読み書きする |
 
 出力は JSON。`new`・`close`・`alias` は次の形で 1 件、`list` はその配列を返す。
 
@@ -94,6 +96,24 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
 
 - 消したものは戻せないので、利用者に頼まれたときだけ実行する。先に `--dry-run` で対象を見せる
 - 対象は、一覧に無いセッションのワークスペース（上限を超えて一覧から消えたものなど）。`list` に名前があるセッションのワークスペースは消さない
+
+## project
+
+設定ファイル（`config.toml`）の `[projects."<リポジトリ>"]` を読み書きする。`project args` は 1 件、`project list` はその配列を返す。
+
+```json
+{
+  "path": "リポジトリのルート",
+  "workspace_symlinks": ["新しいワークスペースへ symlink するファイル（無ければ無い）"],
+  "add_dirs": ["--add-dir で渡すディレクトリ（無ければ無い）"],
+  "claude_args": ["Claude Code の起動時に足す引数"]
+}
+```
+
+- `project args <DIR> -- <ARG>...` で引数を置き換え、`project args --clear <DIR>` で消し、`project args <DIR>` で今の設定を返す。Claude Code へ渡す引数は必ず `--` の後ろに書く
+- `DIR` は、`new --dir` と同じ規則でリポジトリのルートに読み替える
+- 設定は、次に起動・再開・フォークするセッションから効く。動いているセッションの引数は変わらないので、効かせたいセッションは閉じて再開する
+- 利用者の設定ファイルを書き換えるので、頼まれたときだけ実行する
 
 ## CLI に無い操作
 

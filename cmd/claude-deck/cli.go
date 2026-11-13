@@ -6,8 +6,10 @@ import (
 	json "encoding/json/v2"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/pomesaka/claude-deck/internal/config"
@@ -25,6 +27,9 @@ type cliRequest struct {
 	Target      string // close, alias
 	Alias       string // alias: the alias to set. list: the text to filter aliases by
 	DryRun      bool   // gc
+	// project (Dir is the project)
+	ProjectOp  string
+	ClaudeArgs []string // projectSetArgs: the arguments to set
 	// hook
 	HookEvent       string
 	Session         string
@@ -42,8 +47,9 @@ var cliCommands = map[string]func(args []string) (cliRequest, error){
 	"tree":  parseTreeArgs,
 	"close": parseCloseArgs,
 	"alias": parseAliasArgs,
-	"gc":    parseGCArgs,
-	"hook":  parseHookArgs,
+	"gc":      parseGCArgs,
+	"project": parseProjectArgs,
+	"hook":    parseHookArgs,
 }
 
 // SessionInfo is the JSON form of a session printed by new / list / close.
@@ -108,6 +114,9 @@ func runCLI(name string, args []string) error {
 	req, err := cliCommands[name](args)
 	if err != nil {
 		return err
+	}
+	if req.Op == "project" {
+		return runProject(req, config.DefaultPath())
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -306,6 +315,122 @@ func parseGCArgs(args []string) (cliRequest, error) {
 		return cliRequest{}, fmt.Errorf("gc: unexpected arguments: %v", fs.Args())
 	}
 	return cliRequest{Op: "gc", DryRun: *dryRun}, nil
+}
+
+// Operations of `claude-deck project`.
+const (
+	projectList      = "list"
+	projectShowArgs  = "show-args"
+	projectSetArgs   = "set-args"
+	projectClearArgs = "clear-args"
+)
+
+// ProjectInfo is the JSON form of one [projects."<path>"] table of the config file.
+type ProjectInfo struct {
+	Path              string   `json:"path"`
+	WorkspaceSymlinks []string `json:"workspace_symlinks,omitempty"`
+	AddDirs           []string `json:"add_dirs,omitempty"`
+	ClaudeArgs        []string `json:"claude_args"`
+}
+
+func projectInfo(path string, pc config.ProjectConfig) ProjectInfo {
+	args := pc.ClaudeArgs
+	if args == nil {
+		args = []string{}
+	}
+	return ProjectInfo{Path: path, WorkspaceSymlinks: pc.WorkspaceSymlinks, AddDirs: pc.AddDirs, ClaudeArgs: args}
+}
+
+func parseProjectArgs(args []string) (cliRequest, error) {
+	usage := "Usage: claude-deck project list | project args [--clear] <DIR> [-- <ARG>...]"
+	if len(args) == 0 {
+		return cliRequest{}, fmt.Errorf("project: missing operation\n%s", usage)
+	}
+	switch args[0] {
+	case "list":
+		fs := flag.NewFlagSet("project list", flag.ContinueOnError)
+		fs.Usage = func() {
+			fmt.Fprintln(fs.Output(), "Usage: claude-deck project list")
+			fmt.Fprintln(fs.Output(), "config.toml の [projects] にあるプロジェクトごとの設定を JSON で返す。")
+		}
+		if err := fs.Parse(args[1:]); err != nil {
+			return cliRequest{}, err
+		}
+		if fs.NArg() > 0 {
+			return cliRequest{}, fmt.Errorf("project list: unexpected arguments: %v", fs.Args())
+		}
+		return cliRequest{Op: "project", ProjectOp: projectList}, nil
+	case "args":
+		fs := flag.NewFlagSet("project args", flag.ContinueOnError)
+		fs.Usage = func() {
+			fmt.Fprintln(fs.Output(), "Usage: claude-deck project args [--clear] <DIR> [-- <ARG>...]")
+			fmt.Fprintln(fs.Output(), "DIR のリポジトリで Claude Code を起動するときに足す引数（config.toml の claude_args）を読み書きし、JSON で返す。")
+			fmt.Fprintln(fs.Output(), "-- の後ろに引数を書くと置き換え、--clear で消し、どちらも無ければ今の設定を返す。次に起動・再開・フォークするセッションから効く。")
+			fs.PrintDefaults()
+		}
+		clear := fs.Bool("clear", false, "設定を消す")
+		if err := fs.Parse(args[1:]); err != nil {
+			return cliRequest{}, err
+		}
+		// WHY "--" を自分で探す: flag は最初の位置引数（DIR）で読むのをやめるので、
+		// その後ろの "--" は rest に残る。
+		rest := fs.Args()
+		if len(rest) == 0 {
+			fs.Usage()
+			return cliRequest{}, fmt.Errorf("project args: specify the project directory")
+		}
+		dir, err := resolveDir(rest[0])
+		if err != nil {
+			return cliRequest{}, err
+		}
+		req := cliRequest{Op: "project", ProjectOp: projectShowArgs, Dir: dir}
+		switch {
+		case len(rest) == 1 && *clear:
+			req.ProjectOp = projectClearArgs
+		case len(rest) == 1:
+		case rest[1] != "--":
+			return cliRequest{}, fmt.Errorf("project args: put the arguments after \"--\": %v", rest[1:])
+		case *clear:
+			return cliRequest{}, fmt.Errorf("project args: --clear takes no arguments")
+		case len(rest) == 2:
+			return cliRequest{}, fmt.Errorf("project args: no arguments after \"--\" (use --clear to remove the setting)")
+		default:
+			req.ProjectOp = projectSetArgs
+			req.ClaudeArgs = rest[2:]
+		}
+		return req, nil
+	default:
+		return cliRequest{}, fmt.Errorf("project: unknown operation %q\n%s", args[0], usage)
+	}
+}
+
+// runProject reads and rewrites the per-project settings in the config file at path.
+func runProject(req cliRequest, path string) error {
+	// WHY ResolveLaunchDir: Manager が起動時に設定を引くキーは、new と同じ規則で決めた
+	// リポジトリのルート。ワークスペースやサブディレクトリを渡されても同じキーにする。
+	repoPath, _, _ := session.ResolveLaunchDir(req.Dir)
+	switch req.ProjectOp {
+	case projectSetArgs:
+		if err := config.SetProjectClaudeArgs(path, repoPath, req.ClaudeArgs); err != nil {
+			return err
+		}
+	case projectClearArgs:
+		if err := config.SetProjectClaudeArgs(path, repoPath, nil); err != nil {
+			return err
+		}
+	}
+	cfg, err := config.LoadFrom(path)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+	if req.ProjectOp != projectList {
+		return printJSON(projectInfo(repoPath, cfg.Projects[repoPath]))
+	}
+	infos := []ProjectInfo{}
+	for _, p := range slices.Sorted(maps.Keys(cfg.Projects)) {
+		infos = append(infos, projectInfo(p, cfg.Projects[p]))
+	}
+	return printJSON(infos)
 }
 
 // Hook events accepted by `claude-deck hook`.

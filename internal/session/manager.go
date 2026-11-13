@@ -57,6 +57,9 @@ type ManagerConfig struct {
 	ForgetProjectsFunc func(match func(dir string) bool, dryRun bool) (int, error)
 	// AddDirsFunc returns the --add-dir paths for the given repository.
 	AddDirsFunc func(repoPath string) []string
+	// ProjectArgsFunc returns the extra runtime arguments configured for the given
+	// repository. It is called on every launch. Nil passes nothing.
+	ProjectArgsFunc func(repoPath string) []string
 
 	// DeckCommand is the absolute path of the claude-deck binary. Sessions run
 	// "<DeckCommand> hook exited" when Claude Code exits, and the plugin calls it
@@ -166,8 +169,14 @@ func (m *Manager) runtime() agentruntime.Runtime {
 }
 
 // startSpec builds the runtime command for one launch. Every launch mode goes through
-// here so that the session name, the plugin dir and --add-dir are passed the same way.
+// here so that the session name, the plugin dir, --add-dir and the project's own
+// arguments are passed the same way.
 func (m *Manager) startSpec(mode agentruntime.LaunchMode, runtimeID RuntimeSessionID, workDir, name, repoPath string) agentruntime.StartSpec {
+	// WHY 末尾に置く: 利用者が書いた引数が、claude-deck の付ける引数の値として読まれないようにする。
+	additional := m.buildAddDirArgs(repoPath)
+	if m.config.ProjectArgsFunc != nil {
+		additional = append(additional, m.config.ProjectArgsFunc(repoPath)...)
+	}
 	return m.runtime().StartSpec(agentruntime.StartRequest{
 		Mode:           mode,
 		SessionID:      string(runtimeID),
@@ -175,7 +184,7 @@ func (m *Manager) startSpec(mode agentruntime.LaunchMode, runtimeID RuntimeSessi
 		SessionName:    name,
 		PermissionMode: m.config.DefaultPermissionMode,
 		PluginDir:      m.config.PluginDir,
-		AdditionalArgs: m.buildAddDirArgs(repoPath),
+		AdditionalArgs: additional,
 	})
 }
 

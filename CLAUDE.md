@@ -111,6 +111,8 @@ CLI を変えたら、同梱のスキル `deck-status:claude-deck`（`deckmod/sk
 | `claude-deck close <ID\|NAME>` | `x` |
 | `claude-deck alias [--session ID\|NAME] <ALIAS>` | なし。セッションに表示用の名前を付ける（英数字と `-` `_` `.`、40 文字まで）。`--session` を省くと自分のセッション（`$CLAUDE_DECK_SESSION_ID`）。空文字で消す |
 | `claude-deck gc [--dry-run]` | なし。どのセッションのものでもないワークスペースと、消えたワークスペースについての `~/.claude.json` の登録を消す |
+| `claude-deck project list` | なし。`config.toml` の `[projects]` にあるプロジェクトごとの設定を返す |
+| `claude-deck project args [--clear] <DIR> [-- <ARG>...]` | なし。そのリポジトリで Claude Code を起動するときに足す引数（`config.toml` の `claude_args`）を読み書きする。store と tmux には触れない |
 
 内部用に `claude-deck hook status|session-start|exited|rate-limits --session <ID>` がある。deck-status プラグインとウィンドウのコマンドが呼ぶもので、手で実行するものではない。
 

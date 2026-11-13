@@ -288,12 +288,14 @@ func buildManagerConfig(cfg *config.Config) (session.ManagerConfig, error) {
 	pluginDir := ""
 	var trustWorkspace func(wsPath string) error
 	var forgetProjects func(match func(dir string) bool, dryRun bool) (int, error)
+	var projectArgs func(repoPath string) []string
 	if cfg.RuntimeProvider() == string(agentruntime.ProviderCodex) {
 		runtime = agentruntime.CodexRuntime{Command: cfg.Commands.Codex}
 		transcriptReader = usage.NewCodexReader("")
 	} else {
 		trustWorkspace = claudecode.EnsureTrusted
 		forgetProjects = claudecode.ForgetProjects
+		projectArgs = currentClaudeArgs(cfg)
 		pluginDir, err = deckmod.Install(filepath.Join(cfg.DataDir, "plugin"))
 		if err != nil {
 			return session.ManagerConfig{}, err
@@ -314,11 +316,29 @@ func buildManagerConfig(cfg *config.Config) (session.ManagerConfig, error) {
 		TrustWorkspaceFunc:    trustWorkspace,
 		ForgetProjectsFunc:    forgetProjects,
 		AddDirsFunc:           cfg.ResolvedAddDirs,
+		ProjectArgsFunc:       projectArgs,
 		DeckCommand:           deckCommand,
 		PluginDir:             pluginDir,
 		TmuxCommand:           cfg.Tmux.Command,
 		TmuxSession:           cfg.Tmux.SessionName,
 	}, nil
+}
+
+// currentClaudeArgs returns the claude_args lookup for ManagerConfig.ProjectArgsFunc.
+//
+// WHY 起動のたびに設定ファイルを読み直す: `claude-deck project args` は TUI が動いている間に
+// 設定を書き換える。起動時に読んだ値を使うと、TUI を再起動するまで反映されない。
+// WHY 読めなければ startup の値: 編集中で壊れた config.toml のために、設定済みの引数を
+// 付けずにセッションを起動しない。
+func currentClaudeArgs(startup *config.Config) func(repoPath string) []string {
+	return func(repoPath string) []string {
+		cfg, err := config.Load()
+		if err != nil {
+			debuglog.Printf("[claude_args] reloading config failed, using the value read at startup: %v", err)
+			return startup.ClaudeArgs(repoPath)
+		}
+		return cfg.ClaudeArgs(repoPath)
+	}
 }
 
 // setupGhosttySplit opens the tmux right pane in Ghostty if running inside it.

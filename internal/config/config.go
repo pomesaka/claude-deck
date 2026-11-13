@@ -39,6 +39,9 @@ type ProjectConfig struct {
 	// AddDirs lists additional directories to pass as --add-dir to Claude Code.
 	// Absolute paths are used as-is; relative paths are resolved from the repository root.
 	AddDirs []string `toml:"add_dirs"`
+	// ClaudeArgs are extra command-line arguments for Claude Code, passed as they are
+	// when a session of the repository is created, resumed or forked. Not passed to Codex.
+	ClaudeArgs []string `toml:"claude_args"`
 }
 
 // ThemeConfig holds UI color settings.
@@ -194,9 +197,14 @@ func (c *Config) RuntimeProvider() string {
 	return provider
 }
 
+// DefaultPath returns the path of the config file.
+func DefaultPath() string {
+	return filepath.Join(DefaultConfigDir(), "config.toml")
+}
+
 // Load reads configuration from the default config file.
 func Load() (*Config, error) {
-	cfg, err := LoadFrom(filepath.Join(DefaultConfigDir(), "config.toml"))
+	cfg, err := LoadFrom(DefaultPath())
 	if err != nil {
 		return nil, err
 	}
@@ -285,6 +293,11 @@ func (c *Config) ResolvedAddDirs(repoPath string) []string {
 		}
 	}
 	return resolved
+}
+
+// ClaudeArgs returns the extra Claude Code arguments configured for the given repository.
+func (c *Config) ClaudeArgs(repoPath string) []string {
+	return c.Projects[repoPath].ClaudeArgs
 }
 
 // EnsureDataDir creates the data directory if it doesn't exist.

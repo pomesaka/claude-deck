@@ -189,6 +189,8 @@ refresh_interval = "5s"
 workspace_symlinks = [".env", ".env.local", "secrets/"]
 # Extra directories passed to Claude Code as --add-dir.
 add_dirs = ["../shared-lib", "/absolute/path/to/docs"]
+# Extra arguments passed to Claude Code as they are.
+claude_args = ["--dangerously-load-development-channels", "server:xwb"]
 ```
 
 ### Runtime provider
@@ -215,6 +217,21 @@ add_dirs = ["../shared-lib", "/absolute/path/to/docs"]
 ### Additional directories
 
 `add_dirs` is passed as `--add-dir` when claude-deck creates, resumes or forks a session in that repository. Relative paths are resolved from the repository root. Absolute paths are used as-is.
+
+### Claude Code arguments
+
+`claude_args` is appended to the `claude` command line when claude-deck creates, resumes or forks a session in that repository. Use it for flags that can only be given at startup. It is not passed to Codex.
+
+```bash
+claude-deck project args ~/your-repo -- --dangerously-load-development-channels server:xwb   # set
+claude-deck project args ~/your-repo           # show
+claude-deck project args --clear ~/your-repo   # remove
+claude-deck project list                       # every project's settings
+```
+
+- The command rewrites only the `claude_args` line of `config.toml`. Comments and the other settings are kept.
+- A change applies from the next session started, without restarting the TUI. Sessions that are already running keep the arguments they were started with.
+- The directory is resolved to its repository root, the same way as `claude-deck new --dir`.
 
 ## Known Limitations
 
