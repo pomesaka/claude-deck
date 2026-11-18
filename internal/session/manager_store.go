@@ -386,15 +386,9 @@ func (m *Manager) pruneOldSessions() {
 	}
 }
 
-// recordSortTime mirrors Session.sortTime for store rows.
+// recordSortTime is Session.sortTime for store rows.
 func recordSortTime(r store.Record) time.Time {
-	if !r.LastActivity.IsZero() {
-		return r.LastActivity
-	}
-	if r.FinishedAt != nil {
-		return *r.FinishedAt
-	}
-	return r.StartedAt
+	return sortTimeOf(r.LastActivity, r.FinishedAt, r.StartedAt)
 }
 
 // PersistAll saves the TUI-projected fields (title, bookmark, prompt, permission mode, timestamps)

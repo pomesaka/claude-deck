@@ -257,3 +257,30 @@ func TestDisplayChannel_Derivation(t *testing.T) {
 		})
 	}
 }
+
+// Sessions and store rows are ordered by the latest of the three times. The
+// store's LastActivity is written only when the TUI exits cleanly, so it must
+// not hide a later FinishedAt.
+func TestSortTimeOf(t *testing.T) {
+	at := func(sec int64) time.Time { return time.Unix(1_700_000_000+sec, 0) }
+	tests := []struct {
+		name         string
+		lastActivity time.Time
+		finishedAt   *time.Time
+		startedAt    time.Time
+		want         time.Time
+	}{
+		{name: "only StartedAt", startedAt: at(1), want: at(1)},
+		{name: "FinishedAt after a stale LastActivity", lastActivity: at(2), finishedAt: new(at(5)), startedAt: at(1), want: at(5)},
+		{name: "LastActivity is the latest", lastActivity: at(9), finishedAt: new(at(5)), startedAt: at(1), want: at(9)},
+		{name: "StartedAt is the latest", lastActivity: at(2), finishedAt: new(at(3)), startedAt: at(4), want: at(4)},
+		{name: "nothing known", want: time.Time{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sortTimeOf(tt.lastActivity, tt.finishedAt, tt.startedAt); !got.Equal(tt.want) {
+				t.Errorf("sortTimeOf() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

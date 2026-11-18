@@ -524,6 +524,8 @@ func TestPruneOldSessions(t *testing.T) {
 	now := time.Now()
 	for _, r := range []store.Record{
 		{ID: "newest", Status: StatusCompleted.ID(), LastActivity: at(9)},
+		// The TUI last persisted LastActivity long ago, but the session was closed after "newest".
+		{ID: "closed-later", Status: StatusCompleted.ID(), LastActivity: at(0), FinishedAt: new(at(10))},
 		{ID: "old-finished", Status: StatusCompleted.ID(), LastActivity: at(1)},
 		{ID: "old-closing", Status: StatusCompleted.ID(), LastActivity: at(1), ClosingAt: &now},
 		{ID: "old-running", Status: StatusRunning.ID(), LastActivity: at(0)},
@@ -539,7 +541,8 @@ func TestPruneOldSessions(t *testing.T) {
 	for _, r := range recs {
 		ids = append(ids, r.ID)
 	}
-	if want := []string{"newest", "old-closing", "old-running"}; !slices.Equal(ids, want) {
+	slices.Sort(ids)
+	if want := []string{"closed-later", "old-closing", "old-running"}; !slices.Equal(ids, want) {
 		t.Errorf("remaining = %v, want %v", ids, want)
 	}
 }

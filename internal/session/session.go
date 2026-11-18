@@ -385,13 +385,24 @@ func (s *Session) MatchesFilter(text string) bool {
 func (s *Session) sortTime() time.Time {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if !s.LastActivity.IsZero() {
-		return s.LastActivity
+	return sortTimeOf(s.LastActivity, s.FinishedAt, s.StartedAt)
+}
+
+// sortTimeOf is the latest of the given times, ignoring the missing ones.
+// Sessions in memory and rows in the store are ordered by it.
+//
+// WHY 最も新しい時刻: store の LastActivity を書くのは TUI の正常終了時（PersistAll）
+// だけで、古いまま残ることがある。それを優先すると、今日閉じたセッションが prune で
+// 古いものとして消される。FinishedAt と StartedAt は store を書く遷移が入れる。
+func sortTimeOf(lastActivity time.Time, finishedAt *time.Time, startedAt time.Time) time.Time {
+	t := startedAt
+	if lastActivity.After(t) {
+		t = lastActivity
 	}
-	if s.FinishedAt != nil {
-		return *s.FinishedAt
+	if finishedAt != nil && finishedAt.After(t) {
+		t = *finishedAt
 	}
-	return s.StartedAt
+	return t
 }
 
 func (s *Session) isPinned() bool {
