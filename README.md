@@ -1,94 +1,174 @@
 # claude-deck
 
-A TUI dashboard for managing multiple [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions.
-Codex CLI support is available via `runtime.provider = "codex"`.
-Integrates [jj (Jujutsu)](https://github.com/jj-vcs/jj) workspaces and [Ghostty](https://ghostty.org/) terminals to orchestrate and monitor coding agents in parallel.
+[![Go](https://img.shields.io/github/go-mod/go-version/pomesaka/claude-deck)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-<!-- <--- ダッシュボード全体のスクリーンショット: 左にセッションリスト、右に詳細ペイン。複数セッションが異なるステータス(Running/Idle/承認待ち)で並んでいる状態 ---> -->
+**A terminal dashboard for running many [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions at once.**
+See which agent is waiting for you and jump to it with one key. Each session works in its own [jj](https://github.com/jj-vcs/jj) workspace, so parallel agents don't overwrite each other's work. Drive it from the TUI, from a JSON CLI, or from Claude Code itself.
 
-## Why
+[日本語](README.ja.md)
 
-Running multiple Claude Code agents in parallel is powerful, but managing them across many terminal windows quickly becomes chaotic:
+![Eight Claude Code sessions in the list on the left. The selected one is waiting for approval, and its prompt is open on the right.](docs/assets/overview.png)
 
-- Switching between terminals to check which agent is waiting for approval
-- Missing permission prompts buried in background terminals
-- No isolation between concurrent file edits
+<!-- TODO(readme-demo): docs/assets/demo.gif — Ghostty で左に一覧、右に tmux。4〜5 本が違う色で並ぶ → 1 本が承認待ちに変わりヘッダーが [1 asking...] になる → Tab で右に飛ぶ → 承認する → ● が Running に戻る。12〜15 秒、ループしても不自然でないように -->
 
-claude-deck solves this with a single dashboard that monitors all sessions, highlights those needing attention, and isolates each agent's file changes via jj workspaces.
+## Highlights
 
-## Features
-
-- **Multi-session dashboard** — Monitor all Claude Code sessions in a single TUI with real-time status updates
-- **Attention alerts** — Sessions waiting for approval or answers are highlighted and reachable with `Tab`
-- **JSONL structured log viewer** — Browse tool calls, diffs, and assistant responses in a readable format
-- **tmux session hosting** — Interact with the selected agent in its managed tmux window
-- **jj workspace isolation** — Each session gets its own workspace, preventing file conflicts between agents
-- **Session discovery** — Automatically finds Claude Code sessions started outside claude-deck
-- **Aliases** — Give a session a readable label with `claude-deck alias`
-- **Ghostty integration** — Inside Ghostty, claude-deck splits the window and attaches the right pane to the tmux session; `t` opens a full terminal for any session
-- **Workspace symlinks** — Auto-symlink `.env` and other untracked files into workspaces via per-project config
-- **Customizable theme** — Set your own palette via `config.toml`
-
-## Demo
-
-<!-- <--- デモ GIF (optional): 新規セッション作成 → 複数セッションが並行実行 → Tab で承認待ちにジャンプ → Enter で入力 → 完了。15-20秒程度 ---> -->
-
-<!-- <--- 右ペインのスクリーンショット: 終了済みセッションの JSONL ログビューア。ツール呼び出しや diff が見えている状態 ---> -->
-
-<!-- <--- 承認待ちセッションのスクリーンショット: セッションリストで承認待ちアイコンが目立っている状態 ---> -->
+- **Status at a glance** — running, idle, subagents running, waiting for approval, waiting for an answer, done. Read from Claude Code's hooks, not guessed from the screen.
+- **`Tab` to the next agent that needs you** — the focus moves straight into its terminal.
+- **One jj workspace per session** — parallel agents work on separate copies of the repository. `.env` and other untracked files can be symlinked in.
+- **Nothing is lost when a session ends** — its changes stay in the repository, and you can browse its log, resume it, or fork it.
+- **Scriptable** — every command prints JSON, and Claude Code sessions started by claude-deck can start, list and close sibling sessions themselves.
 
 ## Quick Start
 
-### Prerequisites
+### Requirements
 
-- Go 1.26+
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude` command) or Codex CLI (`codex` command)
-- [jj (Jujutsu)](https://github.com/jj-vcs/jj)
-- [tmux](https://github.com/tmux/tmux)
-- [Ghostty](https://ghostty.org/) (optional, for the split pane and the `t` key terminal launch)
+- macOS or Linux
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [tmux](https://github.com/tmux/tmux) and [jj (Jujutsu)](https://github.com/jj-vcs/jj)
+- Go 1.26+ to build it — prebuilt binaries are not published yet
+- [Ghostty](https://ghostty.org/) (optional) — claude-deck splits the window for you; in other terminals you attach to tmux in a second pane
 
 ### Install
-
-This project uses Go 1.26's `encoding/json/v2`, so `GOEXPERIMENT=jsonv2` is required.
 
 ```bash
 GOEXPERIMENT=jsonv2 go install github.com/pomesaka/claude-deck/cmd/claude-deck@latest
 ```
 
-Or build from source:
-
-```bash
-git clone https://github.com/pomesaka/claude-deck.git
-cd claude-deck
-GOEXPERIMENT=jsonv2 go build -o claude-deck ./cmd/claude-deck
-```
-
-### Status tracking
-
-With `runtime.provider = "claude"` (the default), claude-deck tracks session status (running, waiting for approval, idle) with the `deck-status` plugin embedded in the binary. On startup it is written to `plugin/` in the [data directory](#data-directories) and passed to every Claude Code session claude-deck launches with `--plugin-dir`. No separate install is needed.
-
-With `runtime.provider = "codex"`, the status is read from the Codex JSONL instead.
+`GOEXPERIMENT=jsonv2` is needed because claude-deck uses Go's `encoding/json/v2`.
 
 ### First run
 
-1. Make sure your repository is initialized with jj:
+```bash
+cd your-project
+jj git init --colocate   # once, if it is not a jj repository yet
+claude-deck
+```
 
-   ```bash
-   cd your-project
-   jj git init --colocate  # if not already a jj repo
-   ```
+Press `n`, pick the repository, and a Claude Code session starts in a fresh jj workspace. Start a few more. When one turns orange, press `Tab`. (`n` offers jj repositories only, hence the `jj git init`.)
 
-2. Launch claude-deck:
+Outside Ghostty, run the command claude-deck prints on start (`tmux attach-session -t claude-deck`) in another pane to see the sessions.
 
-   ```bash
-   claude-deck
-   ```
+### Using it on a git repository you share with others
 
-3. Press `n` to create a new session, select your repository, and a Claude Code agent starts in an isolated jj workspace.
+`jj git init --colocate` adds a `.jj` directory next to `.git` and nothing else:
 
-4. When a session shows an attention indicator, press `Tab` to jump to it, then `Enter` to interact.
+- Git ignores `.jj` (jj puts a `.gitignore` inside it), so it is never committed and never reaches your teammates.
+- `git` keeps working. `git status` shows a detached HEAD, because jj moves HEAD as it records changes; you can still commit, branch and push with git, and jj picks it up.
+- Sessions do not create git branches or move `main`. Their work stays in your local repository until you push it.
+- To stop using jj, delete `.jj`.
 
-Existing Claude Code sessions running outside claude-deck are automatically discovered and shown as external sessions. Press `r` on one to adopt it and resume it under claude-deck; `x` and `p` do not apply to external sessions.
+### What it changes on your machine
+
+- A tmux session named `claude-deck`, with one window per Claude Code session.
+- Inside Ghostty, a split on the right of the window you started claude-deck in.
+- Claude Code is started with a plugin passed by `--plugin-dir`, which reports the status. Your Claude Code settings and hooks are not changed.
+- Its data directory and the workspaces it creates are marked as trusted in `~/.claude.json`, so Claude Code does not ask about each workspace. `claude-deck gc` removes the entries of workspaces that are gone.
+- The session list and the workspaces live in `~/.local/share/claude-deck` ([details](docs/configuration.md#data-directories)).
+
+claude-deck does not send desktop notifications. The header shows how many sessions are waiting (`[2 asking...]`), and `Tab` takes you to them.
+
+## Features
+
+### Know who's waiting for you
+
+Each session has a colored dot for its status, and the header counts the sessions waiting for you. On a Claude subscription, the header also shows how much of your 5-hour and 7-day limits you have used.
+
+![The session list with each status](docs/assets/status.png)
+
+| Dot | Status |
+|---|---|
+| green | Running |
+| blue | Subagents running in the background after the turn ended |
+| grey | Idle — finished its turn, waiting for your next prompt |
+| orange | Waiting for approval or for an answer |
+| dark | Done, or started outside claude-deck |
+| red | Error |
+
+Each row shows where the session works and the nearest bookmark (branch) its work sits on (`@main`), its name, how long it has run, and how long ago it last did something. Below the name is a short label for the task (`fix-invoice-subtotal`), which the session gives itself when it knows what it is doing. You can set it with `claude-deck alias`. The name (`maika-7c78`) is fixed; it is also the name of the session's workspace.
+
+### The live session, or its log
+
+Move the cursor and the right pane follows. A running session shows its tmux window, where you work with Claude as usual.
+
+![A Claude Code session writing files on the right](docs/assets/live.png)
+
+A finished session shows its transcript instead: your prompts, the tools it ran, and the diffs it made.
+
+![The log of a finished session, with its diffs](docs/assets/log-viewer.png)
+
+### One workspace per session
+
+`n` creates a jj workspace named after the session and starts Claude Code in it, so parallel agents work on separate copies of the repository. They can still change the same lines, and then you resolve it when you combine their work, as with branches. `Ctrl+Enter` in `n` starts a session in the repository itself instead.
+
+Untracked files such as `.env` can be symlinked into every new workspace — see [`workspace_symlinks`](docs/configuration.md#workspace-symlinks). Dependencies such as `node_modules` are not shared; install them in the workspace, or symlink them the same way.
+
+### Getting the work back
+
+A session's changes are commits in your repository, whether the session is running or closed. `x` closes a session and removes its workspace after jj has recorded the files it changed, so nothing is lost. To turn a session's work into a branch and a pull request:
+
+```bash
+jj log                                  # a running session's work is marked <name>@
+jj git push --change maika-7c78@        # push a running session's work as a new branch
+jj git push --change <change-id>        # or a closed one's, by the change ID jj log shows
+```
+
+`jj git push --change` creates a branch named after the change and pushes it. From there it is an ordinary git branch, ready for a pull request.
+
+### Resume, fork, and trace
+
+`r` resumes a finished session, recreating its workspace where it left off. `f` forks a session into a new one. Claude Code sessions you started yourself, outside claude-deck, appear in the list too; `r` adopts one. `claude-deck tree` shows how your conversations branched through `/clear` and forks; `←` marks the conversation each session continues on resume, with its status.
+
+![claude-deck tree](docs/assets/tree.png)
+
+### Drive it from scripts and from Claude
+
+Every command prints JSON and works without the TUI running, from any shell or agent:
+
+```bash
+claude-deck new --dir ~/src/api     # start a session in a new workspace; prints it
+claude-deck list                    # every session, in the order of the list (an array)
+claude-deck list --alias invoice    # only sessions whose label contains "invoice"
+claude-deck close maika-7c78        # stop it and remove its workspace (ID or name)
+```
+
+Every session claude-deck starts also gets the bundled `deck-status:claude-deck` skill, which teaches Claude Code these commands. Ask such a session to "start another session in this repository" and the new one appears in the list.
+
+<details>
+<summary>Output, statuses, and driving a session from a script</summary>
+
+`new`, `close` and `alias` print one session; `list` prints an array of them:
+
+```json
+{
+  "id": "6423be258795c579",
+  "name": "maika-7c78",
+  "alias": "fix-invoice-subtotal",
+  "repo_path": "/home/you/src/billing-api",
+  "work_dir": "/home/you/.local/share/claude-deck/workspace/-home-you-src-billing-api/maika-7c78",
+  "status": "waiting_approval",
+  "claude_session_id": "70e29269-…",
+  "session_chain": ["70e29269-…"]
+}
+```
+
+`status` is one of `running`, `idle`, `subagent_running`, `waiting_approval`, `waiting_answer`, `completed` and `error`. There is no wait command; poll `list`.
+
+A new session starts empty. `new` returns as soon as its tmux window opens, before Claude Code is ready, and its `status` is already `idle`. Wait until `claude_session_id` appears (Claude Code reports it when it starts), then type the task into the window named after the session's `id`:
+
+```bash
+tmux send-keys -t "claude-deck:$id" "your task" Enter
+```
+
+`idle` then means the session has finished its turn; it is also `idle` before the first task, so keep track of whether you have sent one. No command returns the session's last reply; it is in the Claude Code transcript, `~/.claude/projects/*/<claude_session_id>.jsonl`. To keep sessions from stopping for approvals, set [`permission_mode`](docs/configuration.md).
+
+</details>
+
+## What makes it different
+
+- **Status from hooks.** A plugin claude-deck loads into each session reports what Claude Code is doing, so "waiting for approval" and "waiting for an answer" are told apart, and subagents still running after the turn are shown.
+- **Workspaces that keep their changes.** jj records the files a session changed on its own, so closing a session never throws away uncommitted work, and resuming it brings the files back.
+- **Finished sessions stay.** They keep their log in the list and can be resumed or forked, until the oldest are pruned past `max_sessions` (30 by default).
 
 ## Keybindings
 
@@ -115,174 +195,43 @@ Existing Claude Code sessions running outside claude-deck are automatically disc
 
 ## Configuration
 
-Config file: `$XDG_CONFIG_HOME/claude-deck/config.toml` (`~/.config/claude-deck/config.toml` when `XDG_CONFIG_HOME` is unset)
-
-All sections are optional. Unspecified values use built-in defaults.
+Everything is optional. The config file is `~/.config/claude-deck/config.toml`. The settings people change first:
 
 ```toml
-# Data directory. See "Data directories" below for the default.
-data_dir = "/path/to/claude-deck-data"
-
 [defaults]
-# Passed to every session as --permission-mode. Unset (the default): no flag,
-# so Claude Code's own permissions.defaultMode in settings.json decides.
-permission_mode = "plan"
-
-[ghostty]
-command = "ghostty"
-# Width in pixels of the claude-deck pane when it runs inside Ghostty.
-# The right split attaches to the tmux session.
-deck_width = 400
-
-[tmux]
-command = "tmux"
-# Letters, digits, "-" and "_". Default: "claude-deck" ("claude-deck-codex" with provider = "codex").
-# Use a different name for each data directory: on start, the TUI closes the
-# windows of this tmux session that its own data directory does not know.
-session_name = "claude-deck"
-
-[keybinds]
-# Only these two keys can be rebound.
-fork = "f"
-open_term = "t"
-
-[theme]
-primary = "#7C3AED"
-secondary = "#06B6D4"
-success = "#10B981"
-warning = "#F59E0B"
-danger = "#EF4444"
-bg_selected = "#313244"
-border_focus = "#7C3AED"
-text = "#CDD6F4"
-text_dim = "#6C7086"
-status_idle = "#808898"
-status_subagent = "#60A5FA"
-status_attention = "#C08552"
-status_done = "#333346"
-diff_add = "#A6E3A1"
-diff_del = "#F38BA8"
-
-[commands]
-claude = "claude"
-codex = "codex"
-jj = "jj"
-
-[runtime]
-# "claude" (default) or "codex"
-provider = "claude"
+permission_mode = "plan"            # passed to every session as --permission-mode
 
 [discovery]
-# Marker files to detect subprojects within jj repositories (monorepo support).
-# Empty = repo root only (default).
-project_markers = ["go.mod", "package.json", "Cargo.toml"]
-excludes = ["Library", ".cache", "node_modules", ".git"]
-
-[session]
-# Finished sessions beyond this count are pruned, oldest first, along with their workspaces.
-max_sessions = 30
-max_jsonl_entries = 500
-# Discovery reads transcripts modified within this many days.
-discovery_days = 14
-refresh_interval = "5s"
+project_markers = ["go.mod", "package.json"]   # offer subprojects of a monorepo in `n`
 
 [projects."/Users/you/your-repo"]
-# Untracked files to symlink into each new jj workspace.
-workspace_symlinks = [".env", ".env.local", "secrets/"]
-# Extra directories passed to Claude Code as --add-dir.
-add_dirs = ["../shared-lib", "/absolute/path/to/docs"]
-# Extra arguments passed to Claude Code as they are.
-claude_args = ["--dangerously-load-development-channels", "server:xwb"]
+workspace_symlinks = [".env"]       # symlink untracked files into each workspace
 ```
 
-### Runtime provider
+Every setting, the data directory, and Codex support: [docs/configuration.md](docs/configuration.md).
 
-- `claude`: status and `/clear` are reported by the deck-status plugin. Transcripts are read from `~/.claude/projects`.
-- `codex`: Codex has no hooks. claude-deck reads the status from the Codex JSONL (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`) and writes it to its store, so the status is not updated while the TUI is not running.
-- With `codex`, unless `data_dir` and `[tmux] session_name` are set explicitly, the data directory gets a `-codex` suffix and the tmux session is `claude-deck-codex`. Each provider has its own `deck.db`.
+## FAQ
 
-### Project discovery
+### Do I need Ghostty?
 
-- With `project_markers` empty (the default), only repository roots are offered.
-- With `project_markers` set, claude-deck searches each repository with `fd` and also offers the directories that contain a marker. The repository root is always offered.
-- A nested repository with its own `.jj` is not a subproject of the outer one. It is offered as a repository of its own.
-- The search starts when the TUI starts. `n` shows the last result at once and searches again in the background; the list is updated in place, keeping the filter text and the selection.
+No. Inside Ghostty, claude-deck splits the window and attaches the right pane to its tmux session. In any other terminal, open a second pane and run `tmux attach-session -t claude-deck`.
 
-### Workspace symlinks
+### Does it work with Codex CLI?
 
-`jj workspace add` does not copy untracked files such as `.env` into the new workspace. `workspace_symlinks` lists files and directories to symlink from the repository root instead.
+Partly, with `runtime.provider = "codex"`. Codex has no hooks, so only running and idle are shown, never waiting for approval or an answer. See [docs/configuration.md](docs/configuration.md#runtime-provider).
 
-- Paths are relative to the repository root.
-- A missing source is skipped, so the same list works for repositories without `.env`.
-- An existing destination is skipped (for example, a file jj already checked out).
-- Absolute paths and paths containing `..` are ignored.
+### How do I copy text from the dashboard?
 
-### Additional directories
+Hold `Shift` while dragging to use your terminal's own selection. For a block selection inside the right pane, use `Shift + Option + drag` on macOS (`Shift + Ctrl + Alt + drag` on Linux). This is how it works in Ghostty; other terminals may differ.
 
-`add_dirs` is passed as `--add-dir` when claude-deck creates, resumes or forks a session in that repository. Relative paths are resolved from the repository root. Absolute paths are used as-is.
-
-### Claude Code arguments
-
-`claude_args` is appended to the `claude` command line when claude-deck creates, resumes or forks a session in that repository. Use it for flags that can only be given at startup. It is not passed to Codex.
+## Development
 
 ```bash
-claude-deck project args ~/your-repo -- --dangerously-load-development-channels server:xwb   # set
-claude-deck project args ~/your-repo           # show
-claude-deck project args --clear ~/your-repo   # remove
-claude-deck project list                       # every project's settings
+GOEXPERIMENT=jsonv2 go build -o claude-deck ./cmd/claude-deck
+GOEXPERIMENT=jsonv2 go test ./...
 ```
 
-- The command rewrites only the `claude_args` line of `config.toml`. Comments and the other settings are kept.
-- A change applies from the next session started, without restarting the TUI. Sessions that are already running keep the arguments they were started with.
-- The directory is resolved to its repository root, the same way as `claude-deck new --dir`.
-
-## Known Limitations
-
-- **jj required** — Workspace isolation relies on jj. Git-only repositories need `jj git init --colocate` first.
-- **macOS / Linux only** — Sessions run in tmux. Windows is not supported.
-- **Ghostty-specific** — The split pane and the `t` key terminal launch assume Ghostty. In other terminals, run `tmux attach-session -t claude-deck` in another pane yourself (claude-deck prints the command on start).
-- **Single machine** — Sessions are local. No remote or Docker-based background execution yet.
-
-## Architecture
-
-See the package map in [docs/01-overview.md](docs/01-overview.md).
-
-## Data directories
-
-The data directory is, in order of precedence:
-
-1. `$CLAUDE_DECK_DATA_DIR`
-2. `data_dir` in `config.toml`
-3. `$XDG_DATA_HOME/claude-deck`, or `~/.local/share/claude-deck` when `XDG_DATA_HOME` is unset (with a `-codex` suffix when `provider = "codex"`)
-
-```
-{data directory}/
-  deck.db                                  Session metadata (SQLite)
-  plugin/                                  deck-status plugin
-  rate-limits.json                         Account rate limits reported by the sessions
-  workspace/<encoded-repo>/<name>/         jj workspaces
-  debug.log                                Debug log
-~/.claude/projects/<project>/<uuid>.jsonl              Claude Code JSONL (read by claude-deck)
-~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl           Codex JSONL (read by claude-deck when provider = "codex")
-```
-
-When each of these is created and removed is described in [docs/data-lifecycle.md](docs/data-lifecycle.md).
-
-## Q&A
-
-### ダッシュボードからテキストをコピーしたい
-
-claude-deck は alt screen + マウスモードを有効にしているため、通常のマウスドラッグではテキスト選択ができません。ターミナルのネイティブ選択を使うには **Shift キー**を併用してください。
-
-| 操作 | macOS | Linux |
-|------|-------|-------|
-| テキスト選択 | `Shift + ドラッグ` | `Shift + ドラッグ` |
-| 矩形（ブロック）選択 | `Shift + Opt + ドラッグ` | `Shift + Ctrl + Alt + ドラッグ` |
-
-右ペインのテキストだけをコピーしたい場合は、**矩形選択**を使うとペイン境界のボーダー文字を含めずに選択できます。
-
-> [!NOTE]
-> キー操作はターミナルによって異なる場合があります。上記は Ghostty での操作例です。
+Design notes are in [docs/](docs/) (Japanese). Start with [docs/01-overview.md](docs/01-overview.md).
 
 ## License
 

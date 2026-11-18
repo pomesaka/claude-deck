@@ -46,7 +46,8 @@ GOEXPERIMENT=jsonv2 go test ./...
 | [docs/data-lifecycle.md](docs/data-lifecycle.md) | 外部データ（ワークスペース、store、JSONL、`~/.claude.json`）をいつ作り、いつ消すか |
 | [docs/hooks.md](docs/hooks.md) | deck-status プラグインと、Claude Code のイベントとステータスの対応 |
 | [docs/session-id.md](docs/session-id.md) | deck ID とランタイムセッション ID の関係、重複を防ぐ規則 |
-| [README.md](README.md) | 利用者向けの使い方（キー、設定） |
+| [README.md](README.md) | 利用者向けの紹介、始め方、キー（日本語の短い版は README.ja.md） |
+| [docs/configuration.md](docs/configuration.md) | `config.toml` の全項目とデータディレクトリ（利用者向け、英語） |
 
 初めて読むときは上から順に読む。
 
@@ -124,4 +125,4 @@ CLI を変えたら、同梱のスキル `deck-status:claude-deck`（`deckmod/sk
 
 ### データと設定の置き場所
 
-データディレクトリの中身と、それぞれをいつ作り、いつ消すかは [docs/data-lifecycle.md](docs/data-lifecycle.md)。`config.toml` の項目は [README.md](README.md) の Configuration にある。
+データディレクトリの中身と、それぞれをいつ作り、いつ消すかは [docs/data-lifecycle.md](docs/data-lifecycle.md)。`config.toml` の項目は [docs/configuration.md](docs/configuration.md) にある。項目を足したら、README の Configuration の例に載せるほどよく使うものかも考える。
