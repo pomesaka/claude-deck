@@ -168,6 +168,11 @@ internal/
   debuglog/               デバッグログ (インフラ)
 ```
 
-依存の方向: `tui → {session, preview}`、`preview → session`、`session → {agentruntime, usage, store, tmux, jj, ratelimits}`
+依存の方向（`debuglog` は省く）:
 
-session パッケージがドメインの中心。インフラパッケージはドメインに依存しない。
+- `cmd/claude-deck` → すべて。外部の実装（trust の登録、トランスクリプトの読み手、runtime）を選んで `session.ManagerConfig` に渡す
+- `tui` → `session`、`preview`、`config`、`ratelimits`、`usage`、`ghostty`
+- `preview` → `session`
+- `session` → `agentruntime`、`usage`、`store`、`tmux`、`jj`、`ratelimits`、`config`
+
+session パッケージがドメインの中心。インフラパッケージ（`usage` 以下）はドメインにも互いにも依存しない。確かめるには `GOEXPERIMENT=jsonv2 go list -f '{{.ImportPath}} {{.Imports}}' ./...` を使う。

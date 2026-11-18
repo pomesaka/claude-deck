@@ -47,7 +47,7 @@ User 'n' キー / claude-deck new
     2. withWorkspace なら:
        jj.CreateWorkspaceAt(repo, name, path, extraSymlinks)  // ワークスペース作成
        extraSymlinks は config.toml [projects] で指定された .env 等の symlink リスト
-       claudecode.EnsureTrusted(path)   // trust ダイアログを出さない（Claude のみ）
+       ManagerConfig.TrustWorkspaceFunc(path)   // trust ダイアログを出さない。Claude では cmd が claudecode.EnsureTrusted を渡し、Codex では nil
        サブプロジェクト対応: workingDir の相対パスをワークスペース内に対応付け
     3. startNewSession:
        a. store.Insert(row)            // launching_at（起動中の印）を付けて先に行を作る
@@ -86,6 +86,8 @@ claude を起動した tmux ウィンドウのコマンドは `<claude ...>; <cl
 |---|---|---|
 | `Manager.Kill`（TUI の `x` / `claude-deck close`） | 実行時 | tmux ウィンドウを削除する経路。ペインごと終了するので `hook exited` は動かない。Kill 自身が `applyExited` を適用する |
 | `ReconcileTmux` | TUI 起動時 | 終了済みなのにウィンドウがある行を Idle に戻す。store に行がないウィンドウを削除する。未終了なのにウィンドウがない行を Completed にする |
+
+`ReconcileTmux` は、設定した tmux セッション（`[tmux] session_name`）のウィンドウを、このデータディレクトリの store だけと突き合わせる。そのため 1 つの tmux セッションを使うのは 1 つのデータディレクトリだけ、という前提で動く。`CLAUDE_DECK_DATA_DIR` や `data_dir` で別のデータディレクトリを使うときに `session_name` を変えないと、その TUI の起動が、もう一方のデータディレクトリのセッションのウィンドウを消す。provider が `codex` のときは、どちらも明示しなければ両方に `-codex` が付くので重ならない。
 | `markVanishedSessions` | 5 秒の更新ごと | 未終了なのにウィンドウがない行を Completed にする。`launching_at`（起動中）と `closing_at`（close 中）が 2 分以内の行は対象外 |
 
 ### close の排他

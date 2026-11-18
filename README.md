@@ -88,7 +88,7 @@ With `runtime.provider = "codex"`, the status is read from the Codex JSONL inste
 
 4. When a session shows an attention indicator, press `Tab` to jump to it, then `Enter` to interact.
 
-Existing Claude Code sessions running outside claude-deck are automatically discovered and shown as unmanaged sessions.
+Existing Claude Code sessions running outside claude-deck are automatically discovered and shown as external sessions. Press `r` on one to adopt it and resume it under claude-deck; `x` and `p` do not apply to external sessions.
 
 ## Keybindings
 
@@ -137,6 +137,8 @@ deck_width = 400
 [tmux]
 command = "tmux"
 # Letters, digits, "-" and "_". Default: "claude-deck" ("claude-deck-codex" with provider = "codex").
+# Use a different name for each data directory: on start, the TUI closes the
+# windows of this tmux session that its own data directory does not know.
 session_name = "claude-deck"
 
 [keybinds]
