@@ -16,8 +16,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
 	switch key {
 	case "ctrl+c":
-		m.confirmQuit = true
-		m.statusMsg = "終了しますか? (y/n)"
+		m.prompt = promptQuit
 		return nil
 	case "ctrl+z":
 		m.quitting = true
@@ -25,13 +24,12 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 
 	// 終了確認中: y で終了、それ以外でキャンセル
-	if m.confirmQuit {
-		m.confirmQuit = false
+	if m.prompt == promptQuit {
+		m.prompt = promptNone
 		if key == "y" || key == "Y" {
 			m.quitting = true
 			return tea.Quit
 		}
-		m.statusMsg = ""
 		return nil
 	}
 
@@ -169,8 +167,7 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 
 	case "?":
-		m.statusMsg = "j/k:移動 gg/G:先頭/末尾 /:フィルタ tab:要注意 n:新規 Enter/r:再開 f:フォーク t:ターミナル p:ピン x:終了 R:再描画 C-c:quit"
-		return clearStatusCmd()
+		return m.flash("j/k:移動 gg/G:先頭/末尾 /:フィルタ tab:要注意 n:新規 Enter/r:再開 f:フォーク t:ターミナル p:ピン x:終了 R:再描画 C-c:quit")
 	}
 
 	return tea.Batch(cmds...)
@@ -192,7 +189,7 @@ func (m *Model) activateSelected() tea.Cmd {
 // The click is dropped while a quit confirmation is open, and when the session
 // is no longer in the list (it was drawn before the list changed).
 func (m *Model) handleSessionClick(id session.DeckSessionID) tea.Cmd {
-	if m.mode != viewDashboard || m.confirmQuit {
+	if m.mode != viewDashboard || m.prompt != promptNone {
 		return nil
 	}
 	idx := slices.IndexFunc(m.visibleSessions(), func(s *session.Session) bool { return s.ID == id })
@@ -294,17 +291,16 @@ func (m *Model) resumeSelected() tea.Cmd {
 	}
 	status := sess.GetStatus()
 	if status != session.StatusCompleted && status != session.StatusError && status != session.StatusUnmanaged {
-		m.statusMsg = "実行中のセッションは再開できません"
-		return clearStatusCmd()
+		return m.flash("実行中のセッションは再開できません")
 	}
 
-	m.statusMsg = "セッション再開中..."
+	m.setStatus("セッション再開中...")
 	mgr := m.manager
 	ctx := m.ctx
 	id := m.selectedID
 	return func() tea.Msg {
 		err := mgr.ResumeSession(ctx, id)
-		return sessionResumedMsg{err: err}
+		return sessionResumedMsg{sessionID: id, err: err}
 	}
 }
 
@@ -320,11 +316,10 @@ func (m *Model) forkSelected() tea.Cmd {
 
 	snap := sess.Snapshot()
 	if snap.RuntimeSessionID == "" {
-		m.statusMsg = "RuntimeSessionID がないためフォークできません"
-		return clearStatusCmd()
+		return m.flash("RuntimeSessionID がないためフォークできません")
 	}
 
-	m.statusMsg = "セッションフォーク中..."
+	m.setStatus("セッションフォーク中...")
 	mgr := m.manager
 	ctx := m.ctx
 	id := m.selectedID
@@ -352,13 +347,12 @@ func (m *Model) killSelected() tea.Cmd {
 	}
 	// 外部セッションは store に無く、claude-deck が起動したプロセスでもないので終了できない。
 	if sess := m.manager.GetSession(m.selectedID); sess != nil && sess.GetStatus() == session.StatusUnmanaged {
-		m.statusMsg = "外部セッションは終了できません"
-		return clearStatusCmd()
+		return m.flash("外部セッションは終了できません")
 	}
 	sid := m.selectedID
 	mgr := m.manager
 	m.killing = true
-	m.statusMsg = "セッション終了中..."
+	m.setStatus("セッション終了中...")
 	return func() tea.Msg {
 		res, err := mgr.Kill(sid)
 		return sessionKilledMsg{result: res, err: err}
@@ -379,8 +373,7 @@ func (m *Model) togglePinSelected() tea.Cmd {
 	// resume 以外の経路から取り込みが起きる。メモリだけに持つと、外部セッションは発見の
 	// たびに ID が変わるのでピンが残らない。
 	if snap.Status == session.StatusUnmanaged {
-		m.statusMsg = "外部セッションはピンできません"
-		return clearStatusCmd()
+		return m.flash("外部セッションはピンできません")
 	}
 	mgr := m.manager
 	return func() tea.Msg {
@@ -400,21 +393,17 @@ func (m *Model) openTerminal() tea.Cmd {
 	snap := sess.Snapshot()
 	workDir := snap.WorkDir()
 	if workDir == "" {
-		m.statusMsg = "作業ディレクトリが不明です"
-		return clearStatusCmd()
+		return m.flash("作業ディレクトリが不明です")
 	}
 	if _, err := os.Stat(workDir); os.IsNotExist(err) {
-		m.statusMsg = fmt.Sprintf("ディレクトリが見つかりません: %s", workDir)
-		return clearStatusCmd()
+		return m.flash(fmt.Sprintf("ディレクトリが見つかりません: %s", workDir))
 	}
 	ghosttyTitle := snap.BookmarkName
 	if ghosttyTitle == "" {
 		ghosttyTitle = snap.TerminalTitle
 	}
 	if err := m.ghostty.Open(workDir, ghosttyTitle); err != nil {
-		m.statusMsg = fmt.Sprintf("ターミナル起動エラー: %v", err)
-		return clearStatusCmd()
+		return m.flash(fmt.Sprintf("ターミナル起動エラー: %v", err))
 	}
-	m.statusMsg = fmt.Sprintf("ターミナルを開きました: %s", workDir)
-	return clearStatusCmd()
+	return m.flash(fmt.Sprintf("ターミナルを開きました: %s", workDir))
 }

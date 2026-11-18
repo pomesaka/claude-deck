@@ -75,10 +75,13 @@ type Model struct {
 
 	// Status bar
 	statusMsg string
+	// statusGen counts the status messages shown. A clear tick carries the
+	// generation of the message it was set for, so it never clears a later one.
+	statusGen uint64
 
 	// Quit state
-	confirmQuit bool
-	quitting    bool
+	prompt   modalPrompt
+	quitting bool
 
 	// In-flight async operation flags — prevent duplicate key presses from
 	// launching concurrent operations while a background Cmd is running.
@@ -117,8 +120,17 @@ type SessionRefreshMsg struct {
 	ChangedIDs map[session.DeckSessionID]bool
 }
 
-// statusClearMsg clears the status message.
-type statusClearMsg struct{}
+// statusClearMsg clears the status message shown as generation gen.
+type statusClearMsg struct{ gen uint64 }
+
+// modalPrompt is a question that takes the next key. The footer shows it
+// instead of the status message, so no status update or clear can hide it.
+type modalPrompt int
+
+const (
+	promptNone modalPrompt = iota
+	promptQuit
+)
 
 // sessionCreatedMsg is sent when an async session creation completes.
 type sessionCreatedMsg struct {
@@ -128,7 +140,8 @@ type sessionCreatedMsg struct {
 
 // sessionResumedMsg is sent when an async session resume completes.
 type sessionResumedMsg struct {
-	err error
+	sessionID session.DeckSessionID
+	err       error
 }
 
 // sessionForkedMsg is sent when an async session fork completes.
@@ -289,39 +302,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionCreatedMsg:
 		if msg.err != nil {
-			m.statusMsg = "セッション作成エラー: " + msg.err.Error()
+			cmds = append(cmds, m.flash("セッション作成エラー: "+msg.err.Error()))
 		} else {
-			m.statusMsg = "新規セッションを作成しました"
-			m.selectedID = msg.sessionID
-			cmds = append(cmds, m.refreshSessions()...)
-			// CreateSession が成功した時点で tmux window は作成済み。
-			// 作成直後は JSONL hydrate や snapshot 更新順の影響で Display が一時的に
-			// JSONL に見えることがあるため、明示操作では tmux を直接選ぶ。
-			m.switchRightPaneToTmux(msg.sessionID, true)
+			cmds = append(cmds, m.flash("新規セッションを作成しました"))
+			cmds = append(cmds, m.focusStartedSession(msg.sessionID)...)
 		}
-		cmds = append(cmds, clearStatusCmd())
 
 	case sessionResumedMsg:
 		if msg.err != nil {
-			m.statusMsg = "再開エラー: " + msg.err.Error()
+			cmds = append(cmds, m.flash("再開エラー: "+msg.err.Error()))
 		} else {
-			m.statusMsg = "セッションを再開しました"
-			// ResumeSession が成功した時点で tmux window は作成済み。
-			m.switchRightPaneToTmux(m.selectedID, true)
+			cmds = append(cmds, m.flash("セッションを再開しました"))
+			cmds = append(cmds, m.focusStartedSession(msg.sessionID)...)
 		}
-		cmds = append(cmds, clearStatusCmd())
 
 	case sessionForkedMsg:
 		if msg.err != nil {
-			m.statusMsg = "フォークエラー: " + msg.err.Error()
+			cmds = append(cmds, m.flash("フォークエラー: "+msg.err.Error()))
 		} else {
-			m.statusMsg = "セッションをフォークしました"
-			m.selectedID = msg.sessionID
-			cmds = append(cmds, m.refreshSessions()...)
-			// sessionCreatedMsg と同じ理由で tmux を直接選ぶ。
-			m.switchRightPaneToTmux(msg.sessionID, true)
+			cmds = append(cmds, m.flash("セッションをフォークしました"))
+			cmds = append(cmds, m.focusStartedSession(msg.sessionID)...)
 		}
-		cmds = append(cmds, clearStatusCmd())
 
 	case sessionKilledMsg:
 		m.killing = false
@@ -329,20 +330,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// SessionRefreshMsg を届ける。StopProcess が失敗したときも同じ。beginClose で失敗したときは何も書いていない。
 		switch {
 		case msg.err != nil:
-			m.statusMsg = "終了エラー: " + msg.err.Error()
+			cmds = append(cmds, m.flash("終了エラー: "+msg.err.Error()))
 		case msg.result.WorkspaceKept != "":
 			// WHY パスを出さない: 左ペインは狭く、長い文はワークスペースを残したことまで切れる。
 			// パスは claude-deck list の work_dir で分かる。
-			m.statusMsg = "終了。ワークスペースは残しました（jj 取り込み失敗）"
+			cmds = append(cmds, m.flash("終了。ワークスペースは残しました（jj 取り込み失敗）"))
 		default:
-			m.statusMsg = "セッションを終了しました"
+			cmds = append(cmds, m.flash("セッションを終了しました"))
 		}
-		cmds = append(cmds, clearStatusCmd())
 
 	case pinToggledMsg:
 		if msg.err != nil {
-			m.statusMsg = "ピンの変更エラー: " + msg.err.Error()
-			cmds = append(cmds, clearStatusCmd())
+			cmds = append(cmds, m.flash("ピンの変更エラー: "+msg.err.Error()))
 		}
 
 	case repoListMsg:
@@ -351,7 +350,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case statusClearMsg:
-		m.statusMsg = ""
+		if msg.gen == m.statusGen {
+			m.statusMsg = ""
+		}
 	}
 
 	// filterActive 中のキー入力は handleDashboardKey 内で filterInput.Update を呼ぶ。
@@ -386,10 +387,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func clearStatusCmd() tea.Cmd {
-	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
-		return statusClearMsg{}
-	})
+// statusDuration is how long a flash message stays.
+const statusDuration = 3 * time.Second
+
+// flash shows text in the status line and returns the Cmd that clears it
+// after statusDuration, unless another message has been shown by then.
+func (m *Model) flash(text string) tea.Cmd {
+	m.setStatus(text)
+	gen := m.statusGen
+	return tea.Tick(statusDuration, func(time.Time) tea.Msg { return statusClearMsg{gen: gen} })
+}
+
+// setStatus shows text until the next status message. Used for progress
+// ("…中") that the result of the operation replaces.
+func (m *Model) setStatus(text string) {
+	m.statusGen++
+	m.statusMsg = text
+}
+
+// focusStartedSession selects a session that was just created, resumed or
+// forked, and shows it on the right pane.
+// WHY フィルタを解除する: 新しいセッションがフィルタで隠れると、一覧の選択はカーソルの行に
+// 戻る一方で右ペインは新しいセッションを出し、Enter や x がカーソル側に効く。
+// WHY 再開でもカーソルを移す: 再開を待つ間にカーソルを動かしていても、右ペインに出るのは
+// 再開したセッションなので、選択もそれに合わせる。
+func (m *Model) focusStartedSession(id session.DeckSessionID) []tea.Cmd {
+	m.filterActive = false
+	m.filterText = ""
+	m.filterInput.SetValue("")
+	m.filterInput.Blur()
+	m.selectedID = id
+	cmds := m.refreshSessions()
+	// tmux window は作成済み。作成直後は JSONL hydrate や snapshot 更新順の影響で Display が
+	// 一時的に JSONL に見えることがあるため、明示操作では tmux を直接選ぶ。
+	m.switchRightPaneToTmux(id, true)
+	return cmds
 }
 
 func (m *Model) refreshSessions() []tea.Cmd {

@@ -281,3 +281,228 @@ func TestView_CursorRowIsDrawn(t *testing.T) {
 		}
 	}
 }
+
+// A resumed, created or forked session becomes the selected one, under the
+// cursor and on the right pane, whatever the cursor and the filter were doing
+// while the operation ran.
+func TestUpdate_StartedSessionIsSelected(t *testing.T) {
+	tests := []struct {
+		name  string
+		steps func(d *dashboard) tea.Msg
+		want  string // the session that must be selected and on the right pane; "" = unchanged
+	}{
+		{
+			name: "resume: the cursor moved away while it ran",
+			steps: func(d *dashboard) tea.Msg {
+				d.key("gg")
+				id := d.m.selectedID
+				d.key("j")
+				return sessionResumedMsg{sessionID: id}
+			},
+			want: "name-00",
+		},
+		{
+			name: "resume: the cursor stayed",
+			steps: func(d *dashboard) tea.Msg {
+				d.key("gg")
+				return sessionResumedMsg{sessionID: d.m.selectedID}
+			},
+			want: "name-00",
+		},
+		{
+			name: "create: a confirmed filter hides the new session",
+			steps: func(d *dashboard) tea.Msg {
+				d.key("/")
+				d.key("name-01")
+				d.key("enter")
+				return sessionCreatedMsg{sessionID: d.addSession("new-one")}
+			},
+			want: "new-one",
+		},
+		{
+			name: "create: a filter being typed hides the new session",
+			steps: func(d *dashboard) tea.Msg {
+				d.key("/")
+				d.key("name-01")
+				return sessionCreatedMsg{sessionID: d.addSession("new-one")}
+			},
+			want: "new-one",
+		},
+		{
+			name: "fork: a confirmed filter hides the new session",
+			steps: func(d *dashboard) tea.Msg {
+				d.key("/")
+				d.key("name-01")
+				d.key("enter")
+				return sessionForkedMsg{sessionID: d.addSession("new-one")}
+			},
+			want: "new-one",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newDashboard(t, 3, 30)
+			msg := tt.steps(d)
+			d.send(msg)
+
+			if d.m.filterActive || d.m.filterText != "" || d.m.filterInput.Value() != "" {
+				t.Errorf("filter still set: active=%v text=%q input=%q", d.m.filterActive, d.m.filterText, d.m.filterInput.Value())
+			}
+			if got := d.selectedName(); got != tt.want {
+				t.Errorf("cursor is on %q, want %q", got, tt.want)
+			}
+			if sel := d.mgr.GetSession(d.m.selectedID); sel == nil || sel.Name != tt.want {
+				t.Errorf("selectedID = %q, want the session %q", d.m.selectedID, tt.want)
+			}
+			wantID := d.idOf(tt.want)
+			calls := d.pane.waitCalls(t, 2)
+			if want := []string{"focus " + string(wantID), "right"}; len(calls) < 2 || calls[len(calls)-2] != want[0] || calls[len(calls)-1] != want[1] {
+				t.Errorf("right pane calls = %q, want them to end with %q", calls, want)
+			}
+			d.assertCursorDrawn()
+		})
+	}
+}
+
+// A failed operation leaves the filter, the selection and the right pane alone.
+func TestUpdate_FailedStartChangesNothing(t *testing.T) {
+	for _, msg := range []tea.Msg{
+		sessionResumedMsg{sessionID: "x", err: errors.New("boom")},
+		sessionCreatedMsg{err: errors.New("boom")},
+		sessionForkedMsg{err: errors.New("boom")},
+	} {
+		t.Run(fmt.Sprintf("%T", msg), func(t *testing.T) {
+			d := newDashboard(t, 3, 30)
+			d.key("/")
+			d.key("name-01")
+			d.key("enter")
+			before := d.m.selectedID
+			callsBefore, _ := d.pane.snapshot()
+
+			d.send(msg)
+
+			if d.m.filterText != "name-01" || d.m.selectedID != before {
+				t.Errorf("filter=%q selected=%q, want name-01 and %q", d.m.filterText, d.m.selectedID, before)
+			}
+			if !strings.Contains(d.footer(), "boom") {
+				t.Errorf("footer %q lacks the error", d.footer())
+			}
+			if calls, _ := d.pane.snapshot(); len(calls) != len(callsBefore) {
+				t.Errorf("right pane calls = %q, want none after the failure", calls[len(callsBefore):])
+			}
+		})
+	}
+}
+
+func (d *dashboard) addSession(name string) session.DeckSessionID {
+	s := newNamedSession(name)
+	d.mgr.sessions = append(d.mgr.sessions, s)
+	return s.ID
+}
+
+func (d *dashboard) idOf(name string) session.DeckSessionID {
+	for _, s := range d.mgr.sessions {
+		if s.Name == name {
+			return s.ID
+		}
+	}
+	d.t.Fatalf("no session %q", name)
+	return ""
+}
+
+const quitPrompt = "終了しますか? (y/n)"
+
+func TestUpdate_QuitPrompt(t *testing.T) {
+	tests := []struct {
+		name       string
+		steps      func(d *dashboard)
+		wantPrompt bool
+		wantQuit   bool
+		wantCursor int // -1 = do not check
+	}{
+		{
+			name: "a clear tick of an earlier message does not hide the prompt",
+			steps: func(d *dashboard) {
+				d.key("?")
+				gen := d.m.statusGen
+				d.key("ctrl+c")
+				d.send(statusClearMsg{gen: gen})
+			},
+			wantPrompt: true, wantCursor: -1,
+		},
+		{
+			name: "a result arriving does not hide the prompt",
+			steps: func(d *dashboard) {
+				d.key("ctrl+c")
+				d.send(sessionKilledMsg{})
+			},
+			wantPrompt: true, wantCursor: -1,
+		},
+		{
+			name:     "y quits",
+			steps:    func(d *dashboard) { d.key("ctrl+c"); d.key("y") },
+			wantQuit: true, wantCursor: -1,
+		},
+		{
+			name:       "another key cancels and is dropped",
+			steps:      func(d *dashboard) { d.key("gg"); d.key("ctrl+c"); d.key("j") },
+			wantCursor: 0,
+		},
+		{
+			name: "after a stale clear, the next key cancels and the one after works",
+			steps: func(d *dashboard) {
+				d.key("gg")
+				d.key("?")
+				gen := d.m.statusGen
+				d.key("ctrl+c")
+				d.send(statusClearMsg{gen: gen})
+				d.key("j")
+				d.key("j")
+			},
+			wantCursor: 1,
+		},
+		{
+			name:     "ctrl+z quits without asking",
+			steps:    func(d *dashboard) { d.key("ctrl+z") },
+			wantQuit: true, wantCursor: -1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newDashboard(t, 3, 30)
+			tt.steps(d)
+
+			if d.quit != tt.wantQuit {
+				t.Errorf("quit = %v, want %v", d.quit, tt.wantQuit)
+			}
+			if tt.wantQuit {
+				return
+			}
+			if got := strings.Contains(d.footer(), quitPrompt); got != tt.wantPrompt {
+				t.Errorf("prompt shown = %v, want %v (footer %q)", got, tt.wantPrompt, d.footer())
+			}
+			if tt.wantCursor >= 0 && d.m.cursor != tt.wantCursor {
+				t.Errorf("cursor = %d, want %d", d.m.cursor, tt.wantCursor)
+			}
+		})
+	}
+}
+
+// A flash message goes with its own clear tick, not with an earlier one.
+func TestUpdate_StatusClear(t *testing.T) {
+	d := newDashboard(t, 3, 30)
+
+	d.send(sessionKilledMsg{err: errors.New("first")})
+	first := d.m.statusGen
+	d.send(sessionKilledMsg{err: errors.New("second")})
+	second := d.m.statusGen
+
+	d.send(statusClearMsg{gen: first})
+	if !strings.Contains(d.footer(), "second") {
+		t.Fatalf("the clear of the first message removed the second: footer %q", d.footer())
+	}
+	d.send(statusClearMsg{gen: second})
+	if strings.Contains(d.footer(), "second") {
+		t.Fatalf("the second message stayed after its own clear: footer %q", d.footer())
+	}
+}

@@ -195,7 +195,7 @@ func (m *Model) startNewSession() tea.Cmd {
 	m.mode = viewSelectRepo
 	m.nextRightPaneGeneration()
 	m.setRepoCandidates("", "")
-	m.statusMsg = repoDiscoveringStatus
+	m.setStatus(repoDiscoveringStatus)
 
 	if m.repoDiscovering {
 		return nil
@@ -222,11 +222,10 @@ func (m *Model) applyRepoList(msg repoListMsg) tea.Cmd {
 			debuglog.Printf("[repoDiscovery] %v", msg.err)
 			return nil
 		}
-		m.statusMsg = "リポジトリ検索エラー: " + msg.err.Error()
 		if len(m.repoItems) == 0 {
 			m.mode = viewDashboard
 		}
-		return clearStatusCmd()
+		return m.flash("リポジトリ検索エラー: " + msg.err.Error())
 	}
 
 	// WHY: fd walks directories in parallel, so its output order changes per run.
@@ -276,7 +275,7 @@ func (m *Model) setRepoCandidates(filter, selectedDir string) {
 // selectRepo creates a session for the selected project directory.
 func (m *Model) selectRepo(item repoItem, withWorkspace bool) tea.Cmd {
 	m.mode = viewDashboard
-	m.statusMsg = "セッション作成中..."
+	m.setStatus("セッション作成中...")
 
 	mgr := m.manager
 	ctx := m.ctx

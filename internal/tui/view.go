@@ -414,6 +414,9 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 }
 
 func (m Model) renderFooter() string {
+	if m.prompt == promptQuit {
+		return footerStyle.Render(statusApproveStyle.Render("終了しますか? (y/n)"))
+	}
 	// When a status message is active, show it exclusively — no help text.
 	if m.statusMsg != "" {
 		return footerStyle.Render(statusApproveStyle.Render(m.statusMsg))

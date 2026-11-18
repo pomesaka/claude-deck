@@ -12,7 +12,7 @@ import (
 
 // repoHarness drives Model.Update the way the bubbletea loop would: it runs
 // the returned Cmds and feeds their messages back. Cmds that do not return
-// quickly (ticks such as clearStatusCmd, cursor blink) are dropped, so time
+// quickly (ticks such as the flash clear, cursor blink) are dropped, so time
 // never advances. The discovery is a stub that only counts launches; tests
 // deliver repoListMsg themselves to control when results arrive.
 type repoHarness struct {
