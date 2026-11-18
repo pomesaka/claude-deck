@@ -118,8 +118,10 @@ func (w *rightPaneWorker) stale(sw rightPaneSwitch) bool {
 func (w *rightPaneWorker) exec(job rightPaneJob) {
 	sw := job.sw
 	if w.stale(sw) {
+		debuglog.Printf("[rightPane] drop stale session=%s gen=%d", sw.SessionID, sw.Generation)
 		return
 	}
+	debuglog.Printf("[rightPane] run session=%s target=%d specOnly=%v focusRight=%v gen=%d", sw.SessionID, sw.Target, job.specOnly, sw.FocusRight, sw.Generation)
 	if sw.Target == rightPaneTmux {
 		if err := w.ops.focusSession(sw.SessionID); err != nil {
 			debuglog.Printf("[rightPane] tmux focus session=%s: %v", sw.SessionID, err)

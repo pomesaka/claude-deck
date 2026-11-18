@@ -203,6 +203,7 @@ func (m *Manager) WatchStore(ctx context.Context) {
 				continue
 			}
 			if v != last {
+				debuglog.Printf("[WatchStore] data_version %d -> %d, reloading", last, v)
 				last = v
 				m.Reload()
 			}
