@@ -156,6 +156,8 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "/":
 		m.filterActive = true
 		m.filterInput.Focus()
+		// フィルタバーの分だけ一覧の窓が狭まる。
+		m.ensureCursorVisible()
 		return nil
 
 	case "esc":

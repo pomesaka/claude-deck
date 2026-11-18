@@ -26,9 +26,23 @@ const (
 	viewSelectRepo
 )
 
+// sessionManager is what the TUI needs from session.Manager. Tests pass a fake
+// to drive Update through the async results without tmux, jj, or a store.
+type sessionManager interface {
+	GetSession(id session.DeckSessionID) *session.Session
+	ListSessions() []*session.Session
+	RefreshFromJSONL()
+	ResolveJSONLPaths(id session.DeckSessionID) (current string, prior []string)
+	CreateSession(ctx context.Context, repoPath, workingDir string, withWorkspace bool) (*session.Session, error)
+	ForkSession(ctx context.Context, source session.DeckSessionID) (*session.Session, error)
+	ResumeSession(ctx context.Context, id session.DeckSessionID) error
+	Kill(id session.DeckSessionID) (session.CloseResult, error)
+	SetPinned(id session.DeckSessionID, pinned bool) error
+}
+
 // Model is the Bubble Tea model for the TUI.
 type Model struct {
-	manager *session.Manager
+	manager sessionManager
 	config  *config.Config
 	ghostty *ghostty.Launcher
 	ctx     context.Context
@@ -138,6 +152,22 @@ type pinToggledMsg struct {
 
 // NewModel creates the initial TUI model.
 func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context) Model {
+	m := newModel(mgr, cfg, ctx)
+	dataDir := cfg.DataDir
+	m.rightPane = newRightPaneWorker(ctx, m.rightPaneGeneration, rightPaneOps{
+		focusSession: mgr.FocusSession,
+		writeSpec:    func(spec preview.PreviewSpec) error { return preview.WriteSpec(dataDir, spec) },
+		focusPreview: mgr.FocusPreviewWindow,
+		focusRight:   ghostty.FocusRight,
+	})
+	m.discoverRepos = discoverRepos(cfg)
+	return m
+}
+
+// newModel builds the model without the side effects that need the real
+// Manager (right pane worker, repository discovery). Tests start from here and
+// set those fields to fakes.
+func newModel(mgr sessionManager, cfg *config.Config, ctx context.Context) Model {
 	fi := textinput.New()
 	fi.Prompt = "/ "
 	fi.Placeholder = "filter..."
@@ -158,16 +188,8 @@ func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context) Mod
 		rightPaneGeneration: &atomic.Uint64{},
 		// Init が起動時の探索を始める。Init は値レシーバで印を残せないので、ここで立てる。
 		repoDiscovering: true,
-		discoverRepos:   discoverRepos(cfg),
+		discoverRepos:   func() tea.Msg { return nil },
 	}
-
-	dataDir := cfg.DataDir
-	m.rightPane = newRightPaneWorker(ctx, m.rightPaneGeneration, rightPaneOps{
-		focusSession: mgr.FocusSession,
-		writeSpec:    func(spec preview.PreviewSpec) error { return preview.WriteSpec(dataDir, spec) },
-		focusPreview: mgr.FocusPreviewWindow,
-		focusRight:   ghostty.FocusRight,
-	})
 
 	m.refreshSessions() // cmds discarded — bubbletea event loop not yet running
 	// カーソル初期位置を最下部（最新セッション）に設定
@@ -262,6 +284,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case RateLimitsUpdatedMsg:
 		m.rateLimitsStatus = msg.Status
+		// レート制限の行が出るとヘッダーが 1 行増え、一覧の窓が狭まる。
+		m.ensureCursorVisible()
 
 	case sessionCreatedMsg:
 		if msg.err != nil {
@@ -647,36 +671,32 @@ func (m *Model) nextRightPaneGeneration() uint64 {
 
 // ensureCursorVisible adjusts scrollOffset so the cursor is within the visible window.
 func (m *Model) ensureCursorVisible() {
-	contentHeight := m.height - 4
-	if contentHeight < 3 {
-		contentHeight = 3
-	}
-	// フィルタバー表示中は1行分差し引く
-	if m.filterActive || m.filterText != "" {
-		contentHeight--
-	}
-	const itemHeight = 2
-	// インジケータ分(上下各1行)を控えめに確保
-	visibleCount := (contentHeight - 2) / itemHeight
-	if visibleCount < 1 {
-		visibleCount = 1
-	}
+	m.scrollOffset = scrollToShow(m.sessionListHeight(), m.filterBarHeight(), m.scrollOffset, m.cursor, len(m.visibleSessions()))
+}
 
-	if m.cursor < m.scrollOffset {
-		m.scrollOffset = m.cursor
+// scrollToShow returns the scroll offset that puts cursor inside the window
+// sessionListWindow draws, moving offset as little as possible.
+// WHY sessionListWindow を使う: 見える行数をここで別に見積もると、ヘッダーの行数
+// （レート制限の行）やインジケータの有無で View とずれ、カーソルの行が描かれなくなる。
+func scrollToShow(height, filterBarHeight, offset, cursor, n int) int {
+	if n == 0 {
+		return 0
 	}
-	if m.cursor >= m.scrollOffset+visibleCount {
-		m.scrollOffset = m.cursor - visibleCount + 1
+	cursor = min(max(cursor, 0), n-1)
+	offset = min(max(offset, 0), n-1)
+	if cursor < offset {
+		offset = cursor
 	}
-	// ウィンドウが広がったときに不要な空白を残さない
-	maxScroll := len(m.visibleSessions()) - visibleCount
-	if maxScroll < 0 {
-		maxScroll = 0
+	for cursor >= sessionListWindow(height, filterBarHeight, offset, n).end {
+		offset++
 	}
-	if m.scrollOffset > maxScroll {
-		m.scrollOffset = maxScroll
+	// ウィンドウが広がったときに、下に空白を残さない。
+	for offset > 0 {
+		w := sessionListWindow(height, filterBarHeight, offset-1, n)
+		if w.end < n || cursor >= w.end {
+			break
+		}
+		offset--
 	}
-	if m.scrollOffset < 0 {
-		m.scrollOffset = 0
-	}
+	return offset
 }
