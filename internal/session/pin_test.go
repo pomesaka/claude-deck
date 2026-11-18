@@ -94,3 +94,27 @@ func TestManager_SetPinned_External(t *testing.T) {
 		t.Errorf("SetPinned(external) error = %v, want store.ErrNotFound", err)
 	}
 }
+
+// External sessions and rows with an unknown status have no process, so they
+// sort with the finished ones at the top, however recent they are.
+func TestSortSessions_NoProcessOnTop(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	mk := func(name string, origin Origin, status Status, ago time.Duration) *Session {
+		return &Session{Name: name, Origin: origin, Status: status, LastActivity: base.Add(-ago)}
+	}
+	list := []*Session{
+		mk("approve", OriginDeck, StatusWaitingApproval, time.Hour),
+		mk("external", OriginExternal, StatusUnknown, 0),
+		mk("idle", OriginDeck, StatusIdle, time.Hour),
+		mk("unknown", OriginDeck, StatusUnknown, time.Minute),
+		mk("done", OriginDeck, StatusCompleted, 2*time.Hour),
+	}
+	sortSessions(list)
+	var got []string
+	for _, s := range list {
+		got = append(got, s.Name)
+	}
+	if want := []string{"done", "unknown", "external", "idle", "approve"}; !slices.Equal(got, want) {
+		t.Errorf("order = %v, want %v", got, want)
+	}
+}

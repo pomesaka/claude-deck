@@ -577,10 +577,10 @@ func (m *Manager) adoptExternal(sessionID DeckSessionID) error {
 		return nil
 	}
 	sess.mu.RLock()
-	status := sess.Status
+	origin := sess.Origin
 	rec := sess.recordLocked()
 	sess.mu.RUnlock()
-	if status != StatusUnmanaged {
+	if origin != OriginExternal {
 		return nil
 	}
 	markAdopted(&rec, time.Now())
@@ -734,7 +734,7 @@ func (m *Manager) GetSession(id DeckSessionID) *Session {
 
 // ListSessions returns all sessions sorted by pin, status group, then by last activity (newest last).
 // Unpinned sessions come first, then the pinned ones; within each, the group order (top→bottom) is
-// Unmanaged/Completed/Error → Idle → Running → WaitingApproval/Answer.
+// external/Completed/Error/Unknown → Idle → Running → WaitingApproval/Answer.
 func (m *Manager) ListSessions() []*Session {
 	list := m.copySessionsList()
 	sortSessions(list)

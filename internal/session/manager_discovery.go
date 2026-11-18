@@ -74,7 +74,7 @@ func newExternalSession(info *usage.SessionInfo) *Session { //nolint:unparam
 		WorkspacePath:  info.CWD,
 		SubProjectDir:  subProjectDir,
 		SessionChain:   []ClaudeSessionID{ClaudeSessionID(info.SessionID)},
-		Status:         StatusUnmanaged,
+		Origin:         OriginExternal,
 		Prompt:         info.Prompt,
 		PermissionMode: info.PermissionMode,
 		StartedAt:      info.StartedAt,
@@ -142,12 +142,9 @@ func (m *Manager) hasManagedSessionAtWorkspaceLocked(workspacePath string) bool 
 		// s.mu を保持したまま m.mu を取得するパスはコードベース全体に存在しないため安全。
 		s.mu.RLock()
 		wp := s.WorkspacePath
-		status := s.Status
+		live := s.hasProcessLocked()
 		s.mu.RUnlock()
-		if wp != workspacePath {
-			continue
-		}
-		if status != StatusUnmanaged && !status.IsTerminal() {
+		if wp == workspacePath && live {
 			return true
 		}
 	}
@@ -277,7 +274,7 @@ func (m *Manager) adoptRuntimeID(info *usage.SessionInfo) bool {
 	m.mu.RLock()
 	for _, sess := range m.sessions {
 		sess.mu.RLock()
-		candidate := sess.Status != StatusUnmanaged && len(sess.SessionChain) == 0
+		candidate := sess.Origin == OriginDeck && len(sess.SessionChain) == 0
 		exactWorkspace := info.CWD != "" && sess.WorkspacePath == info.CWD
 		recreatedWorkspace := sess.WorkspacePath == "" && sess.Name == name && sess.RepoPath == repoPath
 		sess.mu.RUnlock()

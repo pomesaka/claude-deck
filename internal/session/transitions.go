@@ -50,18 +50,16 @@ var ErrLaunching = errors.New("session is still being launched")
 // store transaction, so the rules live here rather than in any one process.
 // 既存の行の Status を書き換えるのはこのファイルの関数だけにする（rg 'r\.Status = ' internal/session で確かめる）。
 
-// applyHookStatus sets the status reported by a Claude Code hook.
-// Hooks only come from a live process, so a terminal or external session is left
-// as is: a hook delivered after the exit was recorded must not bring it back.
-func applyHookStatus(r *store.Record, status Status) (changed bool) {
-	current, ok := StatusFromID(r.Status)
-	if !ok || current.IsTerminal() || current == StatusUnmanaged {
+// applyHookStatus sets the activity reported by a hook (or the Codex JSONL).
+// Activities only come from a live process, so a row that is not live is left
+// as is: a hook delivered after the exit was recorded must not bring it back,
+// and a status this version does not know is not ours to overwrite.
+func applyHookStatus(r *store.Record, a Activity) (changed bool) {
+	current, _ := StatusFromID(r.Status)
+	if !current.IsLive() || current == a.Status() {
 		return false
 	}
-	if current == status {
-		return false
-	}
-	r.Status = status.ID()
+	r.Status = a.Status().ID()
 	return true
 }
 
@@ -126,8 +124,7 @@ func applyExited(r *store.Record, others []store.Record, hasConversation func(cl
 // Callers must read the row inside the same transaction that writes the exit,
 // so a launch that started after the window list was taken is seen here.
 func vanished(r store.Record, now time.Time) bool {
-	status, ok := StatusFromID(r.Status)
-	if !ok || status.IsTerminal() || status == StatusUnmanaged {
+	if status, _ := StatusFromID(r.Status); !status.IsLive() {
 		return false
 	}
 	return !closingActive(r, now) && !launchActive(r, now)

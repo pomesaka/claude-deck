@@ -289,8 +289,7 @@ func (m *Model) resumeSelected() tea.Cmd {
 	if sess == nil {
 		return nil
 	}
-	status := sess.GetStatus()
-	if status != session.StatusCompleted && status != session.StatusError && status != session.StatusUnmanaged {
+	if !sess.Snapshot().CanResume() {
 		return m.flash("実行中のセッションは再開できません")
 	}
 
@@ -346,7 +345,7 @@ func (m *Model) killSelected() tea.Cmd {
 		return nil
 	}
 	// 外部セッションは store に無く、claude-deck が起動したプロセスでもないので終了できない。
-	if sess := m.manager.GetSession(m.selectedID); sess != nil && sess.GetStatus() == session.StatusUnmanaged {
+	if sess := m.manager.GetSession(m.selectedID); sess != nil && sess.Snapshot().Origin == session.OriginExternal {
 		return m.flash("外部セッションは終了できません")
 	}
 	sid := m.selectedID
@@ -372,7 +371,7 @@ func (m *Model) togglePinSelected() tea.Cmd {
 	// WHY NOT adoptExternal で store に取り込む: ピンのためだけに store の行が増え、
 	// resume 以外の経路から取り込みが起きる。メモリだけに持つと、外部セッションは発見の
 	// たびに ID が変わるのでピンが残らない。
-	if snap.Status == session.StatusUnmanaged {
+	if snap.Origin == session.OriginExternal {
 		return m.flash("外部セッションはピンできません")
 	}
 	mgr := m.manager

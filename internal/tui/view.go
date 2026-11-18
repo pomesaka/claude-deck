@@ -84,7 +84,7 @@ func (m Model) renderHeader() string {
 	statusBar := runtimeBadge
 	if m.selectedSnap != nil {
 		snap := *m.selectedSnap
-		icon := sessionStatusIcon(snap.Status)
+		icon := sessionStatusIcon(snap)
 		name := lipgloss.NewStyle().Foreground(colorText).Bold(true).Render(snap.Name)
 		repo := dimStyle.Render("(" + snap.RepoName + ")")
 		statusBar = lipgloss.JoinHorizontal(lipgloss.Top, runtimeBadge, " ", icon, " ", name, "  ", repo)
@@ -117,8 +117,11 @@ func (m Model) headerLineCount() int {
 }
 
 // sessionStatusIcon returns a colored "●" for the given status.
-func sessionStatusIcon(s session.Status) string {
-	switch s {
+func sessionStatusIcon(snap session.Snapshot) string {
+	if snap.Origin == session.OriginExternal {
+		return unmanagedIconStyle.Render("●")
+	}
+	switch snap.Status {
 	case session.StatusRunning:
 		return statusRunningStyle.Render("●")
 	case session.StatusIdle:
@@ -131,8 +134,6 @@ func sessionStatusIcon(s session.Status) string {
 		return statusDoneStyle.Render("●")
 	case session.StatusError:
 		return statusErrorStyle.Render("●")
-	case session.StatusUnmanaged:
-		return unmanagedIconStyle.Render("●")
 	default:
 		return dimStyle.Render("●")
 	}
@@ -324,27 +325,29 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 	var statusIcon string
 	// statusMessage: line2 末尾に表示するメッセージ（エラーの理由）
 	var statusMessage string
-	switch snap.Status {
-	case session.StatusRunning:
+	switch {
+	case snap.Origin == session.OriginExternal:
+		statusIcon = selBg(unmanagedIconStyle, selected).Render("●")
+	case snap.Status == session.StatusRunning:
 		statusIcon = selBg(statusRunningStyle, selected).Render("●")
-	case session.StatusIdle:
+	case snap.Status == session.StatusIdle:
 		statusIcon = selBg(statusIdleStyle, selected).Render("●")
-	case session.StatusSubagentRunning:
+	case snap.Status == session.StatusSubagentRunning:
 		statusIcon = selBg(statusSubagentStyle, selected).Render("●")
-	case session.StatusWaitingApproval:
+	case snap.Status == session.StatusWaitingApproval:
 		statusIcon = selBg(statusApproveStyle, selected).Render("●")
-	case session.StatusWaitingAnswer:
+	case snap.Status == session.StatusWaitingAnswer:
 		statusIcon = selBg(statusQuestionStyle, selected).Render("●")
-	case session.StatusCompleted:
+	case snap.Status == session.StatusCompleted:
 		statusIcon = selBg(statusDoneStyle, selected).Render("●")
-	case session.StatusError:
+	case snap.Status == session.StatusError:
 		statusIcon = selBg(statusErrorStyle, selected).Render("●")
 		statusMessage = snap.ErrorMessage
 		if statusMessage == "" {
 			statusMessage = "エラー"
 		}
-	case session.StatusUnmanaged:
-		statusIcon = selBg(unmanagedIconStyle, selected).Render("●")
+	default:
+		statusIcon = selBg(dimStyle, selected).Render("●")
 	}
 
 	// line1: [icon] 作業ディレクトリ@bookmark ……… セッション名（右寄せ）

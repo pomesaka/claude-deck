@@ -65,5 +65,6 @@ auto モードでは `tool.check` が ask を返しても承認ダイアログ�
 
 `applyHookStatus` が store の行に適用する。
 
-- 終了済み（Completed / Error）と外部セッション（Unmanaged）には適用しない。終了の記録より後に届いた hook が、セッションを生き返らせないようにするため
+- 終了済み（Completed / Error）の行には適用しない。終了の記録より後に届いた hook が、セッションを生き返らせないようにするため
+- この版の知らない status（Unknown）の行にも適用しない。新しい版の claude-deck が書いた行を上書きしないため。外部セッションは store に行が無いので、hook は届かない
 - 現在のステータスと同じなら何もしない

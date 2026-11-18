@@ -6,68 +6,53 @@ import (
 	"time"
 )
 
-// Status represents the current state of a Claude Code session.
+// Status is where a deck session is in its life: one of the activities while
+// its process lives, or how it ended. Whether a session is a deck session at
+// all is its Origin, not its Status.
 type Status int
 
 const (
-	StatusRunning Status = iota
+	// StatusUnknown is the zero value: the store holds a status this version
+	// does not know (written by a newer claude-deck). Such a row is neither live
+	// nor ended, and the transitions leave it alone.
+	StatusUnknown Status = iota
+	StatusRunning
 	StatusWaitingApproval
 	StatusWaitingAnswer
-	StatusCompleted
-	StatusError
 	StatusIdle
-	StatusUnmanaged // 外部セッション（claude-deck が起動していない Claude Code セッション）
 	// StatusSubagentRunning: the main loop has ended its turn while subagents it
 	// started in the background still run. The session works without the user.
 	StatusSubagentRunning
+	StatusCompleted
+	StatusError
 )
 
+var statusInfo = map[Status]struct{ id, label string }{
+	StatusUnknown:         {"unknown", "不明"},
+	StatusRunning:         {"running", "Running"},
+	StatusWaitingApproval: {"waiting_approval", "Approve待ち"},
+	StatusWaitingAnswer:   {"waiting_answer", "質問待ち"},
+	StatusIdle:            {"idle", "アイドル"},
+	StatusSubagentRunning: {"subagent_running", "サブエージェント実行中"},
+	StatusCompleted:       {"completed", "完了"},
+	StatusError:           {"error", "エラー"},
+}
+
 func (s Status) String() string {
-	switch s {
-	case StatusRunning:
-		return "Running"
-	case StatusWaitingApproval:
-		return "Approve待ち"
-	case StatusWaitingAnswer:
-		return "質問待ち"
-	case StatusCompleted:
-		return "完了"
-	case StatusError:
-		return "エラー"
-	case StatusIdle:
-		return "アイドル"
-	case StatusUnmanaged:
-		return "外部"
-	case StatusSubagentRunning:
-		return "サブエージェント実行中"
-	default:
-		return "Unknown"
+	if info, ok := statusInfo[s]; ok {
+		return info.label
 	}
+	return statusInfo[StatusUnknown].label
 }
 
 // ID returns a stable lowercase ASCII identifier for use in IPC and machine-readable output.
 // Unlike String(), this method is not localized and safe to compare programmatically.
+// It is what the store's status column holds.
 func (s Status) ID() string {
-	switch s {
-	case StatusRunning:
-		return "running"
-	case StatusWaitingApproval:
-		return "waiting_approval"
-	case StatusWaitingAnswer:
-		return "waiting_answer"
-	case StatusCompleted:
-		return "completed"
-	case StatusError:
-		return "error"
-	case StatusIdle:
-		return "idle"
-	case StatusUnmanaged:
-		return "unmanaged"
-	case StatusSubagentRunning:
-		return "subagent_running"
-	default:
-		return "unknown"
+	if info, ok := statusInfo[s]; ok {
+		return info.id
 	}
+	return statusInfo[StatusUnknown].id
 }
 
 // NeedsAttention returns true if the session requires user action.
@@ -75,10 +60,64 @@ func (s Status) NeedsAttention() bool {
 	return s == StatusWaitingApproval || s == StatusWaitingAnswer
 }
 
+// IsLive reports whether the status is one of the activities of a running process.
+func (s Status) IsLive() bool {
+	switch s {
+	case StatusRunning, StatusWaitingApproval, StatusWaitingAnswer, StatusIdle, StatusSubagentRunning:
+		return true
+	}
+	return false
+}
+
 // IsTerminal returns true if the status is a final state (no further transitions expected).
 func (s Status) IsTerminal() bool {
 	return s == StatusCompleted || s == StatusError
 }
+
+// Activity is what a live process reports about itself: through the
+// deck-status hooks for Claude Code, through the JSONL for Codex. Completed and
+// Error are not activities; they come from the process ending.
+type Activity int
+
+const (
+	ActivityRunning Activity = iota + 1
+	ActivityIdle
+	ActivityWaitingApproval
+	ActivityWaitingAnswer
+	ActivitySubagentRunning
+)
+
+var activityStatus = map[Activity]Status{
+	ActivityRunning:         StatusRunning,
+	ActivityIdle:            StatusIdle,
+	ActivityWaitingApproval: StatusWaitingApproval,
+	ActivityWaitingAnswer:   StatusWaitingAnswer,
+	ActivitySubagentRunning: StatusSubagentRunning,
+}
+
+// Status is the status a session takes on while doing a.
+func (a Activity) Status() Status { return activityStatus[a] }
+
+// ActivityFromID parses an activity by its Status ID ("running", "idle", …).
+func ActivityFromID(id string) (Activity, bool) {
+	for a, s := range activityStatus {
+		if s.ID() == id {
+			return a, true
+		}
+	}
+	return 0, false
+}
+
+// Origin tells who started the session's process.
+type Origin int
+
+const (
+	// OriginDeck: claude-deck started it. The session has a store row.
+	OriginDeck Origin = iota
+	// OriginExternal: found in the runtime's transcripts, started elsewhere.
+	// Kept in memory only; resuming it adopts it as a deck session.
+	OriginExternal
+)
 
 // DisplayChannel describes what data source should be used to render a
 // session's detail pane. Derived from the session's current state rather
@@ -119,8 +158,11 @@ type Session struct {
 	// Fields marked "immutable after creation" are set once by CreateSession /
 	// newExternalSession and never mutated thereafter, so callers may read them
 	// without holding mu. See hasManagedSessionAtWorkspaceLocked for an example.
-	ID   DeckSessionID `json:"id"` // immutable after creation
-	Name string        `json:"name"`
+	ID DeckSessionID `json:"id"` // immutable after creation
+	// Origin is OriginExternal for a session found in the transcripts, until it
+	// is adopted. Not in the store: only deck sessions have rows.
+	Origin Origin `json:"-"`
+	Name   string `json:"name"`
 	// Alias は利用者かセッション自身が付けた表示用の名前（`claude-deck alias`）。無ければ空。
 	// WHY NOT Name を書き換える: Name は jj ワークスペースの名前とディレクトリ名、Claude Code の --name を兼ねる。
 	// 再開はこの名前でワークスペースを作り直し、gc はこの名前で持ち主を判定する。
@@ -175,7 +217,13 @@ type Session struct {
 // プロセスのこともあり、TUI はそれを store のステータスでしか知り得ない。
 // Caller must hold s.mu (read).
 func (s *Session) hasProcessLocked() bool {
-	return !s.Status.IsTerminal() && s.Status != StatusUnmanaged
+	return hasProcess(s.Origin, s.Status)
+}
+
+// hasProcess is the one rule for whether claude-deck has a live process for a
+// session: it started it, and the store says it is doing something.
+func hasProcess(origin Origin, status Status) bool {
+	return origin == OriginDeck && status.IsLive()
 }
 
 // displayChannelLocked returns the appropriate display data source for this session.
@@ -246,6 +294,7 @@ type Snapshot struct {
 	// Derived from len(SessionChain) - 1.
 	ClearCount     int
 	Display        DisplayChannel
+	Origin         Origin
 	Status         Status
 	Prompt         string
 	PermissionMode string
@@ -258,6 +307,13 @@ type Snapshot struct {
 	BookmarkName   string
 	Elapsed        time.Duration
 }
+
+// HasProcess reports whether claude-deck has a live process for the session.
+func (s Snapshot) HasProcess() bool { return hasProcess(s.Origin, s.Status) }
+
+// CanResume reports whether r starts the session: an external session is
+// adopted, a finished deck session is started again.
+func (s Snapshot) CanResume() bool { return s.Origin == OriginExternal || s.Status.IsTerminal() }
 
 // DisplayName returns the alias, or the session name when no alias was given.
 func (s Snapshot) DisplayName() string {
@@ -311,6 +367,7 @@ func (s *Session) Snapshot() Snapshot {
 		ForkedFrom:       s.ForkedFrom,
 		ClearCount:       max(0, len(s.SessionChain)-1),
 		Display:          s.displayChannelLocked(),
+		Origin:           s.Origin,
 		Status:           s.Status,
 		Prompt:           s.Prompt,
 		PermissionMode:   s.PermissionMode,
@@ -415,7 +472,7 @@ func (s *Session) isPinned() bool {
 // Lower values appear at the top of the list (least important).
 // Higher values appear at the bottom (most important, closest to user's eyes).
 //
-//	0: Unmanaged / Completed / Error（非アクティブ）
+//	0: 外部セッション / Completed / Error / Unknown（非アクティブ）
 //	1: Idle
 //	2: Running / SubagentRunning
 //	3: WaitingApproval / WaitingAnswer（要手動介入）

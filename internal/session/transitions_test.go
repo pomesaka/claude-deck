@@ -13,20 +13,19 @@ func TestApplyHookStatus(t *testing.T) {
 	tests := []struct {
 		name        string
 		from        string
-		to          Status
+		to          Activity
 		wantStatus  string
 		wantChanged bool
 	}{
-		{"idle to running", "idle", StatusRunning, "running", true},
-		{"running to waiting approval", "running", StatusWaitingApproval, "waiting_approval", true},
-		{"waiting answer to idle", "waiting_answer", StatusIdle, "idle", true},
-		{"running to subagent running", "running", StatusSubagentRunning, "subagent_running", true},
-		{"subagent running to idle", "subagent_running", StatusIdle, "idle", true},
-		{"same status is not a change", "running", StatusRunning, "running", false},
-		{"completed is not revived by a late hook", "completed", StatusRunning, "completed", false},
-		{"error is not revived by a late hook", "error", StatusIdle, "error", false},
-		{"external session is left alone", "unmanaged", StatusRunning, "unmanaged", false},
-		{"unknown stored status is left alone", "bogus", StatusRunning, "bogus", false},
+		{"idle to running", "idle", ActivityRunning, "running", true},
+		{"running to waiting approval", "running", ActivityWaitingApproval, "waiting_approval", true},
+		{"waiting answer to idle", "waiting_answer", ActivityIdle, "idle", true},
+		{"running to subagent running", "running", ActivitySubagentRunning, "subagent_running", true},
+		{"subagent running to idle", "subagent_running", ActivityIdle, "idle", true},
+		{"same status is not a change", "running", ActivityRunning, "running", false},
+		{"completed is not revived by a late hook", "completed", ActivityRunning, "completed", false},
+		{"error is not revived by a late hook", "error", ActivityIdle, "error", false},
+		{"unknown stored status is left alone", "bogus", ActivityRunning, "bogus", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -84,6 +83,14 @@ func TestApplyExited(t *testing.T) {
 		wantChain      []string
 	}{
 		{
+			name:           "a status this version does not know becomes completed: the process did end",
+			rec:            store.Record{ID: "s", Status: "bogus", SessionChain: []string{"a"}},
+			withLog:        []string{"a"},
+			wantStatus:     "completed",
+			wantFinishedAt: &now,
+			wantChain:      []string{"a"},
+		},
+		{
 			name:           "running session becomes completed",
 			rec:            store.Record{ID: "s", Status: "running", SessionChain: []string{"a"}},
 			withLog:        []string{"a"},
@@ -124,7 +131,7 @@ func TestApplyExited(t *testing.T) {
 		{
 			name:           "no fallback when another session owns the previous ID",
 			rec:            store.Record{ID: "s", Status: "idle", SessionChain: []string{"a", "b"}},
-			others:         []store.Record{{ID: "other", Status: "unmanaged", SessionChain: []string{"a"}}},
+			others:         []store.Record{{ID: "other", Status: "completed", SessionChain: []string{"a"}}},
 			withLog:        []string{"a"},
 			wantStatus:     "completed",
 			wantFinishedAt: &now,
@@ -208,6 +215,7 @@ func TestBeginResume(t *testing.T) {
 		{"error session resumes", store.Record{ID: "s", Status: "error", ErrorMessage: "gone", PID: 9}, false},
 		{"running session cannot resume", store.Record{ID: "s", Status: "running"}, true},
 		{"idle session cannot resume", store.Record{ID: "s", Status: "idle"}, true},
+		{"unknown status cannot resume", store.Record{ID: "s", Status: "bogus"}, true},
 		{"session being closed cannot resume", store.Record{ID: "s", Status: "completed", ClosingAt: &recentClose}, true},
 		{"stale close from a crashed process does not block resume", store.Record{ID: "s", Status: "completed", ClosingAt: &staleClose}, false},
 	}
@@ -240,7 +248,7 @@ func TestAbortResume(t *testing.T) {
 
 func TestMarkAdopted(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	r := store.Record{ID: "s", Status: "unmanaged"}
+	r := store.Record{ID: "s", Status: StatusUnknown.ID()} // an external session's row (recordLocked)
 	markAdopted(&r, now)
 	if r.Status != "completed" || r.FinishedAt == nil || !r.FinishedAt.Equal(now) {
 		t.Errorf("after markAdopted: %+v", r)
@@ -303,5 +311,25 @@ func TestRecordWorkspaceRemoved(t *testing.T) {
 				t.Errorf("revisions = %q %q, want %q %q", r.LastJJRevision, r.LastJJParentRevision, tt.wantAt, tt.wantParent)
 			}
 		})
+	}
+}
+
+// A row is marked exited for a missing window only while it is live: an ended
+// row has nothing to end, and a status this version does not know is left alone.
+func TestVanished(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	tests := []struct {
+		status string
+		want   bool
+	}{
+		{"idle", true},
+		{"running", true},
+		{"completed", false},
+		{"bogus", false},
+	}
+	for _, tt := range tests {
+		if got := vanished(store.Record{ID: "s", Status: tt.status}, now); got != tt.want {
+			t.Errorf("vanished(%s) = %v, want %v", tt.status, got, tt.want)
+		}
 	}
 }

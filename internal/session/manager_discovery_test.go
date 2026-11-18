@@ -221,4 +221,7 @@ func TestNewExternalSession_NoJJ(t *testing.T) {
 	if sess.RepoPath != dir {
 		t.Errorf("RepoPath = %q, want %q", sess.RepoPath, dir)
 	}
+	if sess.Origin != OriginExternal || sess.Status != StatusUnknown {
+		t.Errorf("Origin, Status = %v, %v; want External, Unknown", sess.Origin, sess.Status)
+	}
 }

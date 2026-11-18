@@ -4,6 +4,8 @@ import (
 	"os"
 	"reflect"
 	"testing"
+
+	"github.com/pomesaka/claude-deck/internal/session"
 )
 
 func TestParseCLIArgs(t *testing.T) {
@@ -103,7 +105,7 @@ func TestParseCLIArgs(t *testing.T) {
 			name:    "hook status",
 			command: "hook",
 			args:    []string{"status", "waiting_approval", "--session", "abc"},
-			want:    cliRequest{Op: "hook", HookEvent: "status", Status: "waiting_approval", Session: "abc"},
+			want:    cliRequest{Op: "hook", HookEvent: "status", Activity: session.ActivityWaitingApproval, Session: "abc"},
 		},
 		{
 			name:    "hook session-start",

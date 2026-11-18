@@ -67,9 +67,9 @@ func (m *Manager) applyRuntimeActivityFromJSONL(sess *Session, ev usage.FileEven
 
 	switch activity.Kind {
 	case usage.RuntimeActivityRunning:
-		m.recordRuntimeStatus(sess, StatusRunning)
+		m.recordRuntimeStatus(sess, ActivityRunning)
 	case usage.RuntimeActivityIdle:
-		m.recordRuntimeStatus(sess, StatusIdle)
+		m.recordRuntimeStatus(sess, ActivityIdle)
 	}
 	if activity.CurrentTool != "" {
 		sess.SetCurrentTool(activity.CurrentTool)
@@ -81,8 +81,8 @@ func (m *Manager) applyRuntimeActivityFromJSONL(sess *Session, ev usage.FileEven
 // recordRuntimeStatus writes a status read from the runtime's JSONL to the store.
 // Runtimes without hooks (Codex) report their status this way; the store stays the
 // only place the status is decided, as with `claude-deck hook status`.
-func (m *Manager) recordRuntimeStatus(sess *Session, status Status) {
-	if sess.GetStatus() == status {
+func (m *Manager) recordRuntimeStatus(sess *Session, status Activity) {
+	if sess.GetStatus() == status.Status() {
 		return
 	}
 	if err := RecordHookStatus(m.store, sess.ID, status); err != nil {
@@ -142,31 +142,36 @@ func (m *Manager) RefreshFromJSONL() {
 	}
 }
 
-// refreshBookmarks updates BookmarkName for active sessions with workspaces.
-// 完了/エラーのセッションはブックマークが変わらないためスキップする。
+// refreshBookmarks updates BookmarkName of the sessions bookmarkTargets picks.
 func (m *Manager) refreshBookmarks() {
-	for _, sess := range m.copySessionsList() {
-		sess.mu.RLock()
-		wsPath := sess.WorkspacePath
-		status := sess.Status
-		sess.mu.RUnlock()
-
-		if wsPath == "" {
-			continue
-		}
-		if status == StatusCompleted || status == StatusError {
-			continue
-		}
-
-		bookmark, err := m.jj().GetNearestBookmark(wsPath)
-		if err != nil {
-			debuglog.Printf("[refreshBookmarks] session %s: %v", sess.ID, err)
-			continue
-		}
-		if bookmark == "" {
-			continue
-		}
-
-		sess.ApplyBookmark(bookmark)
+	sessions := m.copySessionsList()
+	snaps := make([]Snapshot, len(sessions))
+	byID := make(map[DeckSessionID]*Session, len(sessions))
+	for i, sess := range sessions {
+		snaps[i] = sess.Snapshot()
+		byID[sess.ID] = sess
 	}
+	for _, snap := range bookmarkTargets(snaps) {
+		bookmark, err := m.jj().GetNearestBookmark(snap.WorkspacePath)
+		if err != nil {
+			debuglog.Printf("[refreshBookmarks] session %s: %v", snap.ID, err)
+			continue
+		}
+		if bookmark != "" {
+			byID[snap.ID].ApplyBookmark(bookmark)
+		}
+	}
+}
+
+// bookmarkTargets picks the sessions whose bookmark may have moved: those with
+// a live process in a known directory. A finished session's bookmark does not
+// move, and an external session is not claude-deck's to run jj in.
+func bookmarkTargets(snaps []Snapshot) []Snapshot {
+	var out []Snapshot
+	for _, s := range snaps {
+		if s.HasProcess() && s.WorkspacePath != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

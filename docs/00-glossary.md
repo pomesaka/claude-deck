@@ -41,9 +41,20 @@ Claude Code のプロセスライフサイクル、対話履歴、作業ディ�
 
 ## 状態モデル
 
+### Origin
+
+セッションのプロセスを誰が起動したか。
+
+| 値 | 意味 |
+|----|------|
+| Deck | claude-deck が起動した。store に行がある（deck セッション） |
+| External | JSONL から発見した、claude-deck の外で起動したセッション（外部セッション）。メモリだけに持ち、再開すると Deck として取り込む |
+
+**型**: `session.Origin`
+
 ### Status
 
-セッションの細粒度な実行状態。
+deck セッションの実行状態。動いている間の活動（Activity）か、終わり方。外部セッションかどうかは Status でなく Origin で表す。
 
 | 値 | 意味 |
 |----|------|
@@ -54,11 +65,13 @@ Claude Code のプロセスライフサイクル、対話履歴、作業ディ�
 | WaitingAnswer | ユーザー質問待ち (Hook PermissionRequest / AskUserQuestion の tool.call) |
 | Completed | プロセス終了 (ウィンドウのコマンドの `hook exited` / close / ウィンドウ消失の検知) |
 | Error | 再開でワークスペースを作り直せなかった、または終了済みセッションの作業ディレクトリが消えている |
-| Unmanaged | JSONL から発見された外部セッション |
+| Unknown | store にこの版の知らない値がある（新しい版の claude-deck が書いた）。動いているとも終わったとも扱わず、hook も再開も prune も行に触れない。外部セッションの Status もこれ |
+
+Idle から WaitingAnswer までの 5 つが活動（**型**: `session.Activity`）で、hook と Codex の JSONL が報告できるのはこれだけ。
 
 遷移の規則は次の 3 つ。
 
-- hook が報告するステータス（Idle、Running、SubagentRunning、WaitingApproval、WaitingAnswer）は、動いているセッションにだけ適用する。動いている間は、この 5 つのどれからどれへも移る。終了済み（Completed / Error）と Unmanaged の行には適用しない
+- hook が報告するステータス（Idle、Running、SubagentRunning、WaitingApproval、WaitingAnswer）は、動いているセッションにだけ適用する。動いている間は、この 5 つのどれからどれへも移る。終了済み（Completed / Error）と Unknown の行には適用しない
 - 終了は、ウィンドウのコマンドの `hook exited`、`x` と `claude-deck close`、ウィンドウ消失の検知の 3 経路で記録し、Completed にする。すでに Error の行は Error のまま
 - Completed と Error から Idle に戻るのは、再開（`r`）と、TUI の起動時にそのセッションの tmux ウィンドウが生きていた場合だけ。外部セッションを再開すると、deck のセッションとして取り込んでから再開する
 
@@ -74,7 +87,7 @@ Claude Code が `~/.claude/projects/<project>/<uuid>.jsonl` に書き出すセ�
 
 ### Store
 
-JSONL が「Claude Code の記録」なのに対し、Store（`{DataDir}/deck.db`）は「deck の記録」で、deck セッションの信頼できる唯一の情報源。外部セッション (Unmanaged) は持たない。
+JSONL が「Claude Code の記録」なのに対し、Store（`{DataDir}/deck.db`）は「deck の記録」で、deck セッションの信頼できる唯一の情報源。外部セッション（Origin が External）は持たない。
 
 ### Workspace
 

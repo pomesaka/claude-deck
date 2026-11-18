@@ -33,7 +33,9 @@ type cliRequest struct {
 	// hook
 	HookEvent       string
 	Session         string
-	Status          string
+	// Activity is what `hook status` reports. Completed and Error are not
+	// activities: they come from the exit command and close, which also record FinishedAt.
+	Activity session.Activity
 	ClaudeSessionID string
 	Source          string
 	RateLimits      string // JSON, as ratelimits.ParseMeasured reads it
@@ -445,16 +447,6 @@ const (
 	hookRateLimits   = "rate-limits"
 )
 
-// hookStatuses are the statuses a hook may report. Completed and Error come from
-// the exit command and close, which also record FinishedAt.
-var hookStatuses = map[string]bool{
-	session.StatusRunning.ID():         true,
-	session.StatusIdle.ID():            true,
-	session.StatusWaitingApproval.ID(): true,
-	session.StatusWaitingAnswer.ID():   true,
-	session.StatusSubagentRunning.ID(): true,
-}
-
 // parseHookArgs parses `hook <event> [args] --session ID`. These are called by
 // the deck-status plugin and by the pane's exit command, not by people.
 func parseHookArgs(args []string) (cliRequest, error) {
@@ -470,10 +462,11 @@ func parseHookArgs(args []string) (cliRequest, error) {
 		if len(args) < 2 {
 			return cliRequest{}, fmt.Errorf("hook status: missing status\n%s", usage)
 		}
-		req.Status = args[1]
-		if !hookStatuses[req.Status] {
-			return cliRequest{}, fmt.Errorf("hook status: unknown status %q", req.Status)
+		a, ok := session.ActivityFromID(args[1])
+		if !ok {
+			return cliRequest{}, fmt.Errorf("hook status: unknown status %q", args[1])
 		}
+		req.Activity = a
 		args = args[2:]
 	case hookSessionStart:
 		fs.StringVar(&req.ClaudeSessionID, "claude-session-id", "", "Claude Code のセッション ID")
@@ -515,8 +508,7 @@ func runHook(req cliRequest, st *store.Store, dataDir string) error {
 		}
 		return ratelimits.Save(dataDir, status)
 	case hookStatus:
-		status, _ := session.StatusFromID(req.Status) // validated in parseHookArgs
-		return session.RecordHookStatus(st, id, status)
+		return session.RecordHookStatus(st, id, req.Activity)
 	case hookSessionStart:
 		return session.RecordSessionStart(st, id, session.ClaudeSessionID(req.ClaudeSessionID), req.Source)
 	case hookExited:

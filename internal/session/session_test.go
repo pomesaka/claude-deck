@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -18,9 +19,9 @@ func TestStatus_String(t *testing.T) {
 		{StatusCompleted, "完了"},
 		{StatusError, "エラー"},
 		{StatusIdle, "アイドル"},
-		{StatusUnmanaged, "外部"},
 		{StatusSubagentRunning, "サブエージェント実行中"},
-		{Status(99), "Unknown"},
+		{StatusUnknown, "不明"},
+		{Status(99), "不明"},
 	}
 	for _, tt := range tests {
 		if got := tt.status.String(); got != tt.want {
@@ -29,23 +30,68 @@ func TestStatus_String(t *testing.T) {
 	}
 }
 
-func TestStatus_IsTerminal(t *testing.T) {
+// The activities are live, Completed and Error are ended, and a status this
+// version does not know is neither.
+func TestStatus_IsLiveIsTerminal(t *testing.T) {
 	tests := []struct {
-		status Status
-		want   bool
+		status       Status
+		live, ending bool
 	}{
-		{StatusRunning, false},
-		{StatusWaitingApproval, false},
-		{StatusWaitingAnswer, false},
-		{StatusCompleted, true},
-		{StatusError, true},
-		{StatusIdle, false},
-		{StatusUnmanaged, false},
-		{StatusSubagentRunning, false},
+		{StatusUnknown, false, false},
+		{StatusRunning, true, false},
+		{StatusWaitingApproval, true, false},
+		{StatusWaitingAnswer, true, false},
+		{StatusIdle, true, false},
+		{StatusSubagentRunning, true, false},
+		{StatusCompleted, false, true},
+		{StatusError, false, true},
 	}
 	for _, tt := range tests {
-		if got := tt.status.IsTerminal(); got != tt.want {
-			t.Errorf("Status(%d).IsTerminal() = %v, want %v", tt.status, got, tt.want)
+		if got := tt.status.IsLive(); got != tt.live {
+			t.Errorf("%s.IsLive() = %v, want %v", tt.status.ID(), got, tt.live)
+		}
+		if got := tt.status.IsTerminal(); got != tt.ending {
+			t.Errorf("%s.IsTerminal() = %v, want %v", tt.status.ID(), got, tt.ending)
+		}
+	}
+}
+
+// The store holds Status.ID strings; parsing must round-trip them and turn
+// anything else into Unknown.
+func TestStatusFromID(t *testing.T) {
+	for _, s := range []Status{StatusRunning, StatusWaitingApproval, StatusWaitingAnswer, StatusIdle, StatusSubagentRunning, StatusCompleted, StatusError} {
+		if got, ok := StatusFromID(s.ID()); !ok || got != s {
+			t.Errorf("StatusFromID(%q) = %v, %v; want %v, true", s.ID(), got, ok, s)
+		}
+	}
+	for _, id := range []string{"unmanaged", "", "bogus", "unknown"} {
+		if got, ok := StatusFromID(id); ok || got != StatusUnknown {
+			t.Errorf("StatusFromID(%q) = %v, %v; want Unknown, false", id, got, ok)
+		}
+	}
+}
+
+// A hook may report only the activities; each maps to a distinct live status
+// with the same ID.
+func TestActivityFromID(t *testing.T) {
+	seen := map[Status]bool{}
+	for _, id := range []string{"running", "idle", "waiting_approval", "waiting_answer", "subagent_running"} {
+		a, ok := ActivityFromID(id)
+		if !ok {
+			t.Errorf("ActivityFromID(%q) not accepted", id)
+			continue
+		}
+		if a.Status().ID() != id || !a.Status().IsLive() {
+			t.Errorf("ActivityFromID(%q).Status() = %v", id, a.Status())
+		}
+		if seen[a.Status()] {
+			t.Errorf("two activities map to %v", a.Status())
+		}
+		seen[a.Status()] = true
+	}
+	for _, id := range []string{"completed", "error", "unmanaged", "", "bogus"} {
+		if _, ok := ActivityFromID(id); ok {
+			t.Errorf("ActivityFromID(%q) accepted, want refused", id)
 		}
 	}
 }
@@ -61,7 +107,7 @@ func TestStatus_NeedsAttention(t *testing.T) {
 		{StatusCompleted, false},
 		{StatusError, false},
 		{StatusIdle, false},
-		{StatusUnmanaged, false},
+		{StatusUnknown, false},
 		{StatusSubagentRunning, false},
 	}
 	for _, tt := range tests {
@@ -229,30 +275,47 @@ func TestDisplayChannel_String(t *testing.T) {
 	}
 }
 
-func TestDisplayChannel_Derivation(t *testing.T) {
+// claude-deck has a process only for a deck session doing something; only that
+// one goes on tmux. r starts an external session (adopting it) or a finished one.
+func TestSnapshot_ProcessAndResume(t *testing.T) {
 	tests := []struct {
-		status          Status
-		wantDisplay     DisplayChannel
-		wantProcessLive bool
+		origin      Origin
+		status      Status
+		wantProcess bool
+		wantResume  bool
 	}{
-		{StatusIdle, DisplayTmux, true},
-		{StatusRunning, DisplayTmux, true},
-		{StatusWaitingApproval, DisplayTmux, true},
-		{StatusWaitingAnswer, DisplayTmux, true},
-		{StatusSubagentRunning, DisplayTmux, true},
-		{StatusCompleted, DisplayJSONL, false},
-		{StatusError, DisplayJSONL, false},
-		{StatusUnmanaged, DisplayJSONL, false},
+		{OriginDeck, StatusIdle, true, false},
+		{OriginDeck, StatusRunning, true, false},
+		{OriginDeck, StatusWaitingApproval, true, false},
+		{OriginDeck, StatusWaitingAnswer, true, false},
+		{OriginDeck, StatusSubagentRunning, true, false},
+		{OriginDeck, StatusCompleted, false, true},
+		{OriginDeck, StatusError, false, true},
+		{OriginDeck, StatusUnknown, false, false},
+		{OriginExternal, StatusUnknown, false, true},
+		// Does not happen (external sessions have no status), but must not count as a process.
+		{OriginExternal, StatusRunning, false, true},
 	}
 	for _, tt := range tests {
-		t.Run(tt.status.ID(), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%d/%s", tt.origin, tt.status.ID()), func(t *testing.T) {
 			s := NewSession("/tmp/repo", "repo")
-			s.Status = tt.status
-			if got := s.Snapshot().Display; got != tt.wantDisplay {
-				t.Errorf("Display = %v, want %v", got, tt.wantDisplay)
+			s.Origin, s.Status = tt.origin, tt.status
+			snap := s.Snapshot()
+			if got := snap.HasProcess(); got != tt.wantProcess {
+				t.Errorf("HasProcess = %v, want %v", got, tt.wantProcess)
 			}
-			if got := s.IsProcessAlive(); got != tt.wantProcessLive {
-				t.Errorf("IsProcessAlive = %v, want %v", got, tt.wantProcessLive)
+			wantDisplay := DisplayJSONL
+			if tt.wantProcess {
+				wantDisplay = DisplayTmux
+			}
+			if snap.Display != wantDisplay {
+				t.Errorf("Display = %v, want %v", snap.Display, wantDisplay)
+			}
+			if got := s.IsProcessAlive(); got != tt.wantProcess {
+				t.Errorf("IsProcessAlive = %v, want %v", got, tt.wantProcess)
+			}
+			if got := snap.CanResume(); got != tt.wantResume {
+				t.Errorf("CanResume = %v, want %v", got, tt.wantResume)
 			}
 		})
 	}

@@ -6,17 +6,15 @@ import (
 	"github.com/pomesaka/claude-deck/internal/store"
 )
 
-// StatusFromID parses the value returned by Status.ID.
+// StatusFromID parses the value returned by Status.ID. An ID this version does
+// not know (a newer claude-deck wrote it) is StatusUnknown and false.
 func StatusFromID(id string) (Status, bool) {
-	for _, s := range []Status{
-		StatusRunning, StatusWaitingApproval, StatusWaitingAnswer,
-		StatusCompleted, StatusError, StatusIdle, StatusUnmanaged, StatusSubagentRunning,
-	} {
-		if s.ID() == id {
+	for s, info := range statusInfo {
+		if s != StatusUnknown && info.id == id {
 			return s, true
 		}
 	}
-	return 0, false
+	return StatusUnknown, false
 }
 
 // recordLocked converts the session to a store row. Caller must hold s.mu (read).
@@ -70,6 +68,8 @@ func newSessionFromRecord(r store.Record) *Session {
 // (CLI, hook commands, the pane's exit command) from the store row.
 // Caller must hold s.mu (write) or own s exclusively.
 func (s *Session) applyControlRecordLocked(r store.Record) {
+	// store の行は deck セッションだけ。外部セッションを取り込むと、ここで Deck になる。
+	s.Origin = OriginDeck
 	s.Name = r.Name
 	s.Alias = r.Alias
 	s.Pinned = r.Pinned
@@ -82,9 +82,7 @@ func (s *Session) applyControlRecordLocked(r store.Record) {
 	if len(s.SessionChain) == 0 {
 		s.SessionChain = nil
 	}
-	if status, ok := StatusFromID(r.Status); ok {
-		s.Status = status
-	}
+	s.Status, _ = StatusFromID(r.Status)
 	s.FinishedAt = copyTimePtr(r.FinishedAt)
 	s.PID = r.PID
 	s.ErrorMessage = r.ErrorMessage

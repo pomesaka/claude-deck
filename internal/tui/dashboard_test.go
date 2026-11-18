@@ -506,3 +506,35 @@ func TestUpdate_StatusClear(t *testing.T) {
 		t.Fatalf("the second message stayed after its own clear: footer %q", d.footer())
 	}
 }
+
+// r starts only what CanResume allows; x and p refuse an external session.
+func TestDashboard_KeysByOriginAndStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		origin session.Origin
+		status session.Status
+		key    string
+		want   string // part of the footer
+	}{
+		{"r on a completed session", session.OriginDeck, session.StatusCompleted, "r", "再開中"},
+		{"r on an external session adopts it", session.OriginExternal, session.StatusUnknown, "r", "再開中"},
+		{"r on an unknown status is refused", session.OriginDeck, session.StatusUnknown, "r", "再開できません"},
+		{"r on a running session is refused", session.OriginDeck, session.StatusRunning, "r", "再開できません"},
+		{"Enter on a completed session resumes", session.OriginDeck, session.StatusCompleted, "enter", "再開中"},
+		{"x on an external session is refused", session.OriginExternal, session.StatusUnknown, "x", "終了できません"},
+		{"x on an unknown status closes", session.OriginDeck, session.StatusUnknown, "x", "終了中"},
+		{"p on an external session is refused", session.OriginExternal, session.StatusUnknown, "p", "ピンできません"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newDashboard(t, 1, 30)
+			s := d.mgr.sessions[0]
+			s.Origin, s.Status = tt.origin, tt.status
+			d.send(SessionRefreshMsg{})
+			d.key(tt.key)
+			if !strings.Contains(d.footer(), tt.want) {
+				t.Errorf("footer = %q, want it to contain %q", d.footer(), tt.want)
+			}
+		})
+	}
+}

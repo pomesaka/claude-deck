@@ -473,7 +473,7 @@ func TestResumeSession_AdoptsExternalSession(t *testing.T) {
 	dir := t.TempDir()
 	ext := &Session{
 		ID: "ext", Name: "abcd1234", RepoPath: dir, WorkspacePath: dir,
-		Status: StatusUnmanaged, SessionChain: []ClaudeSessionID{"claude-ext"},
+		Origin: OriginExternal, SessionChain: []ClaudeSessionID{"claude-ext"},
 	}
 	m.mu.Lock()
 	m.sessions[ext.ID] = ext
@@ -486,8 +486,31 @@ func TestResumeSession_AdoptsExternalSession(t *testing.T) {
 	if r.Status != StatusIdle.ID() || r.PID != be.windows["ext"] {
 		t.Errorf("adopted session: status=%q pid=%d", r.Status, r.PID)
 	}
-	if got := m.GetSession("ext").GetStatus(); got != StatusIdle {
-		t.Errorf("in-memory status = %v, want Idle", got)
+	if got := m.GetSession("ext").Snapshot(); got.Status != StatusIdle || got.Origin != OriginDeck {
+		t.Errorf("in-memory status, origin = %v, %v; want Idle, Deck", got.Status, got.Origin)
+	}
+}
+
+// A row with a status this version does not know (a newer claude-deck wrote
+// it) is shown as Unknown, has no process, and keeps its status when this
+// version writes the row for other reasons.
+func TestUnknownStatusRow(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.store.Insert(store.Record{ID: "new", Name: "newer", RepoPath: t.TempDir(), Status: "bogus"}); err != nil {
+		t.Fatal(err)
+	}
+	m.Reload()
+
+	snap := m.GetSession("new").Snapshot()
+	if snap.Status != StatusUnknown || snap.Origin != OriginDeck || snap.HasProcess() {
+		t.Errorf("snapshot: status=%v origin=%v process=%v", snap.Status, snap.Origin, snap.HasProcess())
+	}
+	m.PersistAll()
+	if err := m.SetPinned("new", true); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustGet(t, m.store, "new").Status; got != "bogus" {
+		t.Errorf("stored status = %q, want bogus kept", got)
 	}
 }
 
@@ -497,7 +520,7 @@ func TestReload_FollowsOtherProcesses(t *testing.T) {
 	other := otherProcess(t, m)
 
 	// A discovered external session for the Claude session the deck session is about to report.
-	ext := &Session{ID: "ext", Status: StatusUnmanaged, SessionChain: []ClaudeSessionID{"claude-1"}}
+	ext := &Session{ID: "ext", Origin: OriginExternal, SessionChain: []ClaudeSessionID{"claude-1"}}
 	m.mu.Lock()
 	m.sessions[ext.ID] = ext
 	m.mu.Unlock()
@@ -505,7 +528,7 @@ func TestReload_FollowsOtherProcesses(t *testing.T) {
 	if err := RecordSessionStart(other, sess.ID, "claude-1", SourceStartup); err != nil {
 		t.Fatalf("RecordSessionStart: %v", err)
 	}
-	if err := RecordHookStatus(other, sess.ID, StatusWaitingApproval); err != nil {
+	if err := RecordHookStatus(other, sess.ID, ActivityWaitingApproval); err != nil {
 		t.Fatalf("RecordHookStatus: %v", err)
 	}
 	m.Reload()
@@ -532,7 +555,7 @@ func TestReload_KeepsProjectedFields(t *testing.T) {
 	sess := createPlainSession(t, m)
 	sess.ApplyFileActivity(time.Unix(1_800_000_000, 0))
 
-	if err := RecordHookStatus(otherProcess(t, m), sess.ID, StatusRunning); err != nil {
+	if err := RecordHookStatus(otherProcess(t, m), sess.ID, ActivityRunning); err != nil {
 		t.Fatalf("RecordHookStatus: %v", err)
 	}
 	m.Reload()
@@ -669,6 +692,8 @@ func TestPruneOldSessions(t *testing.T) {
 		{ID: "old-finished", Status: StatusCompleted.ID(), LastActivity: at(1)},
 		{ID: "old-closing", Status: StatusCompleted.ID(), LastActivity: at(1), ClosingAt: &now},
 		{ID: "old-running", Status: StatusRunning.ID(), LastActivity: at(0)},
+		// Written by a newer claude-deck: it may be running, so it is not ours to remove.
+		{ID: "old-unknown", Status: "bogus", LastActivity: at(0)},
 	} {
 		if err := m.store.Insert(r); err != nil {
 			t.Fatalf("Insert: %v", err)
@@ -682,7 +707,7 @@ func TestPruneOldSessions(t *testing.T) {
 		ids = append(ids, r.ID)
 	}
 	slices.Sort(ids)
-	if want := []string{"closed-later", "old-closing", "old-running"}; !slices.Equal(ids, want) {
+	if want := []string{"closed-later", "old-closing", "old-running", "old-unknown"}; !slices.Equal(ids, want) {
 		t.Errorf("remaining = %v, want %v", ids, want)
 	}
 }
@@ -1011,7 +1036,7 @@ func TestWatchStore_ReloadsOnOtherProcessWrite(t *testing.T) {
 	defer cancel()
 	go m.WatchStore(ctx)
 
-	if err := RecordHookStatus(otherProcess(t, m), sess.ID, StatusRunning); err != nil {
+	if err := RecordHookStatus(otherProcess(t, m), sess.ID, ActivityRunning); err != nil {
 		t.Fatalf("RecordHookStatus: %v", err)
 	}
 	deadline := time.Now().Add(3 * time.Second)

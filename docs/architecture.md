@@ -17,7 +17,7 @@ store（`{DataDir}/deck.db`）が deck セッションの信頼できる唯一�
 
 - store が書く項目（Status, SessionChain, PID, ワークスペース, エラーメッセージ等）は、`Reload` のたびに store に従う
 - JSONL と jj から TUI が投影する項目（Prompt, LastActivity, BookmarkName 等）は、セッションが初めてメモリに現れるときだけ store から読む。以後はメモリの値が新しく、`PersistAll` が store に書く
-- JSONL から発見した外部セッション（Unmanaged）は store に入れず、メモリだけに持つ。`ResumeSession` で再開するときに `adoptExternal` が終了済みの deck セッションとして store に入れる
+- JSONL から発見した外部セッション（Origin が External）は store に入れず、メモリだけに持つ。`ResumeSession` で再開するときに `adoptExternal` が終了済みの deck セッションとして store に入れる
 
 `Manager.WatchStore` が `PRAGMA data_version` を 200ms ごとに見て、他プロセスがコミットしたときに `Reload` を呼ぶ。`data_version` は接続ごとの値なので、専用の接続で読む。
 
@@ -152,7 +152,7 @@ Claude Code 2.1.305 が書いた `~/.claude/projects` の JSONL を読んで確�
   3. DiscoverExternalSessions()        // 新規外部セッション取り込み
      - usage.ListAllSessions(14日, 30件, offset)
      - known セットで除外: 追跡中の全セッションの SessionChain（過去の ID を含む）
-     - newExternalSession() で StatusUnmanaged セッション作成
+     - newExternalSession() で Origin が External のセッション作成
      - offset++ (次のページ)
 ```
 

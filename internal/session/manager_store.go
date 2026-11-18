@@ -48,6 +48,19 @@ func legacySessionsDir(dataDir string) string {
 	return filepath.Join(dataDir, "sessions")
 }
 
+// legacyStatus maps the status number of the old sessions/*.json files to a
+// Status. It reports false for an external session (6), which is not imported,
+// and for numbers it does not know.
+// WHY 表で写す: 旧形式は Status の iota の値をそのまま書いていた。いまの Status は並びが違う
+// （ゼロ値が Unknown）ので、Status(n) とキャストすると別の値になる。
+func legacyStatus(n int) (Status, bool) {
+	s, ok := map[int]Status{
+		0: StatusRunning, 1: StatusWaitingApproval, 2: StatusWaitingAnswer,
+		3: StatusCompleted, 4: StatusError, 5: StatusIdle, 7: StatusSubagentRunning,
+	}[n]
+	return s, ok
+}
+
 // migrateLegacyStore imports dataDir/sessions/*.json into an empty store, then
 // renames the directory so the import runs only once.
 func migrateLegacyStore(st *store.Store, dataDir string) error {
@@ -74,9 +87,11 @@ func migrateLegacyStore(st *store.Store, dataDir string) error {
 			continue
 		}
 		// 外部セッションは JSONL から毎回発見し直すもので、store には持たない。
-		if s.Status == StatusUnmanaged {
+		status, ok := legacyStatus(int(s.Status))
+		if !ok {
 			continue
 		}
+		s.Status = status
 		recs = append(recs, s.recordLocked())
 	}
 
@@ -140,7 +155,7 @@ func (m *Manager) Reload() {
 		switch {
 		case inStore:
 			sess.applyControlRecordLocked(r)
-		case sess.Status == StatusUnmanaged:
+		case sess.Origin == OriginExternal:
 			// 外部セッションは、同じ Claude セッションを deck セッションが持つようになったら消す
 			// （hook で ID が届く前に discovery が外部セッションとして取り込んでいた場合）。
 			for _, cid := range sess.SessionChain {
@@ -365,7 +380,9 @@ func (m *Manager) pruneOldSessions() {
 		kept = append(kept, recs[:m.config.MaxSessions]...)
 		now := time.Now()
 		for _, r := range recs[m.config.MaxSessions:] {
-			if status, ok := StatusFromID(r.Status); (ok && !status.IsTerminal()) || closingActive(r, now) {
+			// WHY Unknown も残す: この版が知らない status は新しい版が書いたもので、動いている
+			// セッションかもしれない。古い版がその行を消してはいけない。
+			if status, _ := StatusFromID(r.Status); !status.IsTerminal() || closingActive(r, now) {
 				kept = append(kept, r)
 				continue
 			}
@@ -396,10 +413,10 @@ func recordSortTime(r store.Record) time.Time {
 func (m *Manager) PersistAll() {
 	for _, s := range m.copySessionsList() {
 		s.mu.RLock()
-		status := s.Status
+		origin := s.Origin
 		src := s.recordLocked()
 		s.mu.RUnlock()
-		if status == StatusUnmanaged {
+		if origin == OriginExternal {
 			continue
 		}
 		if _, err := m.store.Update(src.ID, func(r *store.Record) error {
