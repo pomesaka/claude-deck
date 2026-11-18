@@ -9,6 +9,7 @@
 #   <DIR>/xdg/claude-deck/config.toml  data_dir=<DIR>/data、tmux の session_name=cdverify
 #   <DIR>/run.sh           隔てた環境変数で claude-deck を起動する。tmux の中で実行する
 #   <DIR>/cli.sh           run.sh と同じ環境で CLI（new、close、list）を実行する。new は tmux の中で実行する
+#   <DIR>/tmux.sh          隔てた環境で tmux を呼ぶ。tmux サーバーを起動する最初の new-session はこれで打つ
 #   <DIR>/jjrepo           セッションを作れる本物の jj リポジトリ。HOME の外に置くので、n の探索には出ない
 #   <DIR>/bin/claude       Claude Code の代わり。引数と作業フォルダを出して眠るだけ。hook は動かない
 #   <DIR>/bin/jj           本物の jj を呼ぶ。呼ばれるたびに <DIR>/jj.log に 1 行書く。<DIR>/jjlogfail があると jj log だけ失敗する
@@ -95,7 +96,14 @@ cat > "$DIR/cli.sh" <<EOF
 exec env -i HOME="$DIR/home" PATH="$DIR/bin:$TMUX_BIN_DIR:/usr/bin:/bin" TERM=xterm-256color TMUX="\$TMUX" \\
   XDG_CONFIG_HOME="$DIR/xdg" XDG_DATA_HOME="$DIR/xdgdata" "$DIR/claude-deck" "\$@"
 EOF
-chmod +x "$DIR/run.sh" "$DIR/cli.sh"
+# tmux サーバーは、起動したクライアントの環境を、アプリが new-window で作るウィンドウ（__preview__ など）に引き継ぐ。
+# 本物の HOME と CLAUDE_DECK_DATA_DIR を持ち込むと、__preview__ が本物のデータディレクトリを読む。
+cat > "$DIR/tmux.sh" <<EOF
+#!/bin/sh
+exec env -i HOME="$DIR/home" PATH="$DIR/bin:$TMUX_BIN_DIR:/usr/bin:/bin" TERM=xterm-256color \\
+  XDG_CONFIG_HOME="$DIR/xdg" XDG_DATA_HOME="$DIR/xdgdata" "$TMUX_BIN" "\$@"
+EOF
+chmod +x "$DIR/run.sh" "$DIR/cli.sh" "$DIR/tmux.sh"
 
 cd "$REPO"
 GOEXPERIMENT=jsonv2 go build -o "$DIR/claude-deck" ./cmd/claude-deck

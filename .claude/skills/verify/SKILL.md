@@ -14,8 +14,10 @@ when_to_use: TUI（internal/tui）、リポジトリの探索、起動の流れ�
 
 ```bash
 sh .claude/skills/verify/setup.sh /tmp/cdv
-tmux -L cdverify new-session -d -s run -x 160 -y 40 "/tmp/cdv/run.sh; sleep 600"
+/tmp/cdv/tmux.sh -L cdverify new-session -d -s run -x 160 -y 40 "/tmp/cdv/run.sh; sleep 600"
 ```
+
+- tmux サーバーを起動する最初の `new-session` は、`tmux` でなく `/tmp/cdv/tmux.sh` で打つ。サーバーは起動したクライアントの環境を、アプリが作るウィンドウに引き継ぐ。claude-deck の中のセッションから `tmux` で起動すると、`__preview__` が本物の `CLAUDE_DECK_DATA_DIR` と HOME で動き、本物のセッションを表示する。2 つめ以降の操作は `tmux -L cdverify` でよい。
 
 - `setup.sh` は、偽の HOME、遅くて出力が逆順の `fd`、隔てた `config.toml`、`run.sh` を作り、作業コピーを `/tmp/cdv/claude-deck` にビルドする。リポジトリの `./claude-deck` は利用者が使っているので、上書きしない。
 - 隔てる理由: 本物の HOME で起動すると、`~/.claude.json` にデータディレクトリの trust を書き、`~/.claude/settings.json` を書き換えることがある。`CLAUDE_DECK_DATA_DIR` だけでは防げない。
@@ -78,7 +80,19 @@ jq -c . /tmp/cdv/new1.json
 - レート制限の行（ヘッダーの 2 行目）は、`/tmp/cdv/data/rate-limits.json` に `{"rate_limits":{"five_hour":{"used_percentage":42,"resets_at":1900000000},"seven_day":{"used_percentage":17,"resets_at":1900500000}}}` を書くと出る。起動中に書いても出る（fsnotify）。
 - カーソルの行は、画面の 1 行目の名前と同じ名前の行で、`capture-pane -p -e` で背景 `48;5;237` が付く。`tmux -L cdverify capture-pane -p -e -t run | rg -n '48;5;237' | cut -c1-5` で行番号が出る。
 - 高さは `tmux -L cdverify resize-window -t run -x 160 -y 16` で変える。
-- 変更前の版と比べるときは、次の順に打ってビルドし、`run-old.sh` で起動する。`mkdir -p /tmp/cdv/old-src`、`git -C <リポジトリ> archive HEAD -o /tmp/cdv/old.tar`、`tar -x -C /tmp/cdv/old-src -f /tmp/cdv/old.tar`、`GOEXPERIMENT=jsonv2 go build -C /tmp/cdv/old-src -o /tmp/cdv/claude-deck-old ./cmd/claude-deck`、`sed 's#/claude-deck"#/claude-deck-old"#' /tmp/cdv/run.sh > /tmp/cdv/run-old.sh`、`chmod +x /tmp/cdv/run-old.sh`。
+- 変更前の版と比べるときは、次の順に打ってビルドし、`run-old.sh` で起動する。`mkdir -p /tmp/cdv/old-src`、`git -C <リポジトリ> archive HEAD -o /tmp/cdv/old.tar`、`tar -x -C /tmp/cdv/old-src -f /tmp/cdv/old.tar`、`GOEXPERIMENT=jsonv2 go build -C /tmp/cdv/old-src -o /tmp/cdv/claude-deck-old ./cmd/claude-deck`、`sed 's#/claude-deck"#/claude-deck-old"#' /tmp/cdv/run.sh > /tmp/cdv/run-old.sh`、`chmod +x /tmp/cdv/run-old.sh`。CLI も古い版で打つなら、同じ `sed` で `cli.sh` から `cli-old.sh` を作る。store の列を足す変更は、古い版の `cli-old.sh new` と `close` で `deck.db` に行を作ってから、新しい版を起動して読ませる。
+
+## 外部セッションを出す
+
+偽 HOME の `~/.claude/projects` に JSONL を置くと、起動中の TUI が数秒で外部セッションとして一覧に出す。`cwd` には、claude-deck が作っていない jj ワークスペースを置くと、close で消さないことも見られる（`jj workspace add` で `/tmp/cdv/extws` を作る）。
+
+```bash
+mkdir -p /tmp/cdv/home/.claude/projects/-private-tmp-cdv-extws
+printf '{"type":"user","cwd":"/private/tmp/cdv/extws","sessionId":"44444444-4444-4444-8444-444444444444","timestamp":"%s","message":{"role":"user","content":"external hello"}}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > /tmp/cdv/home/.claude/projects/-private-tmp-cdv-extws/44444444-4444-4444-8444-444444444444.jsonl
+```
+
+- `cwd` の場所で claude-deck のセッションが動いていると、外部セッションとして出ない。`/tmp/cdv/jjrepo` は `new` の行と重なりやすいので避ける。
+- 外部セッションで `r` を押すと store に取り込まれ、以後は claude-deck のセッションとして `x` で終了できる。
 
 ## 右ペインの切り替えを見る
 
@@ -105,6 +119,8 @@ tmux -L cdverify capture-pane -p -t run | head -1
 - レート制限の行を出し、行を 15 件以上にして、高さ 15〜23 で `G` の後に k と j を 1 つずつ送る。毎回カーソルの行が描かれているか。窓の見積もりを View と別に持っていた版では、高さ 16 と 22 で描かれない位置があった。
 - `slownew` を置いて終了済みの行で Enter を押し、完了前に j で動かすか、フィルタを変える。完了後にフィルタが解け、カーソル、1 行目、選ばれたウィンドウが再開した行になるか。
 - `?` の直後や再開中に `C-c` を押し、3 秒以上待つ。「終了しますか? (y/n)」が残るか。
+- store の `status` を `sqlite3` で知らない値（`bogus`）にする。落ちずに暗い印で出て、`x` で終了でき、`r` で再開できず、`claude-deck hook status idle` で上書きされないか。
+- 外部セッションを `r` で取り込んでから `x` で閉じる。`cwd` の jj ワークスペースが残るか（`jj workspace list` と `jj.log` に `workspace forget` が無いこと）。
 - `x` のステータス行は 5 秒ほどで消え、幅で切れる。`tmux -L cdverify resize-window -t run -x 60` で狭くして見る。
 
 ## 止める
