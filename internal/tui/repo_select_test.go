@@ -221,7 +221,7 @@ func TestRepoSelect(t *testing.T) {
 				h.open()
 				h.fail()
 			},
-			want: want{mode: viewSelectRepo, shown: []string{"/r/a", "/r/b"}, status: "リポジトリ検索エラー"},
+			want: want{mode: viewSelectRepo, shown: []string{"/r/a", "/r/b"}, status: "Repository search failed"},
 		},
 		{
 			name: "開いているときに失敗し、候補が無ければダッシュボードに戻る",
@@ -229,7 +229,7 @@ func TestRepoSelect(t *testing.T) {
 				h.open()
 				h.fail()
 			},
-			want: want{mode: viewDashboard, status: "リポジトリ検索エラー"},
+			want: want{mode: viewDashboard, status: "Repository search failed"},
 		},
 		{
 			name: "閉じた後に届いた結果は、画面を変えず次に開いたときに出る",

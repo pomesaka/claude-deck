@@ -167,7 +167,7 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 
 	case "?":
-		return m.flash("j/k:移動 gg/G:先頭/末尾 /:フィルタ tab:要注意 n:新規 Enter/r:再開 f:フォーク t:ターミナル p:ピン x:終了 R:再描画 C-c:quit")
+		return m.flash("j/k:move gg/G:top/bottom /:filter tab:next waiting n:new Enter/r:resume f:fork t:terminal p:pin x:close R:redraw C-c:quit")
 	}
 
 	return tea.Batch(cmds...)
@@ -291,12 +291,12 @@ func (m *Model) resumeSelected() tea.Cmd {
 	}
 	if snap := sess.Snapshot(); !snap.CanResume() {
 		if snap.Status == session.StatusUnknown {
-			return m.flash("状態が不明なため再開できません")
+			return m.flash("Cannot resume: unknown status")
 		}
-		return m.flash("実行中のセッションは再開できません")
+		return m.flash("Cannot resume a running session")
 	}
 
-	m.setStatus("セッション再開中...")
+	m.setStatus("Resuming...")
 	mgr := m.manager
 	ctx := m.ctx
 	id := m.selectedID
@@ -318,10 +318,10 @@ func (m *Model) forkSelected() tea.Cmd {
 
 	snap := sess.Snapshot()
 	if snap.RuntimeSessionID == "" {
-		return m.flash("RuntimeSessionID がないためフォークできません")
+		return m.flash("Cannot fork: no conversation yet")
 	}
 
-	m.setStatus("セッションフォーク中...")
+	m.setStatus("Forking...")
 	mgr := m.manager
 	ctx := m.ctx
 	id := m.selectedID
@@ -349,12 +349,12 @@ func (m *Model) killSelected() tea.Cmd {
 	}
 	// 外部セッションは store に無く、claude-deck が起動したプロセスでもないので終了できない。
 	if sess := m.manager.GetSession(m.selectedID); sess != nil && sess.Snapshot().Origin == session.OriginExternal {
-		return m.flash("外部セッションは終了できません")
+		return m.flash("Cannot close an external session")
 	}
 	sid := m.selectedID
 	mgr := m.manager
 	m.killing = true
-	m.setStatus("セッション終了中...")
+	m.setStatus("Closing...")
 	return func() tea.Msg {
 		res, err := mgr.Kill(sid)
 		return sessionKilledMsg{result: res, err: err}
@@ -375,7 +375,7 @@ func (m *Model) togglePinSelected() tea.Cmd {
 	// resume 以外の経路から取り込みが起きる。メモリだけに持つと、外部セッションは発見の
 	// たびに ID が変わるのでピンが残らない。
 	if snap.Origin == session.OriginExternal {
-		return m.flash("外部セッションはピンできません")
+		return m.flash("Cannot pin an external session")
 	}
 	mgr := m.manager
 	return func() tea.Msg {
@@ -395,17 +395,17 @@ func (m *Model) openTerminal() tea.Cmd {
 	snap := sess.Snapshot()
 	workDir := snap.WorkDir()
 	if workDir == "" {
-		return m.flash("作業ディレクトリが不明です")
+		return m.flash("No working directory")
 	}
 	if _, err := os.Stat(workDir); os.IsNotExist(err) {
-		return m.flash(fmt.Sprintf("ディレクトリが見つかりません: %s", workDir))
+		return m.flash(fmt.Sprintf("Directory not found: %s", workDir))
 	}
 	ghosttyTitle := snap.BookmarkName
 	if ghosttyTitle == "" {
 		ghosttyTitle = snap.TerminalTitle
 	}
 	if err := m.ghostty.Open(workDir, ghosttyTitle); err != nil {
-		return m.flash(fmt.Sprintf("ターミナル起動エラー: %v", err))
+		return m.flash(fmt.Sprintf("Terminal failed: %v", err))
 	}
-	return m.flash(fmt.Sprintf("ターミナルを開きました: %s", workDir))
+	return m.flash(fmt.Sprintf("Opened a terminal: %s", workDir))
 }

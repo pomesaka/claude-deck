@@ -14,14 +14,14 @@ func TestStatus_String(t *testing.T) {
 		want   string
 	}{
 		{StatusRunning, "Running"},
-		{StatusWaitingApproval, "Approve待ち"},
-		{StatusWaitingAnswer, "質問待ち"},
-		{StatusCompleted, "完了"},
-		{StatusError, "エラー"},
-		{StatusIdle, "アイドル"},
-		{StatusSubagentRunning, "サブエージェント実行中"},
-		{StatusUnknown, "不明"},
-		{Status(99), "不明"},
+		{StatusWaitingApproval, "waiting for approval"},
+		{StatusWaitingAnswer, "waiting for an answer"},
+		{StatusCompleted, "completed"},
+		{StatusError, "error"},
+		{StatusIdle, "idle"},
+		{StatusSubagentRunning, "subagents running"},
+		{StatusUnknown, "unknown"},
+		{Status(99), "unknown"},
 	}
 	for _, tt := range tests {
 		if got := tt.status.String(); got != tt.want {

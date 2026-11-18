@@ -253,7 +253,7 @@ func (m *Manager) LoadExisting() error {
 		if status, ok := StatusFromID(r.Status); ok && status == StatusCompleted {
 			if workDir := isolationFromRecord(r).workDirOr(r.RepoPath); workDir != "" {
 				if _, statErr := os.Stat(workDir); os.IsNotExist(statErr) {
-					msg := fmt.Sprintf("ディレクトリが見つかりません: %s", workDir)
+					msg := fmt.Sprintf("directory not found: %s", workDir)
 					if _, err := m.store.Update(r.ID, func(r *store.Record) error {
 						setError(r, msg, time.Now())
 						return nil

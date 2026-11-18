@@ -132,10 +132,10 @@ func editProjectClaudeArgs(data []byte, repoPath string, args []string) ([]byte,
 
 	var after map[string]any
 	if err := toml.Unmarshal(out, &after); err != nil {
-		return nil, fmt.Errorf("%s を書き換えられない形の設定です。config.toml を手で編集してください: %w", claudeArgsKey, err)
+		return nil, fmt.Errorf("%s is in a form that cannot be rewritten; edit config.toml by hand: %w", claudeArgsKey, err)
 	}
 	if !reflect.DeepEqual(withClaudeArgs(before, repoPath, args), after) {
-		return nil, fmt.Errorf("%s を書き換えられない形の設定です。config.toml を手で編集してください", claudeArgsKey)
+		return nil, fmt.Errorf("%s is in a form that cannot be rewritten; edit config.toml by hand", claudeArgsKey)
 	}
 	return out, nil
 }

@@ -39,7 +39,7 @@ func TestRenderTree(t *testing.T) {
 				snap("a", "anna-8cc7", "deck", session.StatusIdle, "", "11111111-aaaa"),
 			},
 			want: "deck\n" +
-				"└─ 11111111  anna-8cc7  現在 idle\n",
+				"└─ 11111111  anna-8cc7  ← idle\n",
 		},
 		{
 			name: "cleared twice",
@@ -49,7 +49,7 @@ func TestRenderTree(t *testing.T) {
 			want: "deck\n" +
 				"└─ 11111111  anna-8cc7\n" +
 				"   └─ 22222222  /clear\n" +
-				"      └─ 33333333  /clear  現在 running\n",
+				"      └─ 33333333  /clear  ← running\n",
 		},
 		{
 			name: "fork from a context that was cleared afterwards",
@@ -61,10 +61,10 @@ func TestRenderTree(t *testing.T) {
 			want: "deck\n" +
 				"└─ 11111111  anna-8cc7\n" +
 				"   └─ 22222222  /clear\n" +
-				"      ├─ 33333333  /clear  現在 running\n" +
+				"      ├─ 33333333  /clear  ← running\n" +
 				"      ├─ 44444444  fork  maika-1a96\n" +
-				"      │  └─ 55555555  /clear  現在 completed\n" +
-				"      └─ 66666666  fork  risa-e68d  現在 idle\n",
+				"      │  └─ 55555555  /clear  ← completed\n" +
+				"      └─ 66666666  fork  risa-e68d  ← idle\n",
 		},
 		{
 			name: "fork of a fork, listed before its parent",
@@ -74,9 +74,9 @@ func TestRenderTree(t *testing.T) {
 				snap("a", "anna-8cc7", "deck", session.StatusCompleted, "", "11111111-aaaa"),
 			},
 			want: "deck\n" +
-				"└─ 11111111  anna-8cc7  現在 completed\n" +
-				"   └─ 44444444  fork  maika-1a96  現在 completed\n" +
-				"      └─ 66666666  fork  risa-e68d  現在 idle\n",
+				"└─ 11111111  anna-8cc7  ← completed\n" +
+				"   └─ 44444444  fork  maika-1a96  ← completed\n" +
+				"      └─ 66666666  fork  risa-e68d  ← idle\n",
 		},
 		{
 			name: "fork whose source is gone",
@@ -84,7 +84,7 @@ func TestRenderTree(t *testing.T) {
 				snap("b", "maika-1a96", "deck", session.StatusIdle, "99999999-zzzz", "44444444-bbbb"),
 			},
 			want: "deck\n" +
-				"└─ 44444444  fork（分岐元 99999999 は一覧に無い）  maika-1a96  現在 idle\n",
+				"└─ 44444444  fork (source 99999999 not listed)  maika-1a96  ← idle\n",
 		},
 		{
 			name: "session whose ID has not arrived, and a second repository",
@@ -94,10 +94,10 @@ func TestRenderTree(t *testing.T) {
 				snap("d", "iori-b4bd", "deck", session.StatusCompleted, "", "88888888-dddd"),
 			},
 			want: "deck\n" +
-				"├─ (ID なし)  anna-8cc7  現在 idle\n" +
-				"└─ 88888888  iori-b4bd  現在 completed\n" +
+				"├─ (no ID)  anna-8cc7  ← idle\n" +
+				"└─ 88888888  iori-b4bd  ← completed\n" +
 				"meguru\n" +
-				"└─ 77777777  hana-08c0  現在 idle\n",
+				"└─ 77777777  hana-08c0  ← idle\n",
 		},
 	}
 	for _, tt := range tests {

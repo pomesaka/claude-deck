@@ -299,7 +299,7 @@ func (m *Manager) startNewSession(sess *Session, workDir string, spec agentrunti
 	// 意図しない場所で動き始める。サブプロジェクトのディレクトリが、ワークスペースを作った
 	// リポジトリに含まれていないときに起きる（外側に別の jj リポジトリがある場合など）。
 	if info, err := os.Stat(workDir); err != nil || !info.IsDir() {
-		return fmt.Errorf("作業ディレクトリが見つかりません: %s", workDir)
+		return fmt.Errorf("working directory not found: %s", workDir)
 	}
 	sess.mu.RLock()
 	rec := sess.recordLocked()
@@ -341,7 +341,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	sess := NewSession(repoPath, repoName)
 
 	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("リポジトリが見つかりません: %s", repoPath)
+		return nil, fmt.Errorf("repository not found: %s", repoPath)
 	}
 
 	var actualWorkDir string
@@ -526,7 +526,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 			// WHY NOT 本体リポジトリで起動する: ワークスペースで隔離していたセッションが、利用者の
 			// 作業コピーを直接書き換えることになる。一覧の表示からはその違いが分からない。
 			debuglog.Printf("[ResumeSession] workspace recreate failed: %v", err)
-			return fail(fmt.Errorf("ワークスペースを作り直せません: %w", err), true)
+			return fail(fmt.Errorf("cannot recreate the workspace: %w", err), true)
 		}
 		iso = WorkspaceIsolation(newWsPath)
 		if _, err := m.store.Update(string(sessionID), func(r *store.Record) error {
@@ -545,7 +545,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 
 	if _, err := os.Stat(workDir); os.IsNotExist(err) {
 		debuglog.Printf("[ResumeSession] workDir does not exist: %s", workDir)
-		return fail(fmt.Errorf("ディレクトリが見つかりません: %s", workDir), true)
+		return fail(fmt.Errorf("directory not found: %s", workDir), true)
 	}
 
 	spec := m.startSpec(agentruntime.LaunchResume, RuntimeSessionID(csID), workDir, rec.Name, rec.RepoPath)
@@ -608,15 +608,15 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	srcSess.mu.RUnlock()
 
 	if srcClaudeID == "" {
-		return nil, fmt.Errorf("ソースセッションに ClaudeSessionID がありません")
+		return nil, fmt.Errorf("the source session has no conversation yet")
 	}
 
 	if repoPath == "" {
-		return nil, fmt.Errorf("ソースセッションにリポジトリパスがありません")
+		return nil, fmt.Errorf("the source session has no repository path")
 	}
 
 	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("リポジトリが見つかりません: %s", repoPath)
+		return nil, fmt.Errorf("repository not found: %s", repoPath)
 	}
 
 	repoName := filepath.Base(repoPath)

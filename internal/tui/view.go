@@ -16,7 +16,7 @@ import (
 // View renders the TUI.
 func (m Model) View() tea.View {
 	if m.quitting {
-		return tea.NewView("claude-deck を終了します。\n")
+		return tea.NewView("Quitting claude-deck.\n")
 	}
 
 	// WindowSizeMsg 未受信の状態でレンダリングすると cellbuf に壊れたセルが残る
@@ -209,9 +209,9 @@ func (m Model) renderSessionList(width, height int) (string, []sessionRow) {
 	if len(snaps) == 0 {
 		var msg string
 		if m.filterText != "" || m.filterActive {
-			msg = dimStyle.Render("一致するセッションなし")
+			msg = dimStyle.Render("No matching sessions")
 		} else {
-			msg = dimStyle.Render("セッションなし。'n'で新規作成")
+			msg = dimStyle.Render("No sessions. Press 'n' to start one")
 		}
 		if filterBar != "" {
 			content := lipgloss.JoinVertical(lipgloss.Left, msg, filterBar)
@@ -225,7 +225,7 @@ func (m Model) renderSessionList(width, height int) (string, []sessionRow) {
 	var items []string
 
 	if win.hasAbove {
-		items = append(items, dimStyle.Render(fmt.Sprintf("  ↑ 他%d件", win.start)))
+		items = append(items, dimStyle.Render(fmt.Sprintf("  ↑ %d more", win.start)))
 	}
 
 	// リストペインのコンテンツ幅: border(2) + padding(2) を引く
@@ -248,7 +248,7 @@ func (m Model) renderSessionList(width, height int) (string, []sessionRow) {
 	}
 
 	if remaining := len(snaps) - win.end; remaining > 0 {
-		items = append(items, dimStyle.Render(fmt.Sprintf("  ↓ 他%d件", remaining)))
+		items = append(items, dimStyle.Render(fmt.Sprintf("  ↓ %d more", remaining)))
 	}
 
 	if filterBar != "" {
@@ -344,7 +344,7 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 		statusIcon = selBg(statusErrorStyle, selected).Render("●")
 		statusMessage = snap.ErrorMessage
 		if statusMessage == "" {
-			statusMessage = "エラー"
+			statusMessage = "error"
 		}
 	default:
 		statusIcon = selBg(dimStyle, selected).Render("●")
@@ -418,7 +418,7 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 
 func (m Model) renderFooter() string {
 	if m.prompt == promptQuit {
-		return footerStyle.Render(statusApproveStyle.Render("終了しますか? (y/n)"))
+		return footerStyle.Render(statusApproveStyle.Render("Quit? (y/n)"))
 	}
 	// When a status message is active, show it exclusively — no help text.
 	if m.statusMsg != "" {
@@ -427,13 +427,13 @@ func (m Model) renderFooter() string {
 
 	var helpText string
 	if m.mode == viewSelectRepo {
-		helpText = "Enter:ワークスペース作成+起動 C-Enter:直接起動 Esc:戻る"
+		helpText = "Enter:new workspace C-Enter:run in place Esc:back"
 	} else if m.filterActive {
-		helpText = "Enter:確定 Esc:キャンセル"
+		helpText = "Enter:apply Esc:cancel"
 	} else if m.filterText != "" {
-		helpText = fmt.Sprintf("フィルタ: %s / Esc:解除 ?:ヘルプ", m.filterText)
+		helpText = fmt.Sprintf("Filter: %s / Esc:clear ?:help", m.filterText)
 	} else {
-		helpText = "j/k:移動 gg/G:先頭/末尾 /:フィルタ n:新規 Enter:入力 r:再開 f:フォーク t:ターミナル R:再描画 x:終了 C-c:quit"
+		helpText = "j/k:move gg/G:top/bottom /:filter n:new Enter:open r:resume f:fork t:terminal R:redraw x:close C-c:quit"
 	}
 	return footerStyle.Render(dimStyle.Render(helpText))
 }

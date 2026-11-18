@@ -177,7 +177,7 @@ func findProjectDirs(fdPath, repoRoot string, markers, excludes []string) ([]str
 // filter keys are disabled.
 func newRepoList() list.Model {
 	rl := list.New(nil, newRepoDelegate(), 80, 24)
-	rl.Title = "リポジトリ選択"
+	rl.Title = "Select a repository"
 	rl.SetShowStatusBar(true)
 	rl.SetFilteringEnabled(true)
 	rl.SetStatusBarItemName("repo", "repos")
@@ -204,7 +204,7 @@ func (m *Model) startNewSession() tea.Cmd {
 	return m.discoverRepos
 }
 
-const repoDiscoveringStatus = "リポジトリを更新中..."
+const repoDiscoveringStatus = "Refreshing repositories..."
 
 // applyRepoList stores a discovery result and, if the selector is open, swaps
 // it in while keeping what the user has typed and selected.
@@ -225,7 +225,7 @@ func (m *Model) applyRepoList(msg repoListMsg) tea.Cmd {
 		if len(m.repoItems) == 0 {
 			m.mode = viewDashboard
 		}
-		return m.flash("リポジトリ検索エラー: " + msg.err.Error())
+		return m.flash("Repository search failed: " + msg.err.Error())
 	}
 
 	// WHY: fd walks directories in parallel, so its output order changes per run.
@@ -275,7 +275,7 @@ func (m *Model) setRepoCandidates(filter, selectedDir string) {
 // selectRepo creates a session for the selected project directory.
 func (m *Model) selectRepo(item repoItem, withWorkspace bool) tea.Cmd {
 	m.mode = viewDashboard
-	m.setStatus("セッション作成中...")
+	m.setStatus("Creating session...")
 
 	mgr := m.manager
 	ctx := m.ctx

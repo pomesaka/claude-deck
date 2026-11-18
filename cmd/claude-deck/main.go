@@ -355,7 +355,7 @@ func setupGhosttySplit(cfg *config.Config) string {
 	}
 
 	if !ghostty.IsRunningInGhostty() {
-		fmt.Fprintf(os.Stderr, "  別ペインで: tmux attach-session -t %s\n", tmuxSession)
+		fmt.Fprintf(os.Stderr, "  In another pane: tmux attach-session -t %s\n", tmuxSession)
 		return ""
 	}
 

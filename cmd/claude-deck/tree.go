@@ -53,7 +53,7 @@ func renderTreeNodes(b *strings.Builder, nodes []*session.TreeNode, indent strin
 func treeNodeFields(node *session.TreeNode) []string {
 	id := shortID(node.RuntimeID)
 	if id == "" {
-		id = "(ID なし)"
+		id = "(no ID)"
 	}
 	fields := []string{id}
 	switch node.Origin {
@@ -63,13 +63,13 @@ func treeNodeFields(node *session.TreeNode) []string {
 		fields = append(fields, "/clear")
 	case session.OriginFork:
 		if node.MissingParent != "" {
-			fields = append(fields, "fork（分岐元 "+shortID(node.MissingParent)+" は一覧に無い）", node.Session.Name)
+			fields = append(fields, "fork (source "+shortID(node.MissingParent)+" not listed)", node.Session.Name)
 		} else {
 			fields = append(fields, "fork", node.Session.Name)
 		}
 	}
 	if node.IsCurrent {
-		fields = append(fields, "現在 "+node.Session.Status.ID())
+		fields = append(fields, "← "+node.Session.Status.ID())
 	}
 	return fields
 }

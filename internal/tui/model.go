@@ -302,25 +302,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionCreatedMsg:
 		if msg.err != nil {
-			cmds = append(cmds, m.flash("セッション作成エラー: "+msg.err.Error()))
+			cmds = append(cmds, m.flash("Create failed: "+msg.err.Error()))
 		} else {
-			cmds = append(cmds, m.flash("新規セッションを作成しました"))
+			cmds = append(cmds, m.flash("Session created"))
 			cmds = append(cmds, m.focusStartedSession(msg.sessionID)...)
 		}
 
 	case sessionResumedMsg:
 		if msg.err != nil {
-			cmds = append(cmds, m.flash("再開エラー: "+msg.err.Error()))
+			cmds = append(cmds, m.flash("Resume failed: "+msg.err.Error()))
 		} else {
-			cmds = append(cmds, m.flash("セッションを再開しました"))
+			cmds = append(cmds, m.flash("Session resumed"))
 			cmds = append(cmds, m.focusStartedSession(msg.sessionID)...)
 		}
 
 	case sessionForkedMsg:
 		if msg.err != nil {
-			cmds = append(cmds, m.flash("フォークエラー: "+msg.err.Error()))
+			cmds = append(cmds, m.flash("Fork failed: "+msg.err.Error()))
 		} else {
-			cmds = append(cmds, m.flash("セッションをフォークしました"))
+			cmds = append(cmds, m.flash("Session forked"))
 			cmds = append(cmds, m.focusStartedSession(msg.sessionID)...)
 		}
 
@@ -330,18 +330,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// SessionRefreshMsg を届ける。StopProcess が失敗したときも同じ。beginClose で失敗したときは何も書いていない。
 		switch {
 		case msg.err != nil:
-			cmds = append(cmds, m.flash("終了エラー: "+msg.err.Error()))
+			cmds = append(cmds, m.flash("Close failed: "+msg.err.Error()))
 		case msg.result.WorkspaceKept != "":
 			// WHY パスを出さない: 左ペインは狭く、長い文はワークスペースを残したことまで切れる。
 			// パスは claude-deck list の work_dir で分かる。
-			cmds = append(cmds, m.flash("終了。ワークスペースは残しました（jj 取り込み失敗）"))
+			cmds = append(cmds, m.flash("Closed. Workspace kept: jj could not snapshot it"))
 		default:
-			cmds = append(cmds, m.flash("セッションを終了しました"))
+			cmds = append(cmds, m.flash("Session closed"))
 		}
 
 	case pinToggledMsg:
 		if msg.err != nil {
-			cmds = append(cmds, m.flash("ピンの変更エラー: "+msg.err.Error()))
+			cmds = append(cmds, m.flash("Pin failed: "+msg.err.Error()))
 		}
 
 	case repoListMsg:

@@ -182,7 +182,7 @@ func runCLI(name string, args []string) error {
 		repoPath, workingDir, isJJ := session.ResolveLaunchDir(req.Dir)
 		withWorkspace := !req.NoWorkspace
 		if withWorkspace && !isJJ {
-			return fmt.Errorf("%s は jj リポジトリではないためワークスペースを作れません（--no-workspace で直接起動できます）", req.Dir)
+			return fmt.Errorf("%s is not a jj repository, so no workspace can be made (use --no-workspace to run in place)", req.Dir)
 		}
 		sess, err := mgr.CreateSession(ctx, repoPath, workingDir, withWorkspace)
 		if err != nil {
@@ -199,7 +199,7 @@ func runCLI(name string, args []string) error {
 			return err
 		}
 		if res.WorkspaceKept != "" {
-			fmt.Fprintf(os.Stderr, "warning: jj に作業コピーを取り込めなかったので、ワークスペースを残しました: %s\n", res.WorkspaceKept)
+			fmt.Fprintf(os.Stderr, "warning: jj could not snapshot the working copy, so the workspace was kept: %s\n", res.WorkspaceKept)
 		}
 		return printJSON(infoFromSnapshot(sess.Snapshot()))
 	default:
@@ -211,11 +211,11 @@ func parseNewArgs(args []string) (cliRequest, error) {
 	fs := flag.NewFlagSet("new", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: claude-deck new [--dir DIR] [--no-workspace]")
-		fmt.Fprintln(fs.Output(), "TUI で n を押したときと同じく新しいセッションを作り、JSON で返す。TUI が起動していなくてもよい。")
+		fmt.Fprintln(fs.Output(), "Creates a session as n does in the TUI and prints it as JSON. The TUI need not be running.")
 		fs.PrintDefaults()
 	}
-	dir := fs.String("dir", "", "セッションを起動するディレクトリ（既定: カレントディレクトリ）。jj ワークスペース内なら本体リポジトリの同じ位置に解決する")
-	noWorkspace := fs.Bool("no-workspace", false, "jj ワークスペースを作らずに直接起動する（TUI の C-Enter）")
+	dir := fs.String("dir", "", "directory to start the session in (default: current directory); inside a jj workspace it resolves to the same place in the main repository")
+	noWorkspace := fs.Bool("no-workspace", false, "run in the directory without a jj workspace (C-Enter in the TUI)")
 	if err := fs.Parse(args); err != nil {
 		return cliRequest{}, err
 	}
@@ -233,10 +233,10 @@ func parseListArgs(args []string) (cliRequest, error) {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: claude-deck list [--alias TEXT]")
-		fmt.Fprintln(fs.Output(), "claude-deck のセッションを TUI の一覧と同じ順で JSON で返す。外部セッションは含まない。")
+		fmt.Fprintln(fs.Output(), "Prints the claude-deck sessions as JSON, in the order of the TUI list. External sessions are not included.")
 		fs.PrintDefaults()
 	}
-	alias := fs.String("alias", "", "エイリアスにこの文字列を含むセッションだけを返す（大文字と小文字は区別しない）")
+	alias := fs.String("alias", "", "only sessions whose alias contains this text (case-insensitive)")
 	if err := fs.Parse(args); err != nil {
 		return cliRequest{}, err
 	}
@@ -258,7 +258,7 @@ func parseTreeArgs(args []string) (cliRequest, error) {
 	fs := flag.NewFlagSet("tree", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: claude-deck tree")
-		fmt.Fprintln(fs.Output(), "Claude Code のセッションを、/clear とフォークの親子関係でたどった木としてテキストで出す。同じ内容の JSON は list の session_chain と forked_from。")
+		fmt.Fprintln(fs.Output(), "Prints the Claude Code sessions as a tree of /clear and fork. The same data is in session_chain and forked_from of list.")
 	}
 	if err := fs.Parse(args); err != nil {
 		return cliRequest{}, err
@@ -273,7 +273,7 @@ func parseCloseArgs(args []string) (cliRequest, error) {
 	fs := flag.NewFlagSet("close", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: claude-deck close <ID|NAME>")
-		fmt.Fprintln(fs.Output(), "TUI で x を押したときと同じくプロセスを止めてワークスペースを消す。r で再開できる。")
+		fmt.Fprintln(fs.Output(), "Stops the process and removes the workspace as x does in the TUI. r resumes it.")
 	}
 	if err := fs.Parse(args); err != nil {
 		return cliRequest{}, err
@@ -289,10 +289,10 @@ func parseAliasArgs(args []string) (cliRequest, error) {
 	fs := flag.NewFlagSet("alias", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: claude-deck alias [--session ID|NAME] <ALIAS>")
-		fmt.Fprintln(fs.Output(), "セッションに表示用の名前を付け、JSON で返す。TUI の一覧にセッション名の代わりに出る。使えるのは英数字と - _ . で 40 文字まで。ALIAS を空文字にすると消す。")
+		fmt.Fprintln(fs.Output(), "Gives a session a display name and prints it as JSON. Letters, digits, - _ . and up to 40 characters. An empty ALIAS removes it.")
 		fs.PrintDefaults()
 	}
-	target := fs.String("session", os.Getenv(session.EnvSessionID), "対象のセッションの ID か名前（既定: $"+session.EnvSessionID+" = 自分のセッション）")
+	target := fs.String("session", os.Getenv(session.EnvSessionID), "ID or name of the session (default: $"+session.EnvSessionID+", this session)")
 	if err := fs.Parse(args); err != nil {
 		return cliRequest{}, err
 	}
@@ -310,10 +310,10 @@ func parseGCArgs(args []string) (cliRequest, error) {
 	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: claude-deck gc [--dry-run]")
-		fmt.Fprintln(fs.Output(), "どのセッションのものでもないワークスペースと、消えたワークスペースについての Claude Code の記録を消し、JSON で返す。")
+		fmt.Fprintln(fs.Output(), "Removes workspaces no session owns, and Claude Code's records about removed workspaces, and prints them as JSON.")
 		fs.PrintDefaults()
 	}
-	dryRun := fs.Bool("dry-run", false, "消さずに、消す対象だけを返す")
+	dryRun := fs.Bool("dry-run", false, "print what would be removed without removing it")
 	if err := fs.Parse(args); err != nil {
 		return cliRequest{}, err
 	}
@@ -357,7 +357,7 @@ func parseProjectArgs(args []string) (cliRequest, error) {
 		fs := flag.NewFlagSet("project list", flag.ContinueOnError)
 		fs.Usage = func() {
 			fmt.Fprintln(fs.Output(), "Usage: claude-deck project list")
-			fmt.Fprintln(fs.Output(), "config.toml の [projects] にあるプロジェクトごとの設定を JSON で返す。")
+			fmt.Fprintln(fs.Output(), "Prints the per-project settings in [projects] of config.toml as JSON.")
 		}
 		if err := fs.Parse(args[1:]); err != nil {
 			return cliRequest{}, err
@@ -370,11 +370,11 @@ func parseProjectArgs(args []string) (cliRequest, error) {
 		fs := flag.NewFlagSet("project args", flag.ContinueOnError)
 		fs.Usage = func() {
 			fmt.Fprintln(fs.Output(), "Usage: claude-deck project args [--clear] <DIR> [-- <ARG>...]")
-			fmt.Fprintln(fs.Output(), "DIR のリポジトリで Claude Code を起動するときに足す引数（config.toml の claude_args）を読み書きし、JSON で返す。")
-			fmt.Fprintln(fs.Output(), "-- の後ろに引数を書くと置き換え、--clear で消し、どちらも無ければ今の設定を返す。次に起動・再開・フォークするセッションから効く。")
+			fmt.Fprintln(fs.Output(), "Reads or writes the arguments added when Claude Code starts in the repository DIR (claude_args in config.toml), and prints them as JSON.")
+			fmt.Fprintln(fs.Output(), "Arguments after -- replace them, --clear removes them, and neither prints them. They apply from the next start, resume or fork.")
 			fs.PrintDefaults()
 		}
-		clear := fs.Bool("clear", false, "設定を消す")
+		clear := fs.Bool("clear", false, "remove the setting")
 		if err := fs.Parse(args[1:]); err != nil {
 			return cliRequest{}, err
 		}
@@ -456,7 +456,7 @@ func parseHookArgs(args []string) (cliRequest, error) {
 	}
 	req := cliRequest{Op: "hook", HookEvent: args[0]}
 	fs := flag.NewFlagSet("hook "+args[0], flag.ContinueOnError)
-	fs.StringVar(&req.Session, "session", os.Getenv(session.EnvSessionID), "deck session ID（既定: $"+session.EnvSessionID+"）")
+	fs.StringVar(&req.Session, "session", os.Getenv(session.EnvSessionID), "deck session ID (default: $"+session.EnvSessionID+")")
 	switch req.HookEvent {
 	case hookStatus:
 		if len(args) < 2 {
@@ -469,8 +469,8 @@ func parseHookArgs(args []string) (cliRequest, error) {
 		req.Activity = a
 		args = args[2:]
 	case hookSessionStart:
-		fs.StringVar(&req.ClaudeSessionID, "claude-session-id", "", "Claude Code のセッション ID")
-		fs.StringVar(&req.Source, "source", "", "SessionStart の source（startup / resume / fork / clear / compact）")
+		fs.StringVar(&req.ClaudeSessionID, "claude-session-id", "", "Claude Code session ID")
+		fs.StringVar(&req.Source, "source", "", "source of SessionStart (startup / resume / fork / clear / compact)")
 		args = args[1:]
 	case hookExited:
 		args = args[1:]

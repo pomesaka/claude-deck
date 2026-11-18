@@ -356,7 +356,7 @@ func (m PreviewModel) render() string {
 	if m.spec.Display == "" {
 		return lipgloss.NewStyle().
 			Width(m.width).Height(m.height).
-			Render(dimStyle.Render("セッションを選択してください"))
+			Render(dimStyle.Render("Select a session"))
 	}
 
 	innerWidth := m.width - 2
@@ -371,12 +371,12 @@ func (m PreviewModel) render() string {
 		// Running session — Claude Code is live in the tmux window.
 		sections = m.renderHeader(innerWidth)
 		sections = append(sections, "")
-		sections = append(sections, dimStyle.Render("  tmux ウィンドウで表示中"))
+		sections = append(sections, dimStyle.Render("  Shown in its tmux window"))
 		if m.spec.CurrentTool != "" {
 			sections = append(sections, statusRunningStyle.Render(truncate(fmt.Sprintf("   🔧 %s", m.spec.CurrentTool), innerWidth)))
 		}
 		if m.spec.NeedsAttention {
-			sections = append(sections, statusApproveStyle.Render(truncate("   👆 承認待ち — tmux ウィンドウで操作してください", innerWidth)))
+			sections = append(sections, statusApproveStyle.Render(truncate("   👆 Waiting for approval — answer it in the tmux window", innerWidth)))
 		}
 
 	default:
@@ -386,7 +386,7 @@ func (m PreviewModel) render() string {
 		sections = append(sections, m.logViewport.View())
 	}
 
-	footer := dimStyle.Render(truncate("  j/k スクロール  gg/G 先頭/末尾  q 終了", m.width))
+	footer := dimStyle.Render(truncate("  j/k scroll  gg/G top/bottom  q quit", m.width))
 	sections = append(sections, footer)
 
 	return lipgloss.JoinVertical(lipgloss.Left, sections...)
@@ -397,7 +397,7 @@ func (m PreviewModel) renderHeader(innerWidth int) []string {
 
 	title := fmt.Sprintf("📋 %s (%s)", m.spec.Name, m.spec.RepoName)
 	h = append(h, titleStyle.Render(truncate(title, innerWidth)))
-	h = append(h, dimStyle.Render(truncate(fmt.Sprintf("   パス: %s", m.spec.WorkspacePath), innerWidth)))
+	h = append(h, dimStyle.Render(truncate(fmt.Sprintf("   Path: %s", m.spec.WorkspacePath), innerWidth)))
 
 	idLine := fmt.Sprintf("   ID: %s  Runtime: %s", m.spec.DeckSessionID, m.spec.RuntimeSessionID)
 	if m.spec.ClearCount > 0 {
@@ -409,7 +409,7 @@ func (m PreviewModel) renderHeader(innerWidth int) []string {
 		h = append(h, statusRunningStyle.Render(truncate(fmt.Sprintf("   🔧 %s", m.spec.CurrentTool), innerWidth)))
 	}
 	if m.spec.NeedsAttention {
-		h = append(h, statusApproveStyle.Render(truncate("   👆 承認待ち", innerWidth)))
+		h = append(h, statusApproveStyle.Render(truncate("   👆 Waiting for approval", innerWidth)))
 	}
 	if m.spec.Status == "error" && m.spec.ErrorMessage != "" {
 		h = append(h, statusErrorStyle.Render(truncate("   ✗ "+m.spec.ErrorMessage, innerWidth)))
@@ -464,7 +464,7 @@ func (m *PreviewModel) syncViewport() {
 		rendered := RenderLogs(m.logEntries, innerWidth, &m.logCache)
 		m.logViewport.SetContent(rendered)
 	} else {
-		m.logViewport.SetContent(dimStyle.Render("(出力なし)"))
+		m.logViewport.SetContent(dimStyle.Render("(no output)"))
 	}
 
 	if m.logFollow {

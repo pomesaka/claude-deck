@@ -28,14 +28,14 @@ const (
 )
 
 var statusInfo = map[Status]struct{ id, label string }{
-	StatusUnknown:         {"unknown", "不明"},
+	StatusUnknown:         {"unknown", "unknown"},
 	StatusRunning:         {"running", "Running"},
-	StatusWaitingApproval: {"waiting_approval", "Approve待ち"},
-	StatusWaitingAnswer:   {"waiting_answer", "質問待ち"},
-	StatusIdle:            {"idle", "アイドル"},
-	StatusSubagentRunning: {"subagent_running", "サブエージェント実行中"},
-	StatusCompleted:       {"completed", "完了"},
-	StatusError:           {"error", "エラー"},
+	StatusWaitingApproval: {"waiting_approval", "waiting for approval"},
+	StatusWaitingAnswer:   {"waiting_answer", "waiting for an answer"},
+	StatusIdle:            {"idle", "idle"},
+	StatusSubagentRunning: {"subagent_running", "subagents running"},
+	StatusCompleted:       {"completed", "completed"},
+	StatusError:           {"error", "error"},
 }
 
 func (s Status) String() string {

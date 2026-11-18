@@ -82,14 +82,14 @@ func TestUpdate_SessionKilledStatus(t *testing.T) {
 		want    []string
 		notWant []string
 	}{
-		{name: "removed", msg: sessionKilledMsg{}, want: []string{"終了しました"}, notWant: []string{"残しました"}},
+		{name: "removed", msg: sessionKilledMsg{}, want: []string{"Session closed"}, notWant: []string{"Workspace kept"}},
 		{
 			name:    "kept",
 			msg:     sessionKilledMsg{result: session.CloseResult{WorkspaceKept: "/data/workspace/x/ws"}},
-			want:    []string{"残しました"},
-			notWant: []string{"削除済"},
+			want:    []string{"Workspace kept"},
+			notWant: []string{"Session closed"},
 		},
-		{name: "error", msg: sessionKilledMsg{err: errors.New("boom")}, want: []string{"終了エラー", "boom"}},
+		{name: "error", msg: sessionKilledMsg{err: errors.New("boom")}, want: []string{"Close failed", "boom"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

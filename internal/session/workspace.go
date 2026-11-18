@@ -86,7 +86,7 @@ func (ws workspaces) cleanup(repoPath, wsName, wsRootPath string) string {
 	// close でも呼ばれる（resume では recreate が作り直す）。
 	if err := ws.jj.ForgetWorkspace(repoPath, wsName); err != nil {
 		// forget 失敗でもディレクトリ削除は続行する（jj が既に forget 済みの場合など）
-		warnings = append(warnings, fmt.Sprintf("workspace forget失敗: %v", err))
+		warnings = append(warnings, fmt.Sprintf("jj workspace forget failed: %v", err))
 	}
 	if wsRootPath != "" {
 		// 安全ガード: DataDir/workspace/ 配下のパスのみ削除する。
@@ -101,7 +101,7 @@ func (ws workspaces) cleanup(repoPath, wsName, wsRootPath string) string {
 		}
 		if strings.HasPrefix(resolved, base) {
 			if err := os.RemoveAll(wsRootPath); err != nil {
-				warnings = append(warnings, fmt.Sprintf("workspace ディレクトリ削除失敗: %v", err))
+				warnings = append(warnings, fmt.Sprintf("removing the workspace directory failed: %v", err))
 			}
 		}
 	}
@@ -302,7 +302,7 @@ func (ws workspaces) removeOrphan(wsRoot, wsName string) string {
 		// jj のワークスペースになっていないディレクトリ（作成の途中で止まったものなど）。
 		// ここで jj を呼ぶと、jj は親ディレクトリを辿って別のリポジトリを操作しうる。
 		if err := os.RemoveAll(wsRoot); err != nil {
-			return fmt.Sprintf("workspace ディレクトリ削除失敗: %v", err)
+			return fmt.Sprintf("removing the workspace directory failed: %v", err)
 		}
 		return ""
 	}

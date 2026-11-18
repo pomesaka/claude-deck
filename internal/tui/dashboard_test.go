@@ -410,7 +410,7 @@ func (d *dashboard) idOf(name string) session.DeckSessionID {
 	return ""
 }
 
-const quitPrompt = "終了しますか? (y/n)"
+const quitPrompt = "Quit? (y/n)"
 
 func TestUpdate_QuitPrompt(t *testing.T) {
 	tests := []struct {
@@ -516,14 +516,14 @@ func TestDashboard_KeysByOriginAndStatus(t *testing.T) {
 		key    string
 		want   string // part of the footer
 	}{
-		{"r on a completed session", session.OriginDeck, session.StatusCompleted, "r", "再開中"},
-		{"r on an external session adopts it", session.OriginExternal, session.StatusUnknown, "r", "再開中"},
-		{"r on an unknown status is refused", session.OriginDeck, session.StatusUnknown, "r", "状態が不明なため再開できません"},
-		{"r on a running session is refused", session.OriginDeck, session.StatusRunning, "r", "再開できません"},
-		{"Enter on a completed session resumes", session.OriginDeck, session.StatusCompleted, "enter", "再開中"},
-		{"x on an external session is refused", session.OriginExternal, session.StatusUnknown, "x", "終了できません"},
-		{"x on an unknown status closes", session.OriginDeck, session.StatusUnknown, "x", "終了中"},
-		{"p on an external session is refused", session.OriginExternal, session.StatusUnknown, "p", "ピンできません"},
+		{"r on a completed session", session.OriginDeck, session.StatusCompleted, "r", "Resuming"},
+		{"r on an external session adopts it", session.OriginExternal, session.StatusUnknown, "r", "Resuming"},
+		{"r on an unknown status is refused", session.OriginDeck, session.StatusUnknown, "r", "Cannot resume: unknown status"},
+		{"r on a running session is refused", session.OriginDeck, session.StatusRunning, "r", "Cannot resume a running session"},
+		{"Enter on a completed session resumes", session.OriginDeck, session.StatusCompleted, "enter", "Resuming"},
+		{"x on an external session is refused", session.OriginExternal, session.StatusUnknown, "x", "Cannot close an external session"},
+		{"x on an unknown status closes", session.OriginDeck, session.StatusUnknown, "x", "Closing"},
+		{"p on an external session is refused", session.OriginExternal, session.StatusUnknown, "p", "Cannot pin an external session"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
