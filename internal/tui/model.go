@@ -90,6 +90,9 @@ type Model struct {
 	// rightPaneGeneration is shared with pane-switch Cmds so stale switches cannot
 	// overwrite the latest selected session after rapid cursor movement.
 	rightPaneGeneration *atomic.Uint64
+	// rightPane runs the switches one at a time. Nil in tests that build Model
+	// directly; the switches are then dropped.
+	rightPane *rightPaneWorker
 }
 
 // SessionRefreshMsg triggers a session list refresh.
@@ -157,6 +160,14 @@ func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context) Mod
 		repoDiscovering: true,
 		discoverRepos:   discoverRepos(cfg),
 	}
+
+	dataDir := cfg.DataDir
+	m.rightPane = newRightPaneWorker(ctx, m.rightPaneGeneration, rightPaneOps{
+		focusSession: mgr.FocusSession,
+		writeSpec:    func(spec preview.PreviewSpec) error { return preview.WriteSpec(dataDir, spec) },
+		focusPreview: mgr.FocusPreviewWindow,
+		focusRight:   ghostty.FocusRight,
+	})
 
 	m.refreshSessions() // cmds discarded — bubbletea event loop not yet running
 	// カーソル初期位置を最下部（最新セッション）に設定
@@ -239,9 +250,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedID != "" {
 			if len(msg.ChangedIDs) == 0 || msg.ChangedIDs[m.selectedID] {
 				if spec := m.buildPreviewSpec(); spec.Display != "" {
-					if err := preview.WriteSpec(m.config.DataDir, spec); err != nil {
-						debuglog.Printf("[previewSpec] write: %v", err)
-					}
+					m.rightPane.submitSpec(spec, m.currentRightPaneGeneration())
 				}
 			}
 		}
@@ -264,7 +273,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// CreateSession が成功した時点で tmux window は作成済み。
 			// 作成直後は JSONL hydrate や snapshot 更新順の影響で Display が一時的に
 			// JSONL に見えることがあるため、明示操作では tmux を直接選ぶ。
-			cmds = append(cmds, m.switchRightPaneToTmux(msg.sessionID, true))
+			m.switchRightPaneToTmux(msg.sessionID, true)
 		}
 		cmds = append(cmds, clearStatusCmd())
 
@@ -274,7 +283,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusMsg = "セッションを再開しました"
 			// ResumeSession が成功した時点で tmux window は作成済み。
-			cmds = append(cmds, m.switchRightPaneToTmux(m.selectedID, true))
+			m.switchRightPaneToTmux(m.selectedID, true)
 		}
 		cmds = append(cmds, clearStatusCmd())
 
@@ -286,7 +295,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedID = msg.sessionID
 			cmds = append(cmds, m.refreshSessions()...)
 			// sessionCreatedMsg と同じ理由で tmux を直接選ぶ。
-			cmds = append(cmds, m.switchRightPaneToTmux(msg.sessionID, true))
+			m.switchRightPaneToTmux(msg.sessionID, true)
 		}
 		cmds = append(cmds, clearStatusCmd())
 
@@ -508,7 +517,7 @@ func (m *Model) updateSelected() []tea.Cmd {
 	// 右ペインを最新の状態に同期する。focusRight=false なのでカーソル移動では
 	// Ghostty のペインフォーカスは移動しない（ユーザーはリストを閲覧中）。
 	if idChanged || newDisplay != oldDisplay {
-		return []tea.Cmd{m.switchRightPane(sid, false)}
+		m.switchRightPane(sid, false)
 	}
 	return nil
 }
@@ -544,31 +553,28 @@ func (m *Model) buildPreviewSpecFromSnap(snap session.Snapshot) preview.PreviewS
 	}
 }
 
-// switchRightPane は右ペイン制御を tea.Cmd として返す。
+// switchRightPane は右ペインの切り替えを worker（rightpane.go）に渡す。
 // カーソル移動と明示的なユーザー操作（Enter/n/r/f）から使う。
 //
 // 副作用: split モードでは DisplayTmux の場合は tmux window を、DisplayJSONL の場合は
 // preview window を右ペインへ表示する。focusRight は Ghostty のキーボードフォーカス移動だけを制御する。
 //
 // display と spec は switchRightPane 呼び出し時点でキャプチャする。
-// bubbletea の Cmd は完了順が保証されないため、共有 generation を使って
-// 非同期副作用の実行直前とフォーカス移動前に stale な切り替えを破棄する。
 //
 // sid は selectedID とは限らない（sessionCreatedMsg/sessionForkedMsg は新規セッションの ID を渡す）。
 // そのため selectedSnap ではなく GetSession(sid) で直接取得する。
-func (m *Model) switchRightPane(sid session.DeckSessionID, focusRight bool) tea.Cmd {
-	sw := m.buildRightPaneSwitch(sid, focusRight)
-	return m.executeRightPaneSwitch(sw)
+func (m *Model) switchRightPane(sid session.DeckSessionID, focusRight bool) {
+	m.executeRightPaneSwitch(m.buildRightPaneSwitch(sid, focusRight))
 }
 
-func (m *Model) switchRightPaneToTmux(sid session.DeckSessionID, focusRight bool) tea.Cmd {
+func (m *Model) switchRightPaneToTmux(sid session.DeckSessionID, focusRight bool) {
 	sw := rightPaneSwitch{
 		SessionID:  sid,
 		FocusRight: focusRight,
 		Target:     rightPaneTmux,
 		Generation: m.nextRightPaneGeneration(),
 	}
-	return m.executeRightPaneSwitch(sw)
+	m.executeRightPaneSwitch(sw)
 }
 
 func (m *Model) buildRightPaneSwitch(sid session.DeckSessionID, focusRight bool) rightPaneSwitch {
@@ -607,50 +613,9 @@ func rightPaneTargetForDisplay(display session.DisplayChannel) rightPaneTarget {
 	return rightPanePreview
 }
 
-func (m *Model) executeRightPaneSwitch(sw rightPaneSwitch) tea.Cmd {
-	if !m.shouldApplyRightPaneSwitch(sw) {
-		return nil
-	}
-
-	latest := m.rightPaneGeneration
-	dataDir := m.config.DataDir
-	mgr := m.manager
-	return func() tea.Msg {
-		if latest != nil && latest.Load() != sw.Generation {
-			return nil
-		}
-		if sw.Target == rightPaneTmux {
-			if err := mgr.FocusSession(sw.SessionID); err != nil {
-				debuglog.Printf("[switchRightPane] tmux focus session=%s: %v", sw.SessionID, err)
-			}
-			if latest != nil && latest.Load() != sw.Generation {
-				return nil
-			}
-			if sw.FocusRight {
-				if err := ghostty.FocusRight(); err != nil {
-					debuglog.Printf("[switchRightPane] ghostty focus right: %v", err)
-				}
-			}
-			return nil
-		}
-		if err := preview.WriteSpec(dataDir, sw.Spec); err != nil {
-			debuglog.Printf("[switchRightPane] preview IPC: %v", err)
-		}
-		if latest != nil && latest.Load() != sw.Generation {
-			return nil
-		}
-		if err := mgr.FocusPreviewWindow(); err != nil {
-			debuglog.Printf("[switchRightPane] tmux focus preview: %v", err)
-		}
-		if latest != nil && latest.Load() != sw.Generation {
-			return nil
-		}
-		if sw.FocusRight {
-			if err := ghostty.FocusRight(); err != nil {
-				debuglog.Printf("[switchRightPane] ghostty focus right: %v", err)
-			}
-		}
-		return nil
+func (m *Model) executeRightPaneSwitch(sw rightPaneSwitch) {
+	if m.shouldApplyRightPaneSwitch(sw) {
+		m.rightPane.submit(sw)
 	}
 }
 
@@ -662,6 +627,15 @@ func (m *Model) shouldApplyRightPaneSwitch(sw rightPaneSwitch) bool {
 		return false
 	}
 	return true
+}
+
+// currentRightPaneGeneration is the generation of the latest switch. A spec
+// rewrite carries it so that a switch requested afterwards supersedes it.
+func (m *Model) currentRightPaneGeneration() uint64 {
+	if m.rightPaneGeneration == nil {
+		return 0
+	}
+	return m.rightPaneGeneration.Load()
 }
 
 func (m *Model) nextRightPaneGeneration() uint64 {

@@ -56,7 +56,7 @@ deck セッションの状態は複数のプロセス（TUI、CLI、hook コマ�
 - **Bubble Tea Cmd で tmux / preview 切替を直接並列発行しない**: `select-window` や `preview-selection` 書き込みのように「最後の選択だけが勝つ」べき外部副作用は、単発の `tea.Cmd` をカーソル移動ごとに発行すると完了順が逆転する。世代番号チェックだけでは、外部 I/O が開始した後の後勝ちを止められない。
   <!-- importance: high | mentions: 1 | first-seen: 2026-05 -->
 
-対処: 右ペイン切替のような最新状態同期は、単一 worker / queue / coalescing loop で逐次化する。worker は「最新リクエストだけ」を読み、古いリクエストは I/O 開始前に破棄する。選択なし・repo 選択モードへの遷移も generation を進めるだけでなく、queue 上の pending request を無効化する。
+対処: 右ペイン切替のような最新状態同期は、単一 worker / queue / coalescing loop で逐次化する。worker は「最新リクエストだけ」を読み、古いリクエストは I/O 開始前に破棄する。選択なし・repo 選択モードへの遷移も generation を進めるだけでなく、queue 上の pending request を無効化する。右ペインの切り替えと、選択中のセッションの preview spec の書き直しは、`internal/tui/rightpane.go` の worker だけが行う。
 
 ## goroutine の停止
 

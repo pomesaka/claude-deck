@@ -124,7 +124,7 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.ensureCursorVisible()
 			// tab はユーザーが介入しに行く意図なので focusRight=true で
 			// Ghostty の右ペイン（tmux client）にフォーカスを移す。
-			cmds = append(cmds, m.switchRightPane(m.selectedID, true))
+			m.switchRightPane(m.selectedID, true)
 			return tea.Batch(cmds...)
 		}
 
@@ -178,7 +178,8 @@ func (m *Model) handleListKey(msg tea.KeyPressMsg) tea.Cmd {
 // focus, a finished session is resumed.
 func (m *Model) activateSelected() tea.Cmd {
 	if m.selectedDisplayChannel() == session.DisplayTmux {
-		return m.switchRightPane(m.selectedID, true)
+		m.switchRightPane(m.selectedID, true)
+		return nil
 	}
 	return m.resumeSelected()
 }
