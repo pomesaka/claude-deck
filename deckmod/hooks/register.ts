@@ -5,6 +5,8 @@ type DeckStatus = 'running' | 'idle' | 'waiting_approval' | 'waiting_answer' | '
 
 const ASK_USER_QUESTION = 'AskUserQuestion'
 const HOOK_TIMEOUT_MS = 5_000
+// How the engine starts the tool_use_id of a call a plugin raised ($.agent.spawn, $.tool.call).
+const PLUGIN_TOOL_USE_PREFIX = 'toolu_plugin_'
 
 // WHY 直列化: hook はほぼ同時に続けて発火する（tool.call の前後と PermissionRequest など）。
 // 書き込みを並行に走らせると後の状態が先に store に入り、古い状態で上書きされることがある。
@@ -117,17 +119,27 @@ export const register: Register = on => {
     return { ...result, additionalContext: [...(result.additionalContext ?? []), deckContext(env)] }
   }).catch(($, e, next) => next(e))
 
-  // A subagent's run raises no turn.start, so this is the main loop.
+  // WHY agentId で分ける: turn.start はサブエージェントの実行でも発火する（Claude Code 2.1.327 の実機で確認）。
+  // メインの開始として running にすると、メインが止まっている間に Mod が立てたエージェントの後、
+  // メインの turn.complete が来ないので running のまま残る（その報告を別の Mod が prompt.submit で止めたとき。
+  // 止められた prompt.submit では、メインの turn.start も turn.complete も発火しない。同じ版で確認）。
   on('turn.start', async ($, e, next) => {
-    inMainTurn = true
-    await setStatus($, 'running')
+    if (e.agentId === undefined) {
+      inMainTurn = true
+      await setStatus($, 'running')
+    } else if (!inMainTurn && !isWaiting()) {
+      await setStatus($, 'subagent_running')
+    }
     return next(e)
   })
 
   // next(e) holds the approval dialog and AskUserQuestion's wait: when it resolves,
   // the user has answered and Claude is working again.
+  // WHY Mod が起こした呼び出しをメインから除く: Mod の $.agent.spawn は、agentId の無い Agent の tool.call として、
+  // メインのターンの外でも届く。メインの呼び出しとして running にすると、メインの turn.complete が来ないので
+  // running のまま残る。その tool_use_id は toolu_plugin_ で始まる（Claude Code 2.1.327 の実機で確認。型定義には無い）。
   on('tool.call', async ($, e, next) => {
-    const isMain = e.agentId === undefined
+    const isMain = e.agentId === undefined && !(e.tool_use_id ?? '').startsWith(PLUGIN_TOOL_USE_PREFIX)
     if (isMain) inMainTurn = true
     inFlight++
     try {
@@ -142,8 +154,8 @@ export const register: Register = on => {
       // A subagent's approval dialog also waits on the user (PermissionRequest below),
       // so its end clears a wait too. Otherwise a subagent leaves the main loop's status alone.
       if (inFlight === 0 && (isMain || isWaiting())) {
-        // A background subagent's dialog was answered after the main loop's turn ended.
-        await setStatus($, inMainTurn ? 'running' : 'subagent_running')
+        // Outside the main loop's turn, a background subagent's or a plugin's dialog was answered.
+        await setStatus($, inMainTurn ? 'running' : await restingStatus($))
       }
     }
   }).catch(($, e, next) => next(e))

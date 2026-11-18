@@ -28,9 +28,10 @@ CLI のサブコマンドやフラグを変えたら、スキルも同時に直�
 | Claude Code のイベント | store への書き込み | 備考 |
 |---|---|---|
 | `classic.SessionStart`（`agent_id` なし） | `hook session-start --claude-session-id <id> --source <source>` | SessionChain を更新する。モデルに claude-deck の案内を渡す |
-| `turn.start` | `hook status running` | サブエージェントの実行では発火しないので、メインループの開始を表す |
+| `turn.start`（メイン） | `hook status running` | ほかの Mod が `prompt.submit` で止めた入力では発火しない（Claude Code 2.1.327 で確認） |
+| `turn.start`（サブエージェント） | メインのターンが終わった後で、待ち状態でなければ `subagent_running` | サブエージェントの実行でも発火する（同じ版で確認）。Mod がメインの停止中に立てたエージェントは、メインの `turn.complete` を通らない |
 | `tool.call`（メイン） | `running`（待ち状態のときは変えない）。`AskUserQuestion` のときは `waiting_answer`。実行中のツール呼び出しがすべて返ったら `running` | `next(e)` は承認ダイアログと質問への回答を待つので、返った時点でユーザーが答えている。並行して走る別の呼び出しの承認ダイアログが開いている間は、待ち状態を消さない |
-| `tool.call`（サブエージェント） | 実行中のツール呼び出しがすべて返り、直前が `waiting_approval` / `waiting_answer` なら `running`。メインのターンが終わった後なら `subagent_running` | サブエージェントの承認ダイアログもユーザーを待たせる |
+| `tool.call`（サブエージェントと、Mod が起こした呼び出し） | 実行中のツール呼び出しがすべて返り、直前が `waiting_approval` / `waiting_answer` なら `running`。メインのターンが終わった後なら、動いているサブエージェントの有無で `subagent_running` か `idle` | サブエージェントの承認ダイアログもユーザーを待たせる。Mod の `$.agent.spawn` は `agentId` の無い `Agent` の呼び出しとして、メインのターンの外でも届く。`tool_use_id` が `toolu_plugin_` で始まることで見分ける（Claude Code 2.1.327 で確認） |
 | `classic.PermissionRequest` | `waiting_approval`。`AskUserQuestion` のときは `waiting_answer` | サブエージェントでも書く |
 | `turn.complete`（メイン） | `idle`。動いているサブエージェントがあれば `subagent_running` | 拒否・中断・API エラーでも発火する。サブエージェントは `$.agent.list()` の `pending` / `running` / `waiting` を数える |
 | `turn.complete`（サブエージェント） | 直前が `subagent_running` で、動いているサブエージェントが無くなったら `idle` | メインのターンが終わった後も、バックグラウンドのサブエージェントは動き続ける |
