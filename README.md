@@ -204,6 +204,7 @@ claude_args = ["--dangerously-load-development-channels", "server:xwb"]
 - With `project_markers` empty (the default), only repository roots are offered.
 - With `project_markers` set, claude-deck searches each repository with `fd` and also offers the directories that contain a marker. The repository root is always offered.
 - A nested repository with its own `.jj` is not a subproject of the outer one. It is offered as a repository of its own.
+- The search starts when the TUI starts. `n` shows the last result at once and searches again in the background; the list is updated in place, keeping the filter text and the selection.
 
 ### Workspace symlinks
 

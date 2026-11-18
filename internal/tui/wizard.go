@@ -6,12 +6,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
+	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/pomesaka/claude-deck/internal/config"
+	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/session"
 )
 
@@ -169,13 +172,105 @@ func findProjectDirs(fdPath, repoRoot string, markers, excludes []string) ([]str
 	return dirs, nil
 }
 
-// startNewSession switches to repo selector mode and begins async repo discovery.
+// newRepoList builds the selector list. It is always used in the filtering
+// state, so Enter/Esc are handled by handleRepoSelectKey and the list's own
+// filter keys are disabled.
+func newRepoList() list.Model {
+	rl := list.New(nil, newRepoDelegate(), 80, 24)
+	rl.Title = "リポジトリ選択"
+	rl.SetShowStatusBar(true)
+	rl.SetFilteringEnabled(true)
+	rl.SetStatusBarItemName("repo", "repos")
+	rl.DisableQuitKeybindings()
+	rl.KeyMap.AcceptWhileFiltering.SetEnabled(false)
+	rl.KeyMap.CancelWhileFiltering.SetEnabled(false)
+	rl.KeyMap.Filter.SetEnabled(false)
+	return rl
+}
+
+// startNewSession switches to repo selector mode, shows the last discovery
+// result at once, and rediscovers in the background so that repositories added
+// since then appear without restarting the TUI.
 func (m *Model) startNewSession() tea.Cmd {
 	m.mode = viewSelectRepo
-	m.statusMsg = "リポジトリを検索中..."
 	m.nextRightPaneGeneration()
+	m.setRepoCandidates("", "")
+	m.statusMsg = repoDiscoveringStatus
 
-	return discoverRepos(m.config)
+	if m.repoDiscovering {
+		return nil
+	}
+	m.repoDiscovering = true
+	return m.discoverRepos
+}
+
+const repoDiscoveringStatus = "リポジトリを更新中..."
+
+// applyRepoList stores a discovery result and, if the selector is open, swaps
+// it in while keeping what the user has typed and selected.
+func (m *Model) applyRepoList(msg repoListMsg) tea.Cmd {
+	m.repoDiscovering = false
+	open := m.mode == viewSelectRepo
+	// Esc で閉じた後も「更新中」が残らないよう、開いているかに関係なく消す。
+	if m.statusMsg == repoDiscoveringStatus {
+		m.statusMsg = ""
+	}
+
+	if msg.err != nil {
+		if !open {
+			// 画面は変えない。次の n で探索し直し、失敗すればそこで表示する。
+			debuglog.Printf("[repoDiscovery] %v", msg.err)
+			return nil
+		}
+		m.statusMsg = "リポジトリ検索エラー: " + msg.err.Error()
+		if len(m.repoItems) == 0 {
+			m.mode = viewDashboard
+		}
+		return clearStatusCmd()
+	}
+
+	// WHY: fd walks directories in parallel, so its output order changes per run.
+	// Sorting keeps the list from reshuffling when a fresh result replaces the
+	// shown one under the user's cursor.
+	m.repoItems = slices.SortedFunc(slices.Values(msg.repos), func(a, b repoItem) int {
+		return strings.Compare(a.projectDir, b.projectDir)
+	})
+	if !open {
+		return nil
+	}
+	var selected string
+	if ri, ok := m.repoList.SelectedItem().(repoItem); ok {
+		selected = ri.projectDir
+	}
+	m.setRepoCandidates(m.repoList.FilterValue(), selected)
+	return nil
+}
+
+// setRepoCandidates puts m.repoItems into the selector in the filtering state,
+// with filter as the input text and selectedDir selected when it is visible.
+func (m *Model) setRepoCandidates(filter, selectedDir string) {
+	items := make([]list.Item, len(m.repoItems))
+	for i, r := range m.repoItems {
+		items[i] = r
+	}
+	// SetItems はフィルタ中だと絞り込みを非同期の Cmd で返すので、
+	// 先に Unfiltered に戻してから入れ、SetFilterText で同期的に絞り込む。
+	// SetFilterState(Filtering) は入力欄にフォーカスを戻すために呼ぶ
+	// （SetFilterState 単体では filteredItems が空のままになる）。
+	m.repoList.ResetFilter()
+	m.repoList.SetItems(items)
+	m.repoList.SetFilterText(filter)
+	m.repoList.SetFilterState(list.Filtering)
+
+	if selectedDir == "" {
+		return
+	}
+	for i, it := range m.repoList.VisibleItems() {
+		if ri, ok := it.(repoItem); ok && ri.projectDir == selectedDir {
+			m.repoList.Select(i)
+			return
+		}
+	}
 }
 
 // selectRepo creates a session for the selected project directory.

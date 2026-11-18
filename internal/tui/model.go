@@ -45,6 +45,14 @@ type Model struct {
 	// View state
 	mode     viewMode
 	repoList list.Model
+	// repoItems is the last discovery result. The `n` selector shows it at once
+	// and replaces it when the background discovery started by `n` finishes.
+	repoItems []repoItem
+	// repoDiscovering is true while a discoverRepos Cmd is in flight, so that
+	// pressing `n` again does not stack fd runs (each walks the whole home dir).
+	repoDiscovering bool
+	// discoverRepos runs the candidate search. Tests replace it to avoid fd.
+	discoverRepos func() tea.Msg
 
 	// Session filter
 	filterInput  textinput.Model
@@ -126,20 +134,6 @@ type pinToggledMsg struct {
 
 // NewModel creates the initial TUI model.
 func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context) Model {
-	delegate := newRepoDelegate()
-	rl := list.New(nil, delegate, 80, 24)
-	rl.Title = "リポジトリ選択"
-	rl.SetShowStatusBar(true)
-	rl.SetFilteringEnabled(true)
-	rl.SetStatusBarItemName("repo", "repos")
-	rl.DisableQuitKeybindings()
-
-	// 最初から Filtering 状態にするので、自前で Enter/Esc を処理する。
-	// list.Model 側のフィルタ関連キーバインドを無効化。
-	rl.KeyMap.AcceptWhileFiltering.SetEnabled(false)
-	rl.KeyMap.CancelWhileFiltering.SetEnabled(false)
-	rl.KeyMap.Filter.SetEnabled(false)
-
 	fi := textinput.New()
 	fi.Prompt = "/ "
 	fi.Placeholder = "filter..."
@@ -154,10 +148,13 @@ func NewModel(mgr *session.Manager, cfg *config.Config, ctx context.Context) Mod
 		config:              cfg,
 		ghostty:             ghostty.NewLauncher(cfg.Ghostty.Command),
 		ctx:                 ctx,
-		repoList:            rl,
+		repoList:            newRepoList(),
 		filterInput:         fi,
 		refreshInterval:     refreshInterval,
 		rightPaneGeneration: &atomic.Uint64{},
+		// Init が起動時の探索を始める。Init は値レシーバで印を残せないので、ここで立てる。
+		repoDiscovering: true,
+		discoverRepos:   discoverRepos(cfg),
 	}
 
 	m.refreshSessions() // cmds discarded — bubbletea event loop not yet running
@@ -206,7 +203,8 @@ type rightPaneSwitch struct {
 
 // Init returns the initial command.
 func (m Model) Init() tea.Cmd {
-	return metadataTickCmd(m.refreshInterval)
+	// 最初の n で数秒待たないよう、起動時に候補を探しておく。
+	return tea.Batch(metadataTickCmd(m.refreshInterval), m.discoverRepos)
 }
 
 // Update handles messages.
@@ -309,22 +307,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case repoListMsg:
-		if msg.err != nil {
-			m.statusMsg = "リポジトリ検索エラー: " + msg.err.Error()
-			m.mode = viewDashboard
-			cmds = append(cmds, clearStatusCmd())
-		} else {
-			items := make([]list.Item, len(msg.repos))
-			for i, r := range msg.repos {
-				items[i] = repoItem(r)
-			}
-			m.repoList.SetItems(items)
-			// SetFilterText で filteredItems を全アイテムで同期的に初期化してから、
-			// SetFilterState(Filtering) で入力モードに切り替える。
-			// （SetFilterState 単体では filteredItems が空のままになるため）
-			m.repoList.SetFilterText("")
-			m.repoList.SetFilterState(list.Filtering)
-			m.statusMsg = ""
+		if cmd := m.applyRepoList(msg); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 
 	case statusClearMsg:
