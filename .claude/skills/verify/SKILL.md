@@ -1,7 +1,7 @@
 ---
 name: verify
-description: claude-deck の TUI を、本物のデータと tmux から隔てた環境で起動し、別の tmux サーバーの中でキーを送って画面を取り、変更が動くかを確かめる手順。
-when_to_use: TUI（internal/tui）、リポジトリの探索、起動の流れを変えた後に、テストでなく実際に動かして確かめるとき。
+description: claude-deck の TUI と CLI を、本物のデータと tmux から隔てた環境で起動し、別の tmux サーバーの中でキーを送って画面を取り、偽の Claude Code でセッションを作って閉じ、変更が動くかを確かめる手順。
+when_to_use: TUI（internal/tui）、リポジトリの探索、起動の流れ、セッションの作成と終了（close、x、ワークスペース）、右ペインの切り替えを変えた後に、テストでなく実際に動かして確かめるとき。
 ---
 
 # claude-deck を動かして確かめる
@@ -49,6 +49,39 @@ cut -c1-40 /tmp/cdv/fd.log
 - 探索の失敗は `touch /tmp/cdv/fdfail` で起こす。戻すときは `rm /tmp/cdv/fdfail`。
 - 候補を足す、消すには、`/tmp/cdv/home/repos/<名前>/.jj` を作る、消す。
 
+## セッションを作って閉じる
+
+`setup.sh` は、Claude Code の代わりに眠るだけの `bin/claude`、本物の jj を包む `bin/jj`、本物の jj リポジトリ `/tmp/cdv/jjrepo` を用意する。偽の claude は hook を動かさないので、ステータスは idle のまま変わらない。
+
+`new` は tmux の中で打つ（`TMUX` が無いと、作るウィンドウの行き先が無い）。CLI 用の tmux セッションを分けて作り、そこへ送る。
+
+```bash
+tmux -L cdverify new-session -d -s cli -x 160 -y 40 "zsh -f"
+tmux -L cdverify send-keys -t cli "/tmp/cdv/cli.sh new --dir /tmp/cdv/jjrepo > /tmp/cdv/new1.json; echo rc=\$?" Enter
+jq -c . /tmp/cdv/new1.json
+/tmp/cdv/cli.sh list
+/tmp/cdv/cli.sh close <ID>
+```
+
+- `new` は数秒かかる。`tmux -L cdverify capture-pane -p -t cli` に `rc=0` が出てから JSON を読む。TUI の一覧に新しい行が出るのは、さらに次の更新（5 秒ごと）の後。
+- `close` と `list` は tmux の外から打ってよい。
+- ワークスペースは `/tmp/cdv/data/workspace/-tmp-cdv-jjrepo/<名前>` にできる。`jj workspace list` は `/tmp/cdv/jjrepo` で `HOME=/tmp/cdv/home jj workspace list --ignore-working-copy` と打つ。
+- jj の作業コピーの取り込みを失敗させるには `touch /tmp/cdv/jjlogfail`（`jj log` だけが失敗する）。戻すときは `rm /tmp/cdv/jjlogfail`。呼ばれた jj は `/tmp/cdv/jj.log` に出る。
+- `r` で再開するには、行に Claude Code のセッション ID が要る。偽の claude は書かないので、`sqlite3 /tmp/cdv/data/deck.db "update sessions set session_chain='[\"11111111-1111-4111-8111-111111111111\"]' where name='<名前>'"` で入れる。再開したウィンドウの画面に、偽の claude が引数と作業フォルダを出す。
+- store の行は `sqlite3 /tmp/cdv/data/deck.db "select name,status,workspace_name,finished_at,last_activity from sessions"` で読める。時刻はナノ秒。TUI は終了時に、メモリの `last_activity` で store を上書きする（偽の claude では 0）。store の時刻を書き換えて並びを見るときは、CLI の `list` で見る。
+
+## 右ペインの切り替えを見る
+
+右ペインは Ghostty の分割で、隔離環境には出ない。tmux セッション `cdverify` で選ばれているウィンドウが、右ペインに出るものだ。実行中のセッションはセッション ID の名前のウィンドウ、終了済みのセッションは `__preview__` と `/tmp/cdv/data/preview-selection` の `name`。
+
+```bash
+tmux -L cdverify display -p -t cdverify '#{window_name}'
+jq -r .name /tmp/cdv/data/preview-selection
+tmux -L cdverify capture-pane -p -t run | head -1
+```
+
+画面の 1 行目に、カーソルのあるセッションの名前が出る。`touch /tmp/cdv/slowtmux` で `select-window` が 0〜0.5 秒ずつ遅れ、完了順が入れ替わりやすくなる。j と k を 1 回の `send-keys` でまとめて送り（`tmux -L cdverify send-keys -t run k k j j j k`）、4 秒ほど待ってから上の 3 つを見る。
+
 ## つつく価値のある流れ
 
 - 起動直後、探索が終わる前に `n` を押して文字を打つ。結果が届いても文字が残るか。
@@ -56,6 +89,10 @@ cut -c1-40 /tmp/cdv/fd.log
 - 探索中に Esc と `n` を何回か繰り返す。`fd.log` の `-t d` の行（探索の始まり）が 1 回分しか増えないか。
 - 探索中に Esc で閉じたまま、探索が終わるのを待つ。一覧の下に「リポジトリを更新中...」が残らないか。
 - `fdfail` を置いて `n`。エラーが出て、前の候補と入力が残るか。
+- 実行中と終了済みのセッションを混ぜ、`slowtmux` を置いて j/k をまとめて送る。選ばれたウィンドウと 1 行目の名前が食い違わないか。切り替えを並列に出す作りでは、6 回中 4 回食い違った。
+- `jjlogfail` を置いて `close` と `x`。ワークスペースと中の未取り込みのファイルが残るか。外してからもう一度 `close` すると、取り込んでから消えるか。
+- `[session] max_sessions` を行の数にして、最も古い終了済みの行がワークスペースを残しているときに `new` を打つ（prune が走る）。`jjlogfail` の有無で、ワークスペースが残るか消えるか。
+- `x` のステータス行は 5 秒ほどで消え、幅で切れる。`tmux -L cdverify resize-window -t run -x 60` で狭くして見る。
 
 ## 止める
 
@@ -64,6 +101,9 @@ tmux -L cdverify send-keys -t run C-c
 tmux -L cdverify send-keys -t run y
 tmux -L cdverify kill-session -t cdverify
 tmux -L cdverify kill-session -t run
+tmux -L cdverify kill-session -t cli
 ```
+
+`cli` を作っていなければ、最後の行は「can't find session」で終わる。
 
 `C-c` で「終了しますか? (y/n)」が出る。リポジトリ選択の画面にいるときは、先に Esc で一覧に戻る。
