@@ -192,8 +192,12 @@ func runCLI(name string, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := mgr.Kill(sess.ID); err != nil {
+		res, err := mgr.Kill(sess.ID)
+		if err != nil {
 			return err
+		}
+		if res.WorkspaceKept != "" {
+			fmt.Fprintf(os.Stderr, "warning: jj に作業コピーを取り込めなかったので、ワークスペースを残しました: %s\n", res.WorkspaceKept)
 		}
 		return printJSON(infoFromSnapshot(sess.Snapshot()))
 	default:

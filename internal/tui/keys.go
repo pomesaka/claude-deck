@@ -357,7 +357,8 @@ func (m *Model) killSelected() tea.Cmd {
 	m.killing = true
 	m.statusMsg = "セッション終了中..."
 	return func() tea.Msg {
-		return sessionKilledMsg{err: mgr.Kill(sid)}
+		res, err := mgr.Kill(sid)
+		return sessionKilledMsg{result: res, err: err}
 	}
 }
 

@@ -647,12 +647,26 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	return m.GetSession(sess.ID), nil
 }
 
+// CloseResult reports what Kill left behind.
+type CloseResult struct {
+	// WorkspaceKept is the workspace root that was not removed because jj could
+	// not take in its working copy. The row keeps it, and resume reuses it.
+	// Empty when the workspace was removed or the session had none.
+	WorkspaceKept string
+}
+
 // Kill forcefully terminates a session and cleans up its workspace directory.
 // Session metadata and Claude Code JSONL are preserved for future --resume.
 //
 // ClosingAt in the store guards against the TUI and the CLI closing the same
 // session at once (both would try to remove the same workspace).
-func (m *Manager) Kill(sessionID DeckSessionID) error {
+func (m *Manager) Kill(sessionID DeckSessionID) (CloseResult, error) {
+	var res CloseResult
+	err := m.kill(sessionID, &res)
+	return res, err
+}
+
+func (m *Manager) kill(sessionID DeckSessionID, res *CloseResult) error {
 	rec, err := m.store.Update(string(sessionID), func(r *store.Record) error {
 		return beginClose(r, time.Now())
 	})
@@ -690,9 +704,12 @@ func (m *Manager) Kill(sessionID DeckSessionID) error {
 	// ワークスペースを消してディスクを回収する（node_modules などがワークスペースごとに複製される）。
 	// resume のときに作り直す。
 	var atRev, parentRev string
-	removeWorkspace := rec.WorkspaceName != "" && rec.RepoPath != ""
-	if removeWorkspace {
-		atRev, parentRev = m.ws().remove(rec.RepoPath, rec.WorkspaceName)
+	removed := false
+	if rec.WorkspaceName != "" && rec.RepoPath != "" {
+		atRev, parentRev, removed = m.ws().remove(rec.RepoPath, rec.WorkspaceName)
+		if !removed {
+			res.WorkspaceKept = m.ws().root(rec.RepoPath, rec.WorkspaceName)
+		}
 	}
 
 	return endClose(func(tx *store.Tx, r *store.Record) error {
@@ -701,7 +718,7 @@ func (m *Manager) Kill(sessionID DeckSessionID) error {
 			return err
 		}
 		applyExited(r, others, m.usage.HasConversation, time.Now())
-		if removeWorkspace {
+		if removed {
 			recordWorkspaceRemoved(r, atRev, parentRev)
 		}
 		return nil

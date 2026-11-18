@@ -123,7 +123,8 @@ type sessionForkedMsg struct {
 // sessionKilledMsg is sent when an async session kill completes.
 // No sessionID field needed: kill does not create a new session.
 type sessionKilledMsg struct {
-	err error
+	result session.CloseResult
+	err    error
 }
 
 // pinToggledMsg is sent when an async pin or unpin completes. The list itself
@@ -293,10 +294,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.killing = false
 		// refreshSessions は呼ばない: Kill は store を書いた後に Reload し、その notifyChange が
 		// SessionRefreshMsg を届ける。StopProcess が失敗したときも同じ。beginClose で失敗したときは何も書いていない。
-		if msg.err != nil {
+		switch {
+		case msg.err != nil:
 			m.statusMsg = "終了エラー: " + msg.err.Error()
-		} else {
-			m.statusMsg = "セッションを終了しました (workspace削除済)"
+		case msg.result.WorkspaceKept != "":
+			// WHY パスを出さない: 左ペインは狭く、長い文はワークスペースを残したことまで切れる。
+			// パスは claude-deck list の work_dir で分かる。
+			m.statusMsg = "終了。ワークスペースは残しました（jj 取り込み失敗）"
+		default:
+			m.statusMsg = "セッションを終了しました"
 		}
 		cmds = append(cmds, clearStatusCmd())
 

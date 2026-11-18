@@ -96,7 +96,9 @@ deck.db の行
   LastJJParentRevision = <change_id>  # @- の change_id（取得成功時のみ）
 ```
 
-`LastJJRevision` / `LastJJParentRevision` は `r` で resume するときに jj ワークスペースを再作成する際の開始 revision として使われる。`@` が空だと `jj workspace forget` で abandon されるので、`@-` も保存しておく。取得に失敗した場合は両フィールドをクリア（空文字列）し、resume 時に `jj new trunk()` にフォールバックする。
+`LastJJRevision` / `LastJJParentRevision` は `r` で resume するときに jj ワークスペースを再作成する際の開始 revision として使われる。`@` が空だと `jj workspace forget` で abandon されるので、`@-` も保存しておく。ワークスペースのディレクトリが既に無いときは両フィールドを空にし、resume 時に `jj new trunk()` にフォールバックする。
+
+`@` と `@-` を読む `jj log` は、編集途中のファイルを `@` に取り込む（snapshot）。これが失敗したときは、ワークスペースを削除も forget もせず、行の `WorkspaceName` と `WorkspacePath` を残す。取り込めていない変更は、ディレクトリを消すと取り戻せないためだ。セッションは Completed になり、`r` はそのワークスペースをそのまま使う。TUI はステータス行に残したことを、`claude-deck close` は stderr に残したパスを出す。prune も同じ規則で消す（下の prune の節）。
 
 **触らないもの:**
 ```

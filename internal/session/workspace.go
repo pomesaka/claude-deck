@@ -46,24 +46,31 @@ func CollectGarbage(st *store.Store, cfg ManagerConfig, dryRun bool) (GCReport, 
 	return newWorkspaces(cfg).collectGarbage(recs, dryRun)
 }
 
-// remove removes the workspace of a session being closed and returns where its
-// working copy was (@ and @-), for the resume to recreate it. Both
-// are empty when they could not be read.
-func (ws workspaces) remove(repoPath, wsName string) (atRev, parentRev string) {
+// remove snapshots the working copy of the workspace wsName and then forgets
+// and deletes it. It returns where the working copy was (@ and @-), for the
+// resume to recreate it; both are empty when the directory was already gone.
+//
+// removed is false when the snapshot failed. The workspace is then left as it
+// is: changes jj has not taken in would be lost for good with the directory.
+// Close and prune both go through here so that they keep the same rule.
+func (ws workspaces) remove(repoPath, wsName string) (atRev, parentRev string, removed bool) {
 	wsRoot := ws.root(repoPath, wsName)
-	// WHY cleanup より前に読む: jj workspace forget の後は @ の change_id が取れないことがある。
-	// @ が空だと forget で abandon されるので、@- も控えておく。
-	// 注意: 呼び出し元の StopProcess は SIGTERM を送るだけで終了を待たない。ここの jj log は
-	// Claude Code の jj 操作と競合しうるが、cleanup の jj workspace forget も同じ前提で動いている。
-	atRev, parentRev, err := ws.jj.GetWorkspaceRevisions(wsRoot)
-	if err != nil {
-		debuglog.Printf("[workspaces.remove] GetWorkspaceRevisions failed: %v", err)
-		atRev, parentRev = "", ""
+	if _, err := os.Stat(wsRoot); err == nil {
+		// WHY cleanup より前に読む: jj log が編集途中のファイルを @ に取り込む（snapshot）。
+		// また jj workspace forget の後は @ の change_id が取れないことがある。
+		// @ が空だと forget で abandon されるので、@- も控えておく。
+		// 注意: close の StopProcess は SIGTERM を送るだけで終了を待たない。ここの jj log は
+		// Claude Code の jj 操作と競合しうる。競合して失敗したときは消さずに残す。
+		atRev, parentRev, err = ws.jj.GetWorkspaceRevisions(wsRoot)
+		if err != nil {
+			debuglog.Printf("[workspaces.remove] keeping %s, snapshot failed: %v", wsRoot, err)
+			return "", "", false
+		}
 	}
 	if w := ws.cleanup(repoPath, wsName, wsRoot); w != "" {
 		debuglog.Printf("[workspaces.remove] workspace cleanup: %s", w)
 	}
-	return atRev, parentRev
+	return atRev, parentRev, true
 }
 
 // cleanup runs jj workspace forget and removes the workspace directory.
@@ -171,19 +178,9 @@ func (ws workspaces) discardPruned(r store.Record, kept []store.Record) {
 
 	// WorkspaceName が空の行は、close でワークスペースを消してある。
 	if r.WorkspaceName != "" {
-		if _, err := os.Stat(wsRoot); err == nil {
-			// 編集途中のファイルを snapshot で @ に取り込んでから forget する（GetNearestBookmark の WHY NOT 参照）。
-			// WHY 失敗したら消さない: snapshot できていない変更は、ディレクトリを消すと取り戻せない。
-			// 行はもう無いので、消さなかったワークスペースは手で片付けることになる。
-			atRev, parentRev, err := ws.jj.GetWorkspaceRevisions(wsRoot)
-			if err != nil {
-				debuglog.Printf("[discardPruned] %s: keeping workspace %s, snapshot failed: %v", r.ID, wsRoot, err)
-				return
-			}
-			debuglog.Printf("[discardPruned] %s: removing workspace %s (@=%s @-=%s)", r.ID, wsRoot, atRev, parentRev)
-		}
-		if w := ws.cleanup(r.RepoPath, r.Name, wsRoot); w != "" {
-			debuglog.Printf("[discardPruned] %s: workspace cleanup: %s", r.ID, w)
+		// 消せなかったワークスペースは、行がもう無いので手で片付けることになる。
+		if _, _, removed := ws.remove(r.RepoPath, r.Name); !removed {
+			return
 		}
 	}
 

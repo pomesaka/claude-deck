@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/pomesaka/claude-deck/internal/session"
@@ -214,5 +216,46 @@ func TestShouldApplyRightPaneSwitchKeepsExplicitFocus(t *testing.T) {
 
 	if !m.shouldApplyRightPaneSwitch(sw) {
 		t.Fatal("shouldApplyRightPaneSwitch = false, want true for explicit focus")
+	}
+}
+
+// The status line says when close kept the workspace, and where.
+func TestUpdate_SessionKilledStatus(t *testing.T) {
+	tests := []struct {
+		name    string
+		msg     sessionKilledMsg
+		want    []string
+		notWant []string
+	}{
+		{name: "removed", msg: sessionKilledMsg{}, want: []string{"終了しました"}, notWant: []string{"残しました"}},
+		{
+			name:    "kept",
+			msg:     sessionKilledMsg{result: session.CloseResult{WorkspaceKept: "/data/workspace/x/ws"}},
+			want:    []string{"残しました"},
+			notWant: []string{"削除済"},
+		},
+		{name: "error", msg: sessionKilledMsg{err: errors.New("boom")}, want: []string{"終了エラー", "boom"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			next, _ := Model{killing: true}.Update(tt.msg)
+			m, ok := next.(Model)
+			if !ok {
+				t.Fatalf("Update returned %T", next)
+			}
+			if m.killing {
+				t.Error("killing still set")
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(m.statusMsg, w) {
+					t.Errorf("statusMsg = %q, want it to contain %q", m.statusMsg, w)
+				}
+			}
+			for _, w := range tt.notWant {
+				if strings.Contains(m.statusMsg, w) {
+					t.Errorf("statusMsg = %q, want it not to contain %q", m.statusMsg, w)
+				}
+			}
+		})
 	}
 }

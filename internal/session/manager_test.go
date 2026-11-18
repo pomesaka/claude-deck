@@ -201,7 +201,7 @@ func TestKill(t *testing.T) {
 	m, be := newTestManager(t)
 	sess := createPlainSession(t, m)
 
-	if err := m.Kill(sess.ID); err != nil {
+	if _, err := m.Kill(sess.ID); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 	r := mustGet(t, m.store, sess.ID)
@@ -229,7 +229,7 @@ func TestKill_AlreadyClosedKeepsSavedRevisions(t *testing.T) {
 		t.Fatalf("Insert: %v", err)
 	}
 
-	if err := m.Kill("closed"); err != nil {
+	if _, err := m.Kill("closed"); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 	r := mustGet(t, m.store, "closed")
@@ -252,11 +252,151 @@ func TestKill_RefusedWhileAnotherProcessCloses(t *testing.T) {
 		t.Fatalf("beginClose from other process: %v", err)
 	}
 
-	if err := m.Kill(sess.ID); !errors.Is(err, ErrClosing) {
+	if _, err := m.Kill(sess.ID); !errors.Is(err, ErrClosing) {
 		t.Fatalf("Kill error = %v, want ErrClosing", err)
 	}
 	if !be.IsActive(sess.ID) {
 		t.Error("refused Kill still stopped the window")
+	}
+}
+
+// Close snapshots the working copy before it removes the workspace, and keeps
+// the workspace when the snapshot fails: changes jj has not taken in would be
+// lost for good with the directory.
+func TestKill_Workspace(t *testing.T) {
+	const (
+		snapshot       = "log --no-graph --color=never -r @ -T change_id"
+		snapshotParent = "log --no-graph --color=never -r @- -T change_id"
+		forget         = "--ignore-working-copy workspace forget ws"
+	)
+	tests := []struct {
+		name          string
+		workspaceName string
+		dirExists     bool
+		logFails      bool
+		wantJJ        []string
+		wantDir       bool
+		wantKept      bool
+		wantWSName    string
+		wantRevs      [2]string
+	}{
+		{
+			name: "snapshot succeeds: removed, revisions saved", workspaceName: "ws", dirExists: true,
+			wantJJ: []string{snapshot, snapshotParent, forget}, wantRevs: [2]string{"rev@", "rev@-"},
+		},
+		{
+			name: "snapshot fails: kept with the row pointing at it", workspaceName: "ws", dirExists: true, logFails: true,
+			wantJJ: []string{snapshot}, wantDir: true, wantKept: true, wantWSName: "ws", wantRevs: [2]string{"at-old", "parent-old"},
+		},
+		{
+			name: "directory already gone: forgotten without a snapshot", workspaceName: "ws",
+			wantJJ: []string{forget},
+		},
+		{
+			name: "no workspace: jj is not run", workspaceName: "", dirExists: true,
+			wantDir: true, wantRevs: [2]string{"at-old", "parent-old"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, be := newTestManager(t)
+			jjCalls := useFakeJJ(t, m, tt.logFails)
+			sess := createPlainSession(t, m)
+
+			r := mustGet(t, m.store, sess.ID)
+			wsRoot := m.ws().root(r.RepoPath, "ws")
+			if tt.workspaceName == "" {
+				wsRoot = r.RepoPath
+			}
+			if tt.dirExists {
+				if err := os.MkdirAll(wsRoot, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := m.store.Update(string(sess.ID), func(r *store.Record) error {
+				r.WorkspaceName = tt.workspaceName
+				r.WorkspacePath = wsRoot
+				r.LastJJRevision, r.LastJJParentRevision = "at-old", "parent-old"
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			m.Reload()
+			before := len(jjCalls()) // CreateSession reads the bookmark
+
+			res, err := m.Kill(sess.ID)
+			if err != nil {
+				t.Fatalf("Kill: %v", err)
+			}
+
+			if got := jjCalls()[before:]; !slices.Equal(got, tt.wantJJ) {
+				t.Errorf("jj calls = %q, want %q", got, tt.wantJJ)
+			}
+			_, statErr := os.Stat(wsRoot)
+			if gotDir := statErr == nil; gotDir != tt.wantDir {
+				t.Errorf("directory exists = %v, want %v", gotDir, tt.wantDir)
+			}
+			wantKept := ""
+			if tt.wantKept {
+				wantKept = wsRoot
+			}
+			if res.WorkspaceKept != wantKept {
+				t.Errorf("WorkspaceKept = %q, want %q", res.WorkspaceKept, wantKept)
+			}
+			got := mustGet(t, m.store, sess.ID)
+			if got.WorkspaceName != tt.wantWSName {
+				t.Errorf("row WorkspaceName = %q, want %q", got.WorkspaceName, tt.wantWSName)
+			}
+			if gotRevs := [2]string{got.LastJJRevision, got.LastJJParentRevision}; gotRevs != tt.wantRevs {
+				t.Errorf("row revisions = %q, want %q", gotRevs, tt.wantRevs)
+			}
+			if got.Status != StatusCompleted.ID() || got.FinishedAt == nil || got.ClosingAt != nil {
+				t.Errorf("after Kill: status=%q finished=%v closing=%v", got.Status, got.FinishedAt, got.ClosingAt)
+			}
+			if be.IsActive(sess.ID) {
+				t.Error("window still alive after Kill")
+			}
+		})
+	}
+}
+
+// A workspace kept by close is reused as it is by resume, not recreated.
+func TestResumeSession_ReusesWorkspaceKeptByClose(t *testing.T) {
+	m, be := newTestManager(t)
+	jjCalls := useFakeJJ(t, m, true)
+	sess := createPlainSession(t, m)
+	if err := RecordSessionStart(m.store, sess.ID, "claude-1", SourceStartup); err != nil {
+		t.Fatalf("RecordSessionStart: %v", err)
+	}
+	r := mustGet(t, m.store, sess.ID)
+	wsRoot := m.ws().root(r.RepoPath, "ws")
+	if err := os.MkdirAll(wsRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.store.Update(string(sess.ID), func(r *store.Record) error {
+		r.WorkspaceName = "ws"
+		r.WorkspacePath = wsRoot
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.Reload()
+
+	res, err := m.Kill(sess.ID)
+	if err != nil || res.WorkspaceKept != wsRoot {
+		t.Fatalf("Kill = %+v, %v; want the workspace kept", res, err)
+	}
+	if err := m.ResumeSession(context.Background(), sess.ID); err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+
+	if got := be.started[len(be.started)-1].WorkDir; got != wsRoot {
+		t.Errorf("resumed in %q, want the kept workspace %q", got, wsRoot)
+	}
+	for _, c := range jjCalls() {
+		if strings.HasPrefix(c, "workspace add") {
+			t.Errorf("resume recreated the workspace: %q", c)
+		}
 	}
 }
 
@@ -266,7 +406,7 @@ func TestResumeSession(t *testing.T) {
 	if err := RecordSessionStart(m.store, sess.ID, "claude-1", SourceStartup); err != nil {
 		t.Fatalf("RecordSessionStart: %v", err)
 	}
-	if err := m.Kill(sess.ID); err != nil {
+	if _, err := m.Kill(sess.ID); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 
@@ -291,7 +431,7 @@ func TestResumeSession(t *testing.T) {
 func TestResumeSession_WithoutClaudeIDRestoresCompleted(t *testing.T) {
 	m, _ := newTestManager(t)
 	sess := createPlainSession(t, m)
-	if err := m.Kill(sess.ID); err != nil {
+	if _, err := m.Kill(sess.ID); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 	if err := m.ResumeSession(context.Background(), sess.ID); err == nil {
@@ -644,15 +784,15 @@ func TestPruneOldSessions_DiscardsWorkspace(t *testing.T) {
 }
 
 // useFakeJJ makes m run a jj that only records its arguments, creates the
-// directory for `jj workspace add --name NAME PATH`, and fails `jj log` when
-// logFails is set. The returned function reads the calls so far.
+// directory for `jj workspace add --name NAME PATH`, prints "rev<REV>" for
+// `jj log -r REV`, and fails `jj log` when logFails is set. The returned function reads the calls so far.
 func useFakeJJ(t *testing.T, m *Manager, logFails bool) func() []string {
 	t.Helper()
 	jjLog := filepath.Join(t.TempDir(), "jj.log")
 	fakeJJ := filepath.Join(t.TempDir(), "jj")
 	script := "#!/bin/sh\necho \"$*\" >> \"$FAKE_JJ_LOG\"\n" +
 		"if [ \"$1\" = workspace ] && [ \"$2\" = add ]; then mkdir -p \"$5\"; fi\n" +
-		"if [ \"$1\" = log ]; then exit \"$FAKE_JJ_LOG_EXIT\"; fi\n"
+		"if [ \"$1\" = log ]; then [ \"$FAKE_JJ_LOG_EXIT\" = 0 ] && echo \"rev$5\"; exit \"$FAKE_JJ_LOG_EXIT\"; fi\n"
 	if err := os.WriteFile(fakeJJ, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -859,7 +999,7 @@ func TestKill_RefusedWhileLaunching(t *testing.T) {
 		t.Fatalf("Insert: %v", err)
 	}
 	m.Reload()
-	if err := m.Kill("s"); !errors.Is(err, ErrLaunching) {
+	if _, err := m.Kill("s"); !errors.Is(err, ErrLaunching) {
 		t.Errorf("Kill error = %v, want ErrLaunching", err)
 	}
 }

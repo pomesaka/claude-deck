@@ -16,7 +16,7 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
 | `new [--dir DIR] [--no-workspace]` | 新しいセッションを作り、tmux のウィンドウで Claude Code を起動する |
 | `list [--alias TEXT]` | claude-deck のセッションを TUI の一覧と同じ順で返す。claude-deck の外で起動したセッションは含まない。`--alias` を付けると、エイリアスにその文字列を含むものだけを返す |
 | `tree` | Claude Code のセッションを、`/clear` とフォークの親子関係でたどった木としてテキストで出す |
-| `close <ID\|NAME>` | プロセスを止め、ワークスペースを消す。JSONL とメタデータは残り、TUI から再開できる |
+| `close <ID\|NAME>` | プロセスを止め、ワークスペースを消す。JSONL とメタデータは残り、TUI から再開できる。jj が作業コピーを取り込めなかったときはワークスペースを残し、stderr に警告を出す |
 | `alias [--session ID\|NAME] <ALIAS>` | セッションに表示用の名前を付ける。TUI の一覧で、セッション名と並べて出る |
 | `gc [--dry-run]` | どのセッションのものでもないワークスペースと、消えたワークスペースについての Claude Code の記録を消す |
 | `project list` | 設定ファイルにある、プロジェクトごとの設定を返す |
