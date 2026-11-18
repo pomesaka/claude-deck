@@ -75,6 +75,15 @@ jq -c . /tmp/cdv/new1.json
 - TUI の `n` から作るには、偽 HOME の候補は `.jj` だけの空のフォルダなので、本物の jj リポジトリを置いてから探索を待つ。`mkdir -p /tmp/cdv/home/repos/realrepo` の後、`HOME=/tmp/cdv/home jj git init /tmp/cdv/home/repos/realrepo` を打つ。
 - store の行は `sqlite3 /tmp/cdv/data/deck.db "select name,status,workspace_name,finished_at,last_activity from sessions"` で読める。時刻はナノ秒。TUI は終了時に、メモリの `last_activity` で store を上書きする（偽の claude では 0）。store の時刻を書き換えて並びを見るときは、CLI の `list` で見る。
 
+## 本物の Claude Code で動かす
+
+README の画面のように本物の Claude Code が要るときは、HOME を分けるのを claude-deck だけにする。Claude Code は偽の HOME では認証が通らず、`Not logged in` で止まる（v2.1.327、2026-11に確認）。
+
+- `config.toml` の `[commands] claude` に包みのスクリプトを指し、その中で HOME と PATH を本物に戻してから `claude` を起動する
+- 個人の設定と言語の指示は、`--setting-sources project,local` と `--append-system-prompt` で外す。認証の要る道具は HOME を変えずに、画面に出る個人の設定だけを外す
+- トランスクリプトは本物の `~/.claude/projects` に書かれるので、偽の HOME の `.claude/projects` へ symlink すると TUI が読める
+- 偽の HOME で `claude -p` を試すと、偽の `~/.claude/projects` に記録が残り、外部セッションとして一覧に出る。試した後は消す
+
 ## 一覧の表示を見る
 
 - レート制限の行（ヘッダーの 2 行目）は、`/tmp/cdv/data/rate-limits.json` に `{"rate_limits":{"five_hour":{"used_percentage":42,"resets_at":1900000000},"seven_day":{"used_percentage":17,"resets_at":1900500000}}}` を書くと出る。起動中に書いても出る（fsnotify）。

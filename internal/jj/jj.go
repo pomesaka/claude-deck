@@ -139,6 +139,9 @@ func (r *Runner) setUpWorkspace(repoPath, wsPath string, opts WorkspaceOptions) 
 	}
 
 	// 最終 fallback: trunk() から新規 revision を作成。
+	// WHY: リモートの無いリポジトリでは trunk() が root() になり、ファイルの無いワークスペースができる
+	// （jj 0.37.0、2026-11に確認）。エージェントはそこで中身が見つからず、元のリポジトリを読みに行く。
+	// FIXME: trunk() が root() のときに警告を出すか決める
 	debuglog.Printf("[jj.CreateWorkspaceAt] running: jj new trunk()")
 	trunkCmd := exec.Command(jjCmd, "new", "trunk()")
 	trunkCmd.Dir = wsPath
