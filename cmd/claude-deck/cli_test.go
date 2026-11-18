@@ -223,3 +223,25 @@ func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 		})
 	}
 }
+
+// work_dir is where the session runs, or the repository while its workspace
+// is removed.
+func TestInfoFromSnapshot_WorkDir(t *testing.T) {
+	tests := []struct {
+		name string
+		iso  session.Isolation
+		want string
+	}{
+		{"direct", session.DirectIsolation("/repo/sub"), "/repo/sub"},
+		{"workspace subdir", session.WorkspaceIsolation("/data/ws/sub"), "/data/ws/sub"},
+		{"removed workspace", session.WorkspaceIsolation("/data/ws").Removed("a", "b"), "/repo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := infoFromSnapshot(session.Snapshot{ID: "s", RepoPath: "/repo", Isolation: tt.iso}).WorkDir
+			if got != tt.want {
+				t.Errorf("work_dir = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

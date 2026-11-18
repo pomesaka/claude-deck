@@ -140,8 +140,8 @@ func TestNewExternalSession_Workspace(t *testing.T) {
 	if sess.RepoPath != mainRepo {
 		t.Errorf("RepoPath = %q, want %q", sess.RepoPath, mainRepo)
 	}
-	if sess.WorkspacePath != wsDir {
-		t.Errorf("WorkspacePath = %q, want %q", sess.WorkspacePath, wsDir)
+	if sess.Isolation.WorkDir() != wsDir || sess.Isolation.IsWorkspace() {
+		t.Errorf("Isolation = %+v, want direct in %q (an external workspace is not ours)", sess.Isolation, wsDir)
 	}
 }
 

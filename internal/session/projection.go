@@ -8,7 +8,7 @@ import (
 
 // Session state is projected (assembled) from several sources:
 //
-//	Store  → ID, Name, RepoPath, RepoName, WorkspacePath, WorkspaceName,
+//	Store  → ID, Name, RepoPath, RepoName, Isolation,
 //	         SubProjectDir, SessionChain, Status, FinishedAt, PID
 //	JSONL  → Prompt, PermissionMode, StartedAt, LastActivity
 //	jj     → BookmarkName

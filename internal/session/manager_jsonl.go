@@ -152,7 +152,7 @@ func (m *Manager) refreshBookmarks() {
 		byID[sess.ID] = sess
 	}
 	for _, snap := range bookmarkTargets(snaps) {
-		bookmark, err := m.jj().GetNearestBookmark(snap.WorkspacePath)
+		bookmark, err := m.jj().GetNearestBookmark(snap.Isolation.WorkDir())
 		if err != nil {
 			debuglog.Printf("[refreshBookmarks] session %s: %v", snap.ID, err)
 			continue
@@ -169,7 +169,7 @@ func (m *Manager) refreshBookmarks() {
 func bookmarkTargets(snaps []Snapshot) []Snapshot {
 	var out []Snapshot
 	for _, s := range snaps {
-		if s.HasProcess() && s.WorkspacePath != "" {
+		if s.HasProcess() && s.Isolation.WorkDir() != "" {
 			out = append(out, s)
 		}
 	}

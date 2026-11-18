@@ -21,6 +21,14 @@ claude-deck が読み書き・作成・削除する外部データの一覧と�
 
 `<encoded-repo>` はリポジトリの絶対パスを `-` で繋いだ文字列（例: `-Users-pomesaka-github.com-Accel-Hack-ADeT`）。
 
+## 隔離（isolation）
+
+deck セッションは、行の `isolation` 列に、直接起動（`direct`）かワークスペース付き（`workspace`）かを持つ。作った後は変わらない。ワークスペースは常にセッション名（`name`）と同じ名前で `{DataDir}/workspace/<encoded>/<name>/` に作る。ワークスペース付きのセッションのワークスペースが今あるかは、`workspace_name` 列が空でないかで表す（close が空にする）。どの操作も、この 2 つを `session.Isolation` として読み書きする。
+
+`isolation` 列を足す前の版の行は、store を開くときに一度だけ埋める。`workspace_name` があればワークスペース付き、`workspace_name` も `workspace_path` も空なら close でワークスペースを消したワークスペース付き、それ以外は直接起動とみなす（`store.LegacyIsolation`）。列を知らない古い版がその後に書いた行も、読むときに同じ規則で読む。
+
+外部セッションを取り込むと、cwd が jj ワークスペースでも直接起動になる。claude-deck が作ったワークスペースではないので、close で消さない。
+
 ## 操作別ライフサイクル
 
 ### `n` — 新規セッション（ワークスペース付き）
@@ -46,9 +54,11 @@ trust の登録はワークスペースごとに行う。Claude Code は cwd か
 deck.db                                                  # セッションの行を挿入
 ~/.claude/projects/.../<uuid>.jsonl
 ```
-ワークスペースディレクトリは作られない。`WorkspacePath` はリポジトリルートを指す。
+ワークスペースディレクトリは作られない。行の `isolation` は `direct` で、`workspace_path` は起動したディレクトリを指す。
 
 ### `r` — Resume
+
+直接起動のセッションは、記録したディレクトリ（無ければリポジトリ）で Claude を `--resume` で起動する。ワークスペースは作らない。
 
 ワークスペースが存在する場合: ワークスペースをそのまま使い Claude を `--resume` で起動。
 
@@ -56,7 +66,7 @@ deck.db                                                  # セッションの行
 ```
 # workspaces.recreate が走る
 {DataDir}/workspace/<encoded>/<name>/                    # 再作成
-deck.db                                                  # 行の WorkspaceName/Path を更新
+deck.db                                                  # 行の workspace_name / workspace_path を戻す
 ~/.claude/projects/.../<uuid>.jsonl                      # Claude Code が追記
 ```
 ワークスペース再作成時の開始 revision は `LastJJRevision → LastJJParentRevision → trunk()` の優先順で使われる。
@@ -89,8 +99,8 @@ jj workspace forget <name>    # jj のワークスペース一覧から除去
 **更新（persist）:**
 ```
 deck.db の行
-  WorkspaceName = ""             # クリア
-  WorkspacePath = ""             # クリア
+  workspace_name = ""            # クリア（isolation は workspace のまま）
+  workspace_path = ""            # クリア
   Status = Completed
   LastJJRevision = <change_id>   # @ の change_id（取得成功時のみ）
   LastJJParentRevision = <change_id>  # @- の change_id（取得成功時のみ）
@@ -98,7 +108,7 @@ deck.db の行
 
 `LastJJRevision` / `LastJJParentRevision` は `r` で resume するときに jj ワークスペースを再作成する際の開始 revision として使われる。`@` が空だと `jj workspace forget` で abandon されるので、`@-` も保存しておく。ワークスペースのディレクトリが既に無いときは両フィールドを空にし、resume 時に `jj new trunk()` にフォールバックする。
 
-`@` と `@-` を読む `jj log` は、編集途中のファイルを `@` に取り込む（snapshot）。これが失敗したときは、ワークスペースを削除も forget もせず、行の `WorkspaceName` と `WorkspacePath` を残す。取り込めていない変更は、ディレクトリを消すと取り戻せないためだ。セッションは Completed になり、`r` はそのワークスペースをそのまま使う。TUI はステータス行に残したことを、`claude-deck close` は stderr に残したパスを出す。prune も同じ規則で消す（下の prune の節）。
+`@` と `@-` を読む `jj log` は、編集途中のファイルを `@` に取り込む（snapshot）。これが失敗したときは、ワークスペースを削除も forget もせず、行の `workspace_name` と `workspace_path` を残す。取り込めていない変更は、ディレクトリを消すと取り戻せないためだ。セッションは Completed になり、`r` はそのワークスペースをそのまま使う。TUI はステータス行に残したことを、`claude-deck close` は stderr に残したパスを出す。prune も同じ規則で消す（下の prune の節）。
 
 **触らないもの:**
 ```
@@ -119,7 +129,7 @@ deck.db の行
 
 - ワークスペースを消す前に、編集途中のファイルを jj の snapshot で `@` に取り込む。snapshot に失敗したときは、ワークスペースを消さずに残す
 - 同じ名前のワークスペースを持つ行が残っているときは、何も消さない
-- ワークスペースなしで起動したセッションでは、リポジトリ本体の登録に触れない
+- 直接起動のセッションでは、ワークスペースも登録も消さない。同じ名前のワークスペースのディレクトリがあっても、その行のものではない
 
 **触らないもの:**
 ```

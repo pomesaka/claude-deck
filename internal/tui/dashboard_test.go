@@ -518,7 +518,7 @@ func TestDashboard_KeysByOriginAndStatus(t *testing.T) {
 	}{
 		{"r on a completed session", session.OriginDeck, session.StatusCompleted, "r", "再開中"},
 		{"r on an external session adopts it", session.OriginExternal, session.StatusUnknown, "r", "再開中"},
-		{"r on an unknown status is refused", session.OriginDeck, session.StatusUnknown, "r", "再開できません"},
+		{"r on an unknown status is refused", session.OriginDeck, session.StatusUnknown, "r", "状態が不明なため再開できません"},
 		{"r on a running session is refused", session.OriginDeck, session.StatusRunning, "r", "再開できません"},
 		{"Enter on a completed session resumes", session.OriginDeck, session.StatusCompleted, "enter", "再開中"},
 		{"x on an external session is refused", session.OriginExternal, session.StatusUnknown, "x", "終了できません"},

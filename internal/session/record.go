@@ -23,31 +23,29 @@ func (s *Session) recordLocked() store.Record {
 	for i, id := range s.SessionChain {
 		chain[i] = string(id)
 	}
-	return store.Record{
-		ID:                   string(s.ID),
-		Name:                 s.Name,
-		Alias:                s.Alias,
-		Pinned:               s.Pinned,
-		RepoPath:             s.RepoPath,
-		RepoName:             s.RepoName,
-		WorkspacePath:        s.WorkspacePath,
-		WorkspaceName:        s.WorkspaceName,
-		SubProjectDir:        s.SubProjectDir,
-		SessionChain:         chain,
-		ForkedFrom:           string(s.ForkedFrom),
-		Status:               s.Status.ID(),
-		FinishedAt:           copyTimePtr(s.FinishedAt),
-		PID:                  s.PID,
-		ErrorMessage:         s.ErrorMessage,
-		TerminalTitle:        s.TerminalTitle,
-		BookmarkName:         s.BookmarkName,
-		LastJJRevision:       s.LastJJRevision,
-		LastJJParentRevision: s.LastJJParentRevision,
-		Prompt:               s.Prompt,
-		PermissionMode:       s.PermissionMode,
-		StartedAt:            s.StartedAt,
-		LastActivity:         s.LastActivity,
+	r := store.Record{
+		ID:             string(s.ID),
+		Name:           s.Name,
+		Alias:          s.Alias,
+		Pinned:         s.Pinned,
+		RepoPath:       s.RepoPath,
+		RepoName:       s.RepoName,
+		SubProjectDir:  s.SubProjectDir,
+		SessionChain:   chain,
+		ForkedFrom:     string(s.ForkedFrom),
+		Status:         s.Status.ID(),
+		FinishedAt:     copyTimePtr(s.FinishedAt),
+		PID:            s.PID,
+		ErrorMessage:   s.ErrorMessage,
+		TerminalTitle:  s.TerminalTitle,
+		BookmarkName:   s.BookmarkName,
+		Prompt:         s.Prompt,
+		PermissionMode: s.PermissionMode,
+		StartedAt:      s.StartedAt,
+		LastActivity:   s.LastActivity,
 	}
+	isolationToRecord(&r, s.Isolation)
+	return r
 }
 
 // newSessionFromRecord builds an in-memory session from a store row.
@@ -73,8 +71,7 @@ func (s *Session) applyControlRecordLocked(r store.Record) {
 	s.Name = r.Name
 	s.Alias = r.Alias
 	s.Pinned = r.Pinned
-	s.WorkspacePath = r.WorkspacePath
-	s.WorkspaceName = r.WorkspaceName
+	s.Isolation = isolationFromRecord(r)
 	s.SessionChain = s.SessionChain[:0]
 	for _, id := range r.SessionChain {
 		s.SessionChain = append(s.SessionChain, ClaudeSessionID(id))
@@ -86,8 +83,6 @@ func (s *Session) applyControlRecordLocked(r store.Record) {
 	s.FinishedAt = copyTimePtr(r.FinishedAt)
 	s.PID = r.PID
 	s.ErrorMessage = r.ErrorMessage
-	s.LastJJRevision = r.LastJJRevision
-	s.LastJJParentRevision = r.LastJJParentRevision
 }
 
 // applyProjectionRecordLocked copies the fields the TUI projects from JSONL

@@ -31,14 +31,15 @@ func TestStore_RoundTrip(t *testing.T) {
 		rec  Record
 	}{
 		{
+			// Isolation is never empty on a read row, so it is the one field set here.
 			name: "zero values stay zero",
-			rec:  Record{ID: "a", Status: "idle"},
+			rec:  Record{ID: "a", Status: "idle", Isolation: IsolationDirect},
 		},
 		{
 			name: "every field set",
 			rec: Record{
 				ID: "b", Name: "maika-548e", RepoPath: "/repo", RepoName: "repo",
-				WorkspacePath: "/ws/maika-548e/sub", WorkspaceName: "maika-548e", SubProjectDir: "sub",
+				WorkspacePath: "/ws/maika-548e/sub", WorkspaceName: "maika-548e", SubProjectDir: "sub", Isolation: IsolationWorkspace,
 				SessionChain: []string{"old", "new"}, ForkedFrom: "source", Alias: "review-pr-12", Status: "completed", FinishedAt: &finished, PID: 42,
 				ErrorMessage: "boom", TerminalTitle: "title", BookmarkName: "feat/x",
 				LastJJRevision: "abc", LastJJParentRevision: "def",
@@ -85,8 +86,16 @@ func createOldDatabase(t *testing.T, path string) {
 	if _, err := db.Exec(oldSchema); err != nil {
 		t.Fatalf("creating old schema: %v", err)
 	}
-	if _, err := db.Exec("INSERT INTO sessions (id, name, status) VALUES ('a', 'anna-8cc7', 'idle')"); err != nil {
-		t.Fatalf("inserting old row: %v", err)
+	for _, q := range []string{
+		"INSERT INTO sessions (id, name, status) VALUES ('a', 'anna-8cc7', 'idle')",
+		// For the isolation column: a live workspace, a workspace close removed, a direct session.
+		"INSERT INTO sessions (id, name, workspace_name, workspace_path, status) VALUES ('ws', 'ws', 'ws', '/data/ws', 'idle')",
+		"INSERT INTO sessions (id, name, status) VALUES ('removed', 'removed', 'completed')",
+		"INSERT INTO sessions (id, name, workspace_path, status) VALUES ('direct', 'direct', '/repo', 'idle')",
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("inserting old row: %v", err)
+		}
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -124,6 +133,58 @@ func TestStore_MigratesAddedColumns(t *testing.T) {
 	}
 	if got.ForkedFrom != "source" || got.Alias != "review-pr-12" || !got.Pinned {
 		t.Errorf("after reopening: ForkedFrom = %q, Alias = %q, Pinned = %v; want source, review-pr-12, true", got.ForkedFrom, got.Alias, got.Pinned)
+	}
+}
+
+// Opening an old database fills the isolation column from the workspace
+// columns, once: a value written afterwards stays.
+func TestStore_FillsIsolation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	createOldDatabase(t, path)
+	st := openTestStore(t, path)
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	stored := func(id string) string {
+		var v string
+		if err := db.QueryRow("SELECT isolation FROM sessions WHERE id = ?", id).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	for id, want := range map[string]string{"ws": IsolationWorkspace, "removed": IsolationWorkspace, "direct": IsolationDirect} {
+		if got := stored(id); got != want {
+			t.Errorf("stored isolation of %s = %q, want %q", id, got, want)
+		}
+	}
+
+	// Not what the rule would say for this row: opening again must not overwrite it.
+	if _, err := st.Update("removed", func(r *Record) error { r.Isolation = IsolationDirect; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	again := openTestStore(t, path)
+	if got, _ := again.Get("removed"); got.Isolation != IsolationDirect {
+		t.Errorf("after reopening: isolation = %q, want direct kept", got.Isolation)
+	}
+}
+
+func TestLegacyIsolation(t *testing.T) {
+	tests := []struct {
+		name, wsName, wsPath string
+		want                 string
+	}{
+		{"ws", "ws", "/data/ws/sub", IsolationWorkspace},
+		{"ws", "", "", IsolationWorkspace}, // close removed the workspace
+		{"direct", "", "/repo", IsolationDirect},
+		{"", "", "", IsolationDirect},
+	}
+	for _, tt := range tests {
+		if got := LegacyIsolation(tt.name, tt.wsName, tt.wsPath); got != tt.want {
+			t.Errorf("LegacyIsolation(%q, %q, %q) = %q, want %q", tt.name, tt.wsName, tt.wsPath, got, tt.want)
+		}
 	}
 }
 

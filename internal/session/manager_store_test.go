@@ -33,11 +33,11 @@ func TestLegacyStatus(t *testing.T) {
 // their bookmark.
 func TestBookmarkTargets(t *testing.T) {
 	snaps := []Snapshot{
-		{ID: "live", Origin: OriginDeck, Status: StatusIdle, WorkspacePath: "/ws/a"},
-		{ID: "running", Origin: OriginDeck, Status: StatusRunning, WorkspacePath: "/ws/b"},
-		{ID: "done", Origin: OriginDeck, Status: StatusCompleted, WorkspacePath: "/ws/c"},
-		{ID: "unknown", Origin: OriginDeck, Status: StatusUnknown, WorkspacePath: "/ws/d"},
-		{ID: "external", Origin: OriginExternal, Status: StatusUnknown, WorkspacePath: "/elsewhere"},
+		{ID: "live", Origin: OriginDeck, Status: StatusIdle, Isolation: DirectIsolation("/ws/a")},
+		{ID: "running", Origin: OriginDeck, Status: StatusRunning, Isolation: DirectIsolation("/ws/b")},
+		{ID: "done", Origin: OriginDeck, Status: StatusCompleted, Isolation: DirectIsolation("/ws/c")},
+		{ID: "unknown", Origin: OriginDeck, Status: StatusUnknown, Isolation: DirectIsolation("/ws/d")},
+		{ID: "external", Origin: OriginExternal, Status: StatusUnknown, Isolation: DirectIsolation("/elsewhere")},
 		{ID: "no-dir", Origin: OriginDeck, Status: StatusIdle},
 	}
 	var got []DeckSessionID

@@ -40,7 +40,10 @@ type Record struct {
 	WorkspacePath string
 	WorkspaceName string
 	SubProjectDir string
-	SessionChain  []string
+	// Isolation is IsolationDirect or IsolationWorkspace: whether the session
+	// runs in a jj workspace claude-deck made. Never empty on a read row.
+	Isolation    string
+	SessionChain []string
 	// ForkedFrom is the runtime session ID this session was forked from: an
 	// element of another record's SessionChain, or empty when it is not a fork.
 	ForkedFrom    string
@@ -95,8 +98,29 @@ CREATE TABLE IF NOT EXISTS sessions (
 	launching_at                INTEGER,
 	forked_from                 TEXT NOT NULL DEFAULT '',
 	alias                       TEXT NOT NULL DEFAULT '',
-	pinned                      INTEGER NOT NULL DEFAULT 0
+	pinned                      INTEGER NOT NULL DEFAULT 0,
+	isolation                   TEXT NOT NULL DEFAULT ''
 );`
+
+// Values of the isolation column.
+const (
+	IsolationDirect    = "direct"
+	IsolationWorkspace = "workspace"
+)
+
+// LegacyIsolation infers the isolation of a row written before the column
+// existed, or by a binary that does not know it, from the workspace columns:
+// a row with a workspace name has its workspace; a row with neither a
+// workspace name nor a path had its workspace removed by close (a direct
+// session always has its directory as the path); anything else is direct.
+// It is the only place this rule lives: migrate fills the column with it, and
+// a read row with an empty column gets it too.
+func LegacyIsolation(name, workspaceName, workspacePath string) string {
+	if workspaceName != "" || (workspacePath == "" && name != "") {
+		return IsolationWorkspace
+	}
+	return IsolationDirect
+}
 
 // addedColumns are the columns added after the first release of the schema, in
 // the order they were added. A database created before a column existed gets it
@@ -108,12 +132,13 @@ var addedColumns = []struct{ name, ddl string }{
 	{"forked_from", "forked_from TEXT NOT NULL DEFAULT ''"},
 	{"alias", "alias TEXT NOT NULL DEFAULT ''"},
 	{"pinned", "pinned INTEGER NOT NULL DEFAULT 0"},
+	{"isolation", "isolation TEXT NOT NULL DEFAULT ''"},
 }
 
 const columns = `id, name, repo_path, repo_name, workspace_path, workspace_name, sub_project_dir,
 	session_chain, status, finished_at, pid, error_message, terminal_title, bookmark_name,
 	last_jj_revision, last_jj_parent_revision, prompt, permission_mode, started_at, last_activity,
-	closing_at, launching_at, forked_from, alias, pinned`
+	closing_at, launching_at, forked_from, alias, pinned, isolation`
 
 // upsert writes one row: it inserts it, or, when the ID exists, updates the
 // columns this binary knows.
@@ -212,7 +237,40 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("adding column: %s: %w", ddl, err)
 		}
 	}
+	if err := fillIsolation(tx); err != nil {
+		return fmt.Errorf("filling isolation: %w", err)
+	}
 	return tx.Commit()
+}
+
+// fillIsolation writes LegacyIsolation into the rows whose isolation is empty.
+// Rows written later by a binary that does not know the column also get the
+// rule when read (scanAll), so this only makes the column explicit.
+func fillIsolation(tx *sql.Tx) error {
+	rows, err := tx.Query("SELECT id, name, workspace_name, workspace_path FROM sessions WHERE isolation = ''")
+	if err != nil {
+		return err
+	}
+	type fill struct{ id, value string }
+	var fills []fill
+	for rows.Next() {
+		var id, name, wsName, wsPath string
+		if err := rows.Scan(&id, &name, &wsName, &wsPath); err != nil {
+			rows.Close()
+			return err
+		}
+		fills = append(fills, fill{id, LegacyIsolation(name, wsName, wsPath)})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, f := range fills {
+		if _, err := tx.Exec("UPDATE sessions SET isolation = ? WHERE id = ?", f.value, f.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // missingColumns returns the DDL of the addedColumns the sessions table lacks.
@@ -347,7 +405,7 @@ func (t *Tx) Put(r Record) error {
 		r.ID, r.Name, r.RepoPath, r.RepoName, r.WorkspacePath, r.WorkspaceName, r.SubProjectDir,
 		string(chainJSON), r.Status, nullableTime(r.FinishedAt), r.PID, r.ErrorMessage, r.TerminalTitle, r.BookmarkName,
 		r.LastJJRevision, r.LastJJParentRevision, r.Prompt, r.PermissionMode, unixNano(r.StartedAt), unixNano(r.LastActivity),
-		nullableTime(r.ClosingAt), nullableTime(r.LaunchingAt), r.ForkedFrom, r.Alias, r.Pinned,
+		nullableTime(r.ClosingAt), nullableTime(r.LaunchingAt), r.ForkedFrom, r.Alias, r.Pinned, r.Isolation,
 	)
 	return err
 }
@@ -394,9 +452,12 @@ func scanAll(rows *sql.Rows) ([]Record, error) {
 			&r.ID, &r.Name, &r.RepoPath, &r.RepoName, &r.WorkspacePath, &r.WorkspaceName, &r.SubProjectDir,
 			&chainJSON, &r.Status, &finishedAt, &r.PID, &r.ErrorMessage, &r.TerminalTitle, &r.BookmarkName,
 			&r.LastJJRevision, &r.LastJJParentRevision, &r.Prompt, &r.PermissionMode, &startedAt, &lastActivity,
-			&closingAt, &launchingAt, &r.ForkedFrom, &r.Alias, &r.Pinned,
+			&closingAt, &launchingAt, &r.ForkedFrom, &r.Alias, &r.Pinned, &r.Isolation,
 		); err != nil {
 			return nil, err
+		}
+		if r.Isolation == "" {
+			r.Isolation = LegacyIsolation(r.Name, r.WorkspaceName, r.WorkspacePath)
 		}
 		if err := json.Unmarshal([]byte(chainJSON), &r.SessionChain); err != nil {
 			return nil, fmt.Errorf("session %s: parsing session chain: %w", r.ID, err)

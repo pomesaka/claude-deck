@@ -595,7 +595,7 @@ func (m *Model) buildPreviewSpecFromSnap(snap session.Snapshot) preview.PreviewS
 		DeckSessionID:    snap.ID,
 		Name:             snap.DisplayName(),
 		RepoName:         snap.RepoName,
-		WorkspacePath:    snap.WorkspacePath,
+		WorkspacePath:    snap.WorkDir(),
 		RuntimeSessionID: snap.RuntimeSessionID,
 		ClearCount:       snap.ClearCount,
 		Status:           snap.Status.ID(),

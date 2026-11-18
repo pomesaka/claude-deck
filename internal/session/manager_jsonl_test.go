@@ -75,7 +75,7 @@ func TestDiscoverExternalSessionsAdoptsRuntimeIDForManagedCodexWorkspace(t *test
 
 	m := newCodexTestManager(t, baseDir)
 	sess := createPlainSession(t, m)
-	writeSessionCodexJSONL(t, baseDir, sessionID, sess.Snapshot().WorkspacePath)
+	writeSessionCodexJSONL(t, baseDir, sessionID, sess.Snapshot().WorkDir())
 
 	added, _ := m.DiscoverExternalSessions()
 	if added != 0 {
@@ -99,7 +99,7 @@ func TestDiscoverExternalSessions_ClaudeDoesNotAdoptByWorkspace(t *testing.T) {
 	m := newCodexTestManager(t, baseDir)
 	m.config.AgentRuntime = nil
 	sess := createPlainSession(t, m)
-	writeSessionCodexJSONL(t, baseDir, sessionID, sess.Snapshot().WorkspacePath)
+	writeSessionCodexJSONL(t, baseDir, sessionID, sess.Snapshot().WorkDir())
 
 	m.DiscoverExternalSessions()
 	if got := mustGet(t, m.store, sess.ID).SessionChain; len(got) != 0 {

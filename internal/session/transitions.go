@@ -213,9 +213,13 @@ func reviveForLiveWindow(r *store.Record, pid int) (changed bool) {
 // WHY 消したときだけ呼ぶ: ワークスペースの無い行（すでに close 済み）をもう一度 close しても
 // 保存済みの位置は変わらない。そこで空を書くと、resume が trunk() からの作り直しになる。
 func recordWorkspaceRemoved(r *store.Record, atRev, parentRev string) {
-	r.WorkspaceName = ""
-	r.WorkspacePath = ""
-	r.LastJJRevision, r.LastJJParentRevision = atRev, parentRev
+	isolationToRecord(r, isolationFromRecord(*r).Removed(atRev, parentRev))
+}
+
+// recordWorkspaceRecreated records the workspace a resume made again, with the
+// process to run in workDir.
+func recordWorkspaceRecreated(r *store.Record, workDir string) {
+	isolationToRecord(r, WorkspaceIsolation(workDir))
 }
 
 // setError marks the row as failed with a reason.

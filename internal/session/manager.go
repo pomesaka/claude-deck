@@ -351,7 +351,6 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 		if err != nil {
 			return nil, fmt.Errorf("creating jj workspace: %w", err)
 		}
-		sess.WorkspaceName = wsName
 
 		// サブプロジェクト対応: workingDir がリポジトリルートと異なる場合、
 		// ワークスペース内の対応サブディレクトリを作業ディレクトリにする
@@ -362,11 +361,11 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 			actualWorkDir = filepath.Join(wsPath, relPath)
 			sess.SubProjectDir = relPath
 		}
-		sess.WorkspacePath = actualWorkDir
+		sess.Isolation = WorkspaceIsolation(actualWorkDir)
 	} else {
 		// ワークスペースなし → workingDir をそのまま使用
 		actualWorkDir = workingDir
-		sess.WorkspacePath = actualWorkDir
+		sess.Isolation = DirectIsolation(actualWorkDir)
 		if relPath, err := filepath.Rel(repoPath, workingDir); err == nil && relPath != "." {
 			sess.SubProjectDir = relPath
 		}
@@ -493,8 +492,10 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 	if len(rec.SessionChain) > 0 {
 		csID = rec.SessionChain[len(rec.SessionChain)-1]
 	}
-	debuglog.Printf("[ResumeSession] csID=%q wsPath=%q repoPath=%q atRev=%q parentRev=%q",
-		csID, rec.WorkspacePath, rec.RepoPath, rec.LastJJRevision, rec.LastJJParentRevision)
+	iso := isolationFromRecord(rec)
+	atRev, parentRev := iso.Revisions()
+	debuglog.Printf("[ResumeSession] csID=%q workDir=%q repoPath=%q workspace=%v atRev=%q parentRev=%q",
+		csID, iso.WorkDir(), rec.RepoPath, iso.IsWorkspace(), atRev, parentRev)
 
 	// fail puts the row back into a finished state when the process could not start.
 	fail := func(cause error, markError bool) error {
@@ -516,32 +517,27 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 		return fail(errors.New("no Claude Code session ID available for resume"), false)
 	}
 
-	// ワークスペースがなければ（Kill で削除済み）再作成する。
+	// close で消したワークスペースは作り直す。直接起動のセッションは作り直さない。
 	// Kill 時に保存した @ / @- の change_id を渡す。
 	// CreateWorkspaceAt が jj edit <@> → jj new <@-> → jj new trunk() の順で試みる。
-	wsPath := rec.WorkspacePath
-	if wsPath == "" && rec.RepoPath != "" && rec.Name != "" {
-		newWsPath, err := m.ws().recreate(rec.RepoPath, rec.Name, rec.SubProjectDir, rec.LastJJRevision, rec.LastJJParentRevision)
+	if iso.IsWorkspace() && !iso.HasWorkspace() && rec.RepoPath != "" && rec.Name != "" {
+		newWsPath, err := m.ws().recreate(rec.RepoPath, rec.Name, rec.SubProjectDir, atRev, parentRev)
 		if err != nil {
 			// WHY NOT 本体リポジトリで起動する: ワークスペースで隔離していたセッションが、利用者の
 			// 作業コピーを直接書き換えることになる。一覧の表示からはその違いが分からない。
 			debuglog.Printf("[ResumeSession] workspace recreate failed: %v", err)
 			return fail(fmt.Errorf("ワークスペースを作り直せません: %w", err), true)
 		}
-		wsPath = newWsPath
+		iso = WorkspaceIsolation(newWsPath)
 		if _, err := m.store.Update(string(sessionID), func(r *store.Record) error {
-			r.WorkspaceName = rec.Name
-			r.WorkspacePath = newWsPath
+			recordWorkspaceRecreated(r, newWsPath)
 			return nil
 		}); err != nil {
 			debuglog.Printf("[ResumeSession] recording workspace: %v", err)
 		}
 	}
 
-	workDir := wsPath
-	if workDir == "" {
-		workDir = rec.RepoPath
-	}
+	workDir := iso.workDirOr(rec.RepoPath)
 	if workDir == "" {
 		return fail(fmt.Errorf("no work directory available for session %s", sessionID), false)
 	}
@@ -634,8 +630,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	// サブプロジェクト対応: ソースが wsPath/subProject で動いていた場合、
 	// フォーク先の新ワークスペースでも同じサブディレクトリを使う。
 	actualWorkDir := computeActualWorkDir(wsPath, srcSubProjectDir)
-	sess.WorkspacePath = actualWorkDir
-	sess.WorkspaceName = wsName
+	sess.Isolation = WorkspaceIsolation(actualWorkDir)
 	sess.SubProjectDir = srcSubProjectDir
 	sess.ForkedFrom = srcClaudeID
 
@@ -705,10 +700,10 @@ func (m *Manager) kill(sessionID DeckSessionID, res *CloseResult) error {
 	// resume のときに作り直す。
 	var atRev, parentRev string
 	removed := false
-	if rec.WorkspaceName != "" && rec.RepoPath != "" {
-		atRev, parentRev, removed = m.ws().remove(rec.RepoPath, rec.WorkspaceName)
+	if isolationFromRecord(rec).HasWorkspace() && rec.RepoPath != "" {
+		atRev, parentRev, removed = m.ws().remove(rec.RepoPath, rec.Name)
 		if !removed {
-			res.WorkspaceKept = m.ws().root(rec.RepoPath, rec.WorkspaceName)
+			res.WorkspaceKept = m.ws().root(rec.RepoPath, rec.Name)
 		}
 	}
 

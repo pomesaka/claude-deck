@@ -314,6 +314,11 @@ func TestKill_Workspace(t *testing.T) {
 				}
 			}
 			if _, err := m.store.Update(string(sess.ID), func(r *store.Record) error {
+				r.Name = "ws" // a workspace is named after its session
+				r.Isolation = store.IsolationDirect
+				if tt.workspaceName != "" {
+					r.Isolation = store.IsolationWorkspace
+				}
 				r.WorkspaceName = tt.workspaceName
 				r.WorkspacePath = wsRoot
 				r.LastJJRevision, r.LastJJParentRevision = "at-old", "parent-old"
@@ -374,6 +379,8 @@ func TestResumeSession_ReusesWorkspaceKeptByClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := m.store.Update(string(sess.ID), func(r *store.Record) error {
+		r.Name = "ws" // a workspace is named after its session
+		r.Isolation = store.IsolationWorkspace
 		r.WorkspaceName = "ws"
 		r.WorkspacePath = wsRoot
 		return nil
@@ -397,6 +404,89 @@ func TestResumeSession_ReusesWorkspaceKeptByClose(t *testing.T) {
 		if strings.HasPrefix(c, "workspace add") {
 			t.Errorf("resume recreated the workspace: %q", c)
 		}
+	}
+}
+
+// Resume makes a removed workspace again from its saved revisions, in the same
+// subproject; a direct session starts in its directory without jj.
+func TestResumeSession_Isolation(t *testing.T) {
+	tests := []struct {
+		name        string
+		isolation   string
+		emptyPath   bool
+		wantJJAdd   bool
+		wantWorkDir func(m *Manager, repo string) string
+	}{
+		{
+			name: "removed workspace is made again", isolation: store.IsolationWorkspace, wantJJAdd: true,
+			wantWorkDir: func(m *Manager, repo string) string {
+				return filepath.Join(m.ws().root(repo, "ws"), "packages", "api")
+			},
+		},
+		{
+			name: "direct session is not given a workspace", isolation: store.IsolationDirect,
+			wantWorkDir: func(_ *Manager, repo string) string { return repo },
+		},
+		{
+			// An empty path does not make it a removed workspace: the kind is recorded.
+			name: "direct session without a recorded directory starts in the repository", isolation: store.IsolationDirect,
+			emptyPath:   true,
+			wantWorkDir: func(_ *Manager, repo string) string { return repo },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, be := newTestManager(t)
+			jjCalls := useFakeJJ(t, m, false)
+			sess := createPlainSession(t, m)
+			if err := RecordSessionStart(m.store, sess.ID, "claude-1", SourceStartup); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := m.Kill(sess.ID); err != nil {
+				t.Fatal(err)
+			}
+			repo := mustGet(t, m.store, sess.ID).RepoPath
+			if _, err := m.store.Update(string(sess.ID), func(r *store.Record) error {
+				r.Name = "ws"
+				r.Isolation = tt.isolation
+				r.SubProjectDir = filepath.Join("packages", "api")
+				r.WorkspaceName = ""
+				r.WorkspacePath = ""
+				if tt.isolation == store.IsolationDirect && !tt.emptyPath {
+					r.WorkspacePath = repo
+				}
+				r.LastJJRevision, r.LastJJParentRevision = "at-rev", "parent-rev"
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			m.Reload()
+			// The fake jj makes only the workspace root; a real checkout has the subproject in it.
+			if err := os.MkdirAll(tt.wantWorkDir(m, repo), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			before := len(jjCalls())
+
+			if err := m.ResumeSession(context.Background(), sess.ID); err != nil {
+				t.Fatalf("ResumeSession: %v", err)
+			}
+
+			added := false
+			for _, c := range jjCalls()[before:] {
+				added = added || strings.HasPrefix(c, "workspace add")
+			}
+			if added != tt.wantJJAdd {
+				t.Errorf("workspace add called = %v, want %v (calls %q)", added, tt.wantJJAdd, jjCalls()[before:])
+			}
+			want := tt.wantWorkDir(m, repo)
+			if got := be.started[len(be.started)-1].WorkDir; got != want {
+				t.Errorf("started in %q, want %q", got, want)
+			}
+			iso := isolationFromRecord(mustGet(t, m.store, sess.ID))
+			if iso.IsWorkspace() != tt.wantJJAdd || (tt.wantJJAdd && (!iso.HasWorkspace() || iso.WorkDir() != want)) {
+				t.Errorf("stored isolation = %+v", iso)
+			}
+		})
 	}
 }
 
@@ -472,7 +562,7 @@ func TestResumeSession_AdoptsExternalSession(t *testing.T) {
 	m, be := newTestManager(t)
 	dir := t.TempDir()
 	ext := &Session{
-		ID: "ext", Name: "abcd1234", RepoPath: dir, WorkspacePath: dir,
+		ID: "ext", Name: "abcd1234", RepoPath: dir, Isolation: DirectIsolation(dir),
 		Origin: OriginExternal, SessionChain: []ClaudeSessionID{"claude-ext"},
 	}
 	m.mu.Lock()
@@ -721,6 +811,7 @@ func TestPruneOldSessions_DiscardsWorkspace(t *testing.T) {
 	tests := []struct {
 		name          string
 		workspaceName string // the pruned row's WorkspaceName
+		direct        bool   // the pruned row ran without a workspace
 		newestName    string // the Name of the row that stays
 		jjLogFails    bool
 		wantDir       bool
@@ -759,6 +850,14 @@ func TestPruneOldSessions_DiscardsWorkspace(t *testing.T) {
 			wantDir:       true,
 			wantJJ:        []string{snapshot},
 			wantForgotten: false,
+		}, {
+			// Its name matches a workspace directory, which is not its own.
+			name:          "direct session: nothing is removed or forgotten",
+			direct:        true,
+			newestName:    "other",
+			wantDir:       true,
+			wantJJ:        nil,
+			wantForgotten: false,
 		},
 	}
 	for _, tt := range tests {
@@ -782,7 +881,13 @@ func TestPruneOldSessions_DiscardsWorkspace(t *testing.T) {
 			at := func(sec int64) time.Time { return time.Unix(1_700_000_000+sec, 0) }
 			for _, r := range []store.Record{
 				{ID: "newest", Name: tt.newestName, RepoPath: repo, Status: StatusCompleted.ID(), LastActivity: at(9)},
-				{ID: "old", Name: "ws", RepoPath: repo, WorkspaceName: tt.workspaceName, Status: StatusCompleted.ID(), LastActivity: at(1)},
+				func() store.Record {
+					r := store.Record{ID: "old", Name: "ws", RepoPath: repo, WorkspaceName: tt.workspaceName, Status: StatusCompleted.ID(), LastActivity: at(1)}
+					if tt.direct {
+						r.Isolation, r.WorkspacePath = store.IsolationDirect, repo
+					}
+					return r
+				}(),
 			} {
 				if err := m.store.Insert(r); err != nil {
 					t.Fatalf("Insert: %v", err)
@@ -1056,6 +1161,8 @@ func TestLoadExisting_DeletedDirectory(t *testing.T) {
 	for _, r := range []store.Record{
 		{ID: "deleted-dir", RepoPath: "/repo", WorkspacePath: deletedPath, Status: StatusCompleted.ID(), FinishedAt: &finishedAt},
 		{ID: "existing-dir", RepoPath: "/repo", WorkspacePath: existingPath, Status: StatusCompleted.ID(), FinishedAt: &finishedAt},
+		// close removed the workspace; the repository is what is checked, and it exists.
+		{ID: "removed-ws", Name: "ws", RepoPath: existingPath, Isolation: store.IsolationWorkspace, Status: StatusCompleted.ID(), FinishedAt: &finishedAt},
 	} {
 		if err := m.store.Insert(r); err != nil {
 			t.Fatalf("Insert: %v", err)
@@ -1076,6 +1183,9 @@ func TestLoadExisting_DeletedDirectory(t *testing.T) {
 	}
 	if s := m.GetSession("existing-dir").GetStatus(); s != StatusCompleted {
 		t.Errorf("existing-dir status = %v, want Completed", s)
+	}
+	if s := m.GetSession("removed-ws").GetStatus(); s != StatusCompleted {
+		t.Errorf("removed-ws status = %v, want Completed", s)
 	}
 }
 

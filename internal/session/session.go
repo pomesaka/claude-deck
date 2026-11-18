@@ -147,8 +147,8 @@ func (d DisplayChannel) String() string {
 // Session represents a single agent runtime session tracked by claude-deck.
 //
 // Data sources:
-//   - Store (SQLite deck.db): ID, Name, RepoPath, RepoName, WorkspacePath,
-//     WorkspaceName, SessionChain, Status, FinishedAt, PID
+//   - Store (SQLite deck.db): ID, Name, RepoPath, RepoName, Isolation,
+//     SessionChain, Status, FinishedAt, PID
 //   - JSONL (runtime primary): Prompt, PermissionMode, StartedAt, LastActivity
 //   - Runtime only: CurrentTool
 type Session struct {
@@ -171,14 +171,11 @@ type Session struct {
 	Pinned   bool   `json:"-"`
 	RepoPath string `json:"repo_path"` // immutable after creation
 	RepoName string `json:"repo_name"` // immutable after creation
-	// WorkspacePath is the actual Claude Code working directory and may include a sub-project
-	// subdirectory (i.e., <wsRoot>/<SubProjectDir>). WorkspaceName is the root jj workspace
-	// name; the root can be reconstructed as DataDir/workspace/<encodedRepo>/<WorkspaceName>.
-	// Kill removes the root via WorkspaceName, not WorkspacePath.
-	// set by CreateSession/ForkSession; cleared by Kill; requires mu except where benign race is documented.
-	WorkspacePath string `json:"workspace_path"`
-	WorkspaceName string `json:"workspace_name"`            // set by CreateSession; cleared by Kill; requires mu except where benign race is documented
-	SubProjectDir string `json:"sub_project_dir,omitempty"` // immutable after creation; relative path to sub-project
+	// Isolation is where the process runs: directly in a directory, or in the
+	// session's jj workspace. Set by CreateSession/ForkSession, changed by Kill
+	// and ResumeSession through the store.
+	Isolation     Isolation `json:"-"`
+	SubProjectDir string    `json:"sub_project_dir,omitempty"` // immutable after creation; relative path to sub-project
 	// SessionChain は agent runtime が割り当てるセッション ID の履歴（古い順）。
 	// /clear や compact など runtime 固有の reset 操作で末尾に新 ID が追加される。
 	// 現在の ID は SessionChain[len-1]、旧 ID はそれ以前の要素。
@@ -196,10 +193,6 @@ type Session struct {
 	PID           int              `json:"pid,omitempty"`
 	TerminalTitle string           `json:"terminal_title,omitempty"` // OSC 0/2 で設定されたターミナルタイトル（セッション一覧表示用）
 	BookmarkName  string           `json:"bookmark_name,omitempty"`  // jj の最近接ブックマーク名（セッション一覧表示用）
-	// Kill 時に保存した @ / @- の change_id。Resume 時のワークスペース再作成で使う。
-	// 常にペアで更新すること。
-	LastJJRevision       string `json:"last_jj_revision,omitempty"`
-	LastJJParentRevision string `json:"last_jj_parent_revision,omitempty"`
 
 	// --- Hydrated from JSONL (JSONL が最新値を上書きするが、ストアにも保存して再起動時に即表示) ---
 	Prompt         string    `json:"prompt,omitempty"`
@@ -281,7 +274,7 @@ type Snapshot struct {
 	Pinned           bool
 	RepoPath         string
 	RepoName         string
-	WorkspacePath    string
+	Isolation        Isolation
 	SubProjectDir    string
 	RuntimeSessionID RuntimeSessionID
 	// RuntimeSessionIDs contains all historical runtime session IDs except the current one,
@@ -323,13 +316,10 @@ func (s Snapshot) DisplayName() string {
 	return s.Name
 }
 
-// WorkDir returns the effective working directory for this session.
-// WorkspacePath があればそれを、なければ RepoPath をフォールバックとして返す。
+// WorkDir returns the effective working directory for this session: where its
+// process runs, or the repository while its workspace is removed.
 func (s Snapshot) WorkDir() string {
-	if s.WorkspacePath != "" {
-		return s.WorkspacePath
-	}
-	return s.RepoPath
+	return s.Isolation.workDirOr(s.RepoPath)
 }
 
 // Snapshot returns a consistent, lock-free copy of the session state.
@@ -360,7 +350,7 @@ func (s *Session) Snapshot() Snapshot {
 		Pinned:           s.Pinned,
 		RepoPath:         s.RepoPath,
 		RepoName:         s.RepoName,
-		WorkspacePath:    s.WorkspacePath,
+		Isolation:        s.Isolation,
 		SubProjectDir:    s.SubProjectDir,
 		RuntimeSessionID: s.CurrentRuntimeID(),
 		PriorRuntimeIDs:  s.PriorRuntimeIDs(),

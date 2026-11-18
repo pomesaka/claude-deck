@@ -75,7 +75,7 @@ func (ws workspaces) remove(repoPath, wsName string) (atRev, parentRev string, r
 
 // cleanup runs jj workspace forget and removes the workspace directory.
 // wsRootPath is the workspace root directory to delete (DataDir/workspace/<encoded>/<name>).
-// It may differ from sess.WorkspacePath, which can point to a subproject subdirectory.
+// It may differ from the session's work directory, which can be a subproject subdirectory.
 // Returns a warning string if any operation failed, or "" on success/skip.
 func (ws workspaces) cleanup(repoPath, wsName, wsRootPath string) string {
 	if wsName == "" || repoPath == "" {
@@ -162,7 +162,9 @@ func (ws workspaces) recreate(repoPath, sessName, subProjectDir, atRev, parentRe
 // A pruned session is gone from the list and cannot be resumed, so nothing
 // would ever remove them otherwise.
 func (ws workspaces) discardPruned(r store.Record, kept []store.Record) {
-	if r.RepoPath == "" || r.Name == "" {
+	// 直接起動のセッションはリポジトリで動いていたので、消すワークスペースも、ワークスペースに
+	// ついての登録も無い。同じ名前のディレクトリがあっても、それはこの行のものではない。
+	if r.RepoPath == "" || r.Name == "" || !isolationFromRecord(r).IsWorkspace() {
 		return
 	}
 	// ワークスペースの名前はセッション名と同じ（CreateSession / ResumeSession）。
@@ -176,8 +178,8 @@ func (ws workspaces) discardPruned(r store.Record, kept []store.Record) {
 	}
 	wsRoot := ws.root(r.RepoPath, r.Name)
 
-	// WorkspaceName が空の行は、close でワークスペースを消してある。
-	if r.WorkspaceName != "" {
+	// 直接起動の行と、close でワークスペースを消した行には、消すワークスペースが無い。
+	if isolationFromRecord(r).HasWorkspace() {
 		// 消せなかったワークスペースは、行がもう無いので手で片付けることになる。
 		if _, _, removed := ws.remove(r.RepoPath, r.Name); !removed {
 			return

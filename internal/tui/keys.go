@@ -289,7 +289,10 @@ func (m *Model) resumeSelected() tea.Cmd {
 	if sess == nil {
 		return nil
 	}
-	if !sess.Snapshot().CanResume() {
+	if snap := sess.Snapshot(); !snap.CanResume() {
+		if snap.Status == session.StatusUnknown {
+			return m.flash("状態が不明なため再開できません")
+		}
 		return m.flash("実行中のセッションは再開できません")
 	}
 

@@ -67,11 +67,13 @@ func newExternalSession(info *usage.SessionInfo) *Session { //nolint:unparam
 	name, repoPath, repoName, subProjectDir := resolveExternalSessionPaths(info.CWD, info.SessionID)
 
 	sess := &Session{
-		ID:             GenerateSessionID(),
-		Name:           name,
-		RepoPath:       repoPath,
-		RepoName:       repoName,
-		WorkspacePath:  info.CWD,
+		ID:       GenerateSessionID(),
+		Name:     name,
+		RepoPath: repoPath,
+		RepoName: repoName,
+		// 外部のプロセスが起動したので、cwd が jj ワークスペースでも claude-deck のものではない。
+		// 直接起動として扱い、close で消さない。
+		Isolation:      DirectIsolation(info.CWD),
 		SubProjectDir:  subProjectDir,
 		SessionChain:   []ClaudeSessionID{ClaudeSessionID(info.SessionID)},
 		Origin:         OriginExternal,
@@ -141,7 +143,7 @@ func (m *Manager) hasManagedSessionAtWorkspaceLocked(workspacePath string) bool 
 		// m.mu(R) → s.mu(R) は CLAUDE.md の「Manager.mu → Session.mu」順に準拠。
 		// s.mu を保持したまま m.mu を取得するパスはコードベース全体に存在しないため安全。
 		s.mu.RLock()
-		wp := s.WorkspacePath
+		wp := s.Isolation.WorkDir()
 		live := s.hasProcessLocked()
 		s.mu.RUnlock()
 		if wp == workspacePath && live {
@@ -275,8 +277,8 @@ func (m *Manager) adoptRuntimeID(info *usage.SessionInfo) bool {
 	for _, sess := range m.sessions {
 		sess.mu.RLock()
 		candidate := sess.Origin == OriginDeck && len(sess.SessionChain) == 0
-		exactWorkspace := info.CWD != "" && sess.WorkspacePath == info.CWD
-		recreatedWorkspace := sess.WorkspacePath == "" && sess.Name == name && sess.RepoPath == repoPath
+		exactWorkspace := info.CWD != "" && sess.Isolation.WorkDir() == info.CWD
+		recreatedWorkspace := sess.Isolation.IsWorkspace() && !sess.Isolation.HasWorkspace() && sess.Name == name && sess.RepoPath == repoPath
 		sess.mu.RUnlock()
 		if candidate && (exactWorkspace || recreatedWorkspace) {
 			target = sess.ID
