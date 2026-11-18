@@ -12,7 +12,8 @@
 #   <DIR>/jjrepo           セッションを作れる本物の jj リポジトリ。HOME の外に置くので、n の探索には出ない
 #   <DIR>/bin/claude       Claude Code の代わり。引数と作業フォルダを出して眠るだけ。hook は動かない
 #   <DIR>/bin/jj           本物の jj を呼ぶ。呼ばれるたびに <DIR>/jj.log に 1 行書く。<DIR>/jjlogfail があると jj log だけ失敗する
-#   <DIR>/bin/tmux-slow    本物の tmux を呼ぶ。<DIR>/slowtmux があると select-window の前に 0〜0.5 秒待ち、<DIR>/select.log に書く
+#   <DIR>/bin/tmux-slow    本物の tmux を呼ぶ。<DIR>/slowtmux があると select-window の前に 0〜0.5 秒待ち、<DIR>/select.log に書く。
+#                          <DIR>/slownew があると new-window の前に 4 秒待つ（作成、再開、フォークが遅くなる）
 set -eu
 DIR=${1:?usage: setup.sh <dir>}
 mkdir -p "$DIR"
@@ -51,6 +52,10 @@ exec "$JJ" "\$@"
 EOF
 cat > "$DIR/bin/tmux-slow" <<EOF
 #!/bin/sh
+if [ "\$1" = new-window ] && [ -e "$DIR/slownew" ]; then
+  echo "\$(date +%T) slow \$*" >> "$DIR/select.log"
+  sleep 4
+fi
 if [ "\$1" = select-window ] && [ -e "$DIR/slowtmux" ]; then
   perl -e 'select(undef,undef,undef,rand(0.5))'
   echo "\$(date +%T) \$*" >> "$DIR/select.log"

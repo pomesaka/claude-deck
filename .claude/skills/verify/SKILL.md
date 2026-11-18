@@ -67,8 +67,18 @@ jq -c . /tmp/cdv/new1.json
 - `close` と `list` は tmux の外から打ってよい。
 - ワークスペースは `/tmp/cdv/data/workspace/-tmp-cdv-jjrepo/<名前>` にできる。`jj workspace list` は `/tmp/cdv/jjrepo` で `HOME=/tmp/cdv/home jj workspace list --ignore-working-copy` と打つ。
 - jj の作業コピーの取り込みを失敗させるには `touch /tmp/cdv/jjlogfail`（`jj log` だけが失敗する）。戻すときは `rm /tmp/cdv/jjlogfail`。呼ばれた jj は `/tmp/cdv/jj.log` に出る。
-- `r` で再開するには、行に Claude Code のセッション ID が要る。偽の claude は書かないので、`sqlite3 /tmp/cdv/data/deck.db "update sessions set session_chain='[\"11111111-1111-4111-8111-111111111111\"]' where name='<名前>'"` で入れる。再開したウィンドウの画面に、偽の claude が引数と作業フォルダを出す。
+- `r` で再開するには、行に Claude Code のセッション ID が要る。偽の claude は書かないので、`sqlite3 /tmp/cdv/data/deck.db "update sessions set session_chain='[\"11111111-1111-4111-8111-111111111111\"]' where name='<名前>'"` で入れる。再開したウィンドウの画面に、偽の claude が引数と作業フォルダを出す。ID は行ごとに変える。同じ ID の行が 2 つあると、次に起動したとき片方が重複として store から消える。
+- 行をまとめて作るときは、ワークスペースを作らない `new` を繰り返す。`tmux -L cdverify send-keys -t cli 'for i in $(seq 1 16); do /tmp/cdv/cli.sh new --dir /tmp/cdv/jjrepo --no-workspace > /dev/null; echo rc$i=$?; done; echo ALLDONE' Enter`
+- `touch /tmp/cdv/slownew` で `new-window` が 4 秒遅れ、作成、再開、フォークの完了を待つ間に操作できる。戻すときは `rm /tmp/cdv/slownew`。
+- TUI の `n` から作るには、偽 HOME の候補は `.jj` だけの空のフォルダなので、本物の jj リポジトリを置いてから探索を待つ。`mkdir -p /tmp/cdv/home/repos/realrepo` の後、`HOME=/tmp/cdv/home jj git init /tmp/cdv/home/repos/realrepo` を打つ。
 - store の行は `sqlite3 /tmp/cdv/data/deck.db "select name,status,workspace_name,finished_at,last_activity from sessions"` で読める。時刻はナノ秒。TUI は終了時に、メモリの `last_activity` で store を上書きする（偽の claude では 0）。store の時刻を書き換えて並びを見るときは、CLI の `list` で見る。
+
+## 一覧の表示を見る
+
+- レート制限の行（ヘッダーの 2 行目）は、`/tmp/cdv/data/rate-limits.json` に `{"rate_limits":{"five_hour":{"used_percentage":42,"resets_at":1900000000},"seven_day":{"used_percentage":17,"resets_at":1900500000}}}` を書くと出る。起動中に書いても出る（fsnotify）。
+- カーソルの行は、画面の 1 行目の名前と同じ名前の行で、`capture-pane -p -e` で背景 `48;5;237` が付く。`tmux -L cdverify capture-pane -p -e -t run | rg -n '48;5;237' | cut -c1-5` で行番号が出る。
+- 高さは `tmux -L cdverify resize-window -t run -x 160 -y 16` で変える。
+- 変更前の版と比べるときは、次の順に打ってビルドし、`run-old.sh` で起動する。`mkdir -p /tmp/cdv/old-src`、`git -C <リポジトリ> archive HEAD -o /tmp/cdv/old.tar`、`tar -x -C /tmp/cdv/old-src -f /tmp/cdv/old.tar`、`GOEXPERIMENT=jsonv2 go build -C /tmp/cdv/old-src -o /tmp/cdv/claude-deck-old ./cmd/claude-deck`、`sed 's#/claude-deck"#/claude-deck-old"#' /tmp/cdv/run.sh > /tmp/cdv/run-old.sh`、`chmod +x /tmp/cdv/run-old.sh`。
 
 ## 右ペインの切り替えを見る
 
@@ -92,6 +102,9 @@ tmux -L cdverify capture-pane -p -t run | head -1
 - 実行中と終了済みのセッションを混ぜ、`slowtmux` を置いて j/k をまとめて送る。選ばれたウィンドウと 1 行目の名前が食い違わないか。切り替えを並列に出す作りでは、6 回中 4 回食い違った。
 - `jjlogfail` を置いて `close` と `x`。ワークスペースと中の未取り込みのファイルが残るか。外してからもう一度 `close` すると、取り込んでから消えるか。
 - `[session] max_sessions` を行の数にして、最も古い終了済みの行がワークスペースを残しているときに `new` を打つ（prune が走る）。`jjlogfail` の有無で、ワークスペースが残るか消えるか。
+- レート制限の行を出し、行を 15 件以上にして、高さ 15〜23 で `G` の後に k と j を 1 つずつ送る。毎回カーソルの行が描かれているか。窓の見積もりを View と別に持っていた版では、高さ 16 と 22 で描かれない位置があった。
+- `slownew` を置いて終了済みの行で Enter を押し、完了前に j で動かすか、フィルタを変える。完了後にフィルタが解け、カーソル、1 行目、選ばれたウィンドウが再開した行になるか。
+- `?` の直後や再開中に `C-c` を押し、3 秒以上待つ。「終了しますか? (y/n)」が残るか。
 - `x` のステータス行は 5 秒ほどで消え、幅で切れる。`tmux -L cdverify resize-window -t run -x 60` で狭くして見る。
 
 ## 止める
