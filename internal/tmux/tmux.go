@@ -5,6 +5,7 @@ package tmux
 
 import (
 	"bufio"
+	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -44,7 +45,12 @@ func (r *Runner) sess() string {
 // run executes a tmux sub-command and returns trimmed combined output.
 func (r *Runner) run(args ...string) (string, error) {
 	out, err := exec.Command(r.cmd(), args...).CombinedOutput()
-	return strings.TrimRight(string(out), "\n"), err
+	text := strings.TrimRight(string(out), "\n")
+	if err != nil && text != "" {
+		// tmux の理由（"Command too long" など）は出力にしか出ない。
+		err = fmt.Errorf("%w: %s", err, text)
+	}
+	return text, err
 }
 
 // ── Session lifecycle ────────────────────────────────────────────────────────

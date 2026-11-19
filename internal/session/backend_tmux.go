@@ -55,6 +55,10 @@ func (b *tmuxBackend) StartProcess(sessionID DeckSessionID, opts ProcessStartOpt
 		shellCmd += "; " + buildShellCommand(opts.OnExit[0], opts.OnExit[1:])
 	}
 	debuglog.Printf("[tmuxBackend] StartProcess session=%s cmd=%s", sessionID, shellCmd)
+	shellCmd, err := launchCommand(shellCmd)
+	if err != nil {
+		return 0, err
+	}
 
 	wopts := tmux.WindowOpts{
 		Command: shellCmd,
@@ -202,9 +206,38 @@ func (b *tmuxBackend) KillPreview() error {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// maxInlineCommand is the longest command passed to tmux new-window as it is.
+// WHY: tmux はコマンドの長さに上限があり、約 16KB の new-window を "Command too long" で
+// 断った（tmux 3.6a、2026-11 に確認）。長い最初の指示（new --prompt -）で届く。余裕を取る。
+const maxInlineCommand = 4096
+
+// launchCommand returns shellCmd itself when it is short enough for tmux, and
+// otherwise writes it to a temporary script and returns a command running that
+// script. The script removes itself when it starts.
+func launchCommand(shellCmd string) (string, error) {
+	if len(shellCmd) <= maxInlineCommand {
+		return shellCmd, nil
+	}
+	f, err := os.CreateTemp("", "claude-deck-launch-*.sh")
+	if err != nil {
+		return "", fmt.Errorf("writing the launch script: %w", err)
+	}
+	script := "#!/bin/sh\nrm -f \"$0\"\n" + shellCmd + "\n"
+	if _, err := f.WriteString(script); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", fmt.Errorf("writing the launch script: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("writing the launch script: %w", err)
+	}
+	return buildShellCommand("/bin/sh", []string{f.Name()}), nil
+}
+
 // buildShellCommand assembles a shell-safe command string from a binary path
 // and argument list.  Each component is single-quote escaped to preserve
-// spaces, special characters, and prompt text in -p arguments.
+// spaces, newlines, special characters, and the first prompt as one argument each.
 func buildShellCommand(cmd string, args []string) string {
 	parts := make([]string, 0, len(args)+1)
 	parts = append(parts, shellescape(cmd))
