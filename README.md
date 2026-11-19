@@ -126,13 +126,14 @@ jj git push --change <change-id>        # or a closed one's, by the change ID jj
 Every command prints JSON and works without the TUI running, from any shell or agent:
 
 ```bash
-claude-deck new --dir ~/src/api     # start a session in a new workspace; prints it
+claude-deck new --dir ~/src/api --prompt "Add retries to the HTTP client"   # start a session on a task
+echo "$long_task" | claude-deck new --prompt -    # or read the task from stdin
 claude-deck list                    # every session, in the order of the list (an array)
 claude-deck list --alias invoice    # only sessions whose label contains "invoice"
 claude-deck close maika-7c78        # stop it and remove its workspace (ID or name)
 ```
 
-Every session claude-deck starts also gets the bundled `deck-status:claude-deck` skill, which teaches Claude Code these commands. Ask such a session to "start another session in this repository" and the new one appears in the list.
+Every session claude-deck starts also gets the bundled `deck-status:claude-deck` skill, which teaches Claude Code these commands. Ask such a session to "start another session to look into the flaky test" and the new one appears in the list, already working on it.
 
 <details>
 <summary>Output, statuses, and driving a session from a script</summary>
@@ -154,13 +155,9 @@ Every session claude-deck starts also gets the bundled `deck-status:claude-deck`
 
 `status` is one of `running`, `idle`, `subagent_running`, `waiting_approval`, `waiting_answer`, `completed` and `error`. There is no wait command; poll `list`.
 
-A new session starts empty. `new` returns as soon as its tmux window opens, before Claude Code is ready, and its `status` is already `idle`. Wait until `claude_session_id` appears (Claude Code reports it when it starts), then type the task into the window named after the session's `id`:
+`--prompt` gives the session its first task; it stays an interactive session you can talk to afterwards. Without it, the session starts waiting for one.
 
-```bash
-tmux send-keys -t "claude-deck:$id" "your task" Enter
-```
-
-`idle` then means the session has finished its turn; it is also `idle` before the first task, so keep track of whether you have sent one. No command returns the session's last reply; it is in the Claude Code transcript, `~/.claude/projects/*/<claude_session_id>.jsonl`. To keep sessions from stopping for approvals, set [`permission_mode`](docs/configuration.md).
+`new` returns as soon as the session's tmux window opens, before Claude Code has started on the task, and its `status` is already `idle`. To wait for the task to finish, wait for `running` first, then for `idle` (its turn ended). No command returns the session's last reply; it is in the Claude Code transcript, `~/.claude/projects/*/<claude_session_id>.jsonl`. To keep sessions from stopping for approvals, set [`permission_mode`](docs/configuration.md).
 
 </details>
 

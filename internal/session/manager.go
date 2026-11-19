@@ -171,7 +171,7 @@ func (m *Manager) runtime() agentruntime.Runtime {
 // startSpec builds the runtime command for one launch. Every launch mode goes through
 // here so that the session name, the plugin dir, --add-dir and the project's own
 // arguments are passed the same way.
-func (m *Manager) startSpec(mode agentruntime.LaunchMode, runtimeID RuntimeSessionID, workDir, name, repoPath string) agentruntime.StartSpec {
+func (m *Manager) startSpec(mode agentruntime.LaunchMode, runtimeID RuntimeSessionID, workDir, name, repoPath, prompt string) agentruntime.StartSpec {
 	// WHY 末尾に置く: 利用者が書いた引数が、claude-deck の付ける引数の値として読まれないようにする。
 	additional := m.buildAddDirArgs(repoPath)
 	if m.config.ProjectArgsFunc != nil {
@@ -180,6 +180,7 @@ func (m *Manager) startSpec(mode agentruntime.LaunchMode, runtimeID RuntimeSessi
 	return m.runtime().StartSpec(agentruntime.StartRequest{
 		Mode:           mode,
 		SessionID:      string(runtimeID),
+		Prompt:         prompt,
 		WorkDir:        workDir,
 		SessionName:    name,
 		PermissionMode: m.config.DefaultPermissionMode,
@@ -335,7 +336,8 @@ func (m *Manager) startNewSession(sess *Session, workDir string, spec agentrunti
 // CreateSession creates and starts a new Claude Code session.
 // repoPath は .jj のあるリポジトリルート、workingDir は claude を起動するディレクトリ（サブプロジェクト対応）。
 // withWorkspace が true なら jj workspace を作成して隔離環境で起動する。
-func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir string, withWorkspace bool) (*Session, error) {
+// prompt is the first instruction for the agent, or "" to start it waiting for one.
+func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir string, withWorkspace bool, prompt string) (*Session, error) {
 	debuglog.Printf("[CreateSession] repoPath=%q workingDir=%q withWorkspace=%v", repoPath, workingDir, withWorkspace)
 	repoName := filepath.Base(repoPath)
 	sess := NewSession(repoPath, repoName)
@@ -372,7 +374,7 @@ func (m *Manager) CreateSession(ctx context.Context, repoPath string, workingDir
 	}
 
 	debuglog.Printf("[CreateSession] starting process workDir=%q", actualWorkDir)
-	spec := m.startSpec(agentruntime.LaunchNew, "", actualWorkDir, sess.Name, repoPath)
+	spec := m.startSpec(agentruntime.LaunchNew, "", actualWorkDir, sess.Name, repoPath, prompt)
 	if err := m.startNewSession(sess, actualWorkDir, spec); err != nil {
 		if withWorkspace {
 			m.ws().discard(repoPath, sess.Name)
@@ -548,7 +550,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 		return fail(fmt.Errorf("directory not found: %s", workDir), true)
 	}
 
-	spec := m.startSpec(agentruntime.LaunchResume, RuntimeSessionID(csID), workDir, rec.Name, rec.RepoPath)
+	spec := m.startSpec(agentruntime.LaunchResume, RuntimeSessionID(csID), workDir, rec.Name, rec.RepoPath, "")
 	pid, err := m.backend.StartProcess(sessionID, m.processOpts(sessionID, workDir, spec))
 	if err != nil {
 		debuglog.Printf("[ResumeSession] StartProcess failed: %v", err)
@@ -634,7 +636,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	sess.SubProjectDir = srcSubProjectDir
 	sess.ForkedFrom = srcClaudeID
 
-	spec := m.startSpec(agentruntime.LaunchFork, srcClaudeID, actualWorkDir, sess.Name, repoPath)
+	spec := m.startSpec(agentruntime.LaunchFork, srcClaudeID, actualWorkDir, sess.Name, repoPath, "")
 	if err := m.startNewSession(sess, actualWorkDir, spec); err != nil {
 		m.ws().discard(repoPath, wsName)
 		return nil, fmt.Errorf("starting forked session: %w", err)

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -24,34 +26,45 @@ type cliRequest struct {
 	Op          string
 	Dir         string // new
 	NoWorkspace bool   // new
-	Target      string // close, alias
-	Alias       string // alias: the alias to set. list: the text to filter aliases by
-	DryRun      bool   // gc
+	// Prompt is the first instruction given to the new session's agent, or "".
+	Prompt string // new
+	Target string // close, alias
+	Alias  string // alias: the alias to set. list: the text to filter aliases by
+	DryRun bool   // gc
 	// project (Dir is the project)
 	ProjectOp  string
 	ClaudeArgs []string // projectSetArgs: the arguments to set
 	// hook
-	HookEvent       string
-	Session         string
+	HookEvent string
+	Session   string
 	// Activity is what `hook status` reports. Completed and Error are not
 	// activities: they come from the exit command and close, which also record FinishedAt.
-	Activity session.Activity
+	Activity        session.Activity
 	ClaudeSessionID string
 	Source          string
 	RateLimits      string // JSON, as ratelimits.ParseMeasured reads it
 }
 
+// cliParser parses the arguments of a subcommand. stdin is read only by the
+// options that say so (new --prompt -).
+type cliParser func(args []string, stdin io.Reader) (cliRequest, error)
+
+// ignoreStdin adapts a parser that never reads stdin.
+func ignoreStdin(parse func(args []string) (cliRequest, error)) cliParser {
+	return func(args []string, _ io.Reader) (cliRequest, error) { return parse(args) }
+}
+
 // cliCommands are the subcommands. Each one works on the store directly, so the
 // TUI does not need to be running.
-var cliCommands = map[string]func(args []string) (cliRequest, error){
-	"new":   parseNewArgs,
-	"list":  parseListArgs,
-	"tree":  parseTreeArgs,
-	"close": parseCloseArgs,
-	"alias": parseAliasArgs,
-	"gc":      parseGCArgs,
-	"project": parseProjectArgs,
-	"hook":    parseHookArgs,
+var cliCommands = map[string]cliParser{
+	"new":     parseNewArgs,
+	"list":    ignoreStdin(parseListArgs),
+	"tree":    ignoreStdin(parseTreeArgs),
+	"close":   ignoreStdin(parseCloseArgs),
+	"alias":   ignoreStdin(parseAliasArgs),
+	"gc":      ignoreStdin(parseGCArgs),
+	"project": ignoreStdin(parseProjectArgs),
+	"hook":    ignoreStdin(parseHookArgs),
 }
 
 // SessionInfo is the JSON form of a session printed by new / list / close.
@@ -113,7 +126,7 @@ func infoFromGCReport(r session.GCReport) GCInfo {
 
 // runCLI runs one subcommand.
 func runCLI(name string, args []string) error {
-	req, err := cliCommands[name](args)
+	req, err := cliCommands[name](args, os.Stdin)
 	if err != nil {
 		return err
 	}
@@ -184,7 +197,7 @@ func runCLI(name string, args []string) error {
 		if withWorkspace && !isJJ {
 			return fmt.Errorf("%s is not a jj repository, so no workspace can be made (use --no-workspace to run in place)", req.Dir)
 		}
-		sess, err := mgr.CreateSession(ctx, repoPath, workingDir, withWorkspace)
+		sess, err := mgr.CreateSession(ctx, repoPath, workingDir, withWorkspace, req.Prompt)
 		if err != nil {
 			return err
 		}
@@ -207,15 +220,17 @@ func runCLI(name string, args []string) error {
 	}
 }
 
-func parseNewArgs(args []string) (cliRequest, error) {
+func parseNewArgs(args []string, stdin io.Reader) (cliRequest, error) {
 	fs := flag.NewFlagSet("new", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: claude-deck new [--dir DIR] [--no-workspace]")
+		fmt.Fprintln(fs.Output(), "Usage: claude-deck new [--dir DIR] [--no-workspace] [--prompt TEXT|-]")
 		fmt.Fprintln(fs.Output(), "Creates a session as n does in the TUI and prints it as JSON. The TUI need not be running.")
 		fs.PrintDefaults()
 	}
 	dir := fs.String("dir", "", "directory to start the session in (default: current directory); inside a jj workspace it resolves to the same place in the main repository")
 	noWorkspace := fs.Bool("no-workspace", false, "run in the directory without a jj workspace (C-Enter in the TUI)")
+	var prompt optionalString
+	fs.Var(&prompt, "prompt", "first instruction for the session's agent; - reads it from stdin")
 	if err := fs.Parse(args); err != nil {
 		return cliRequest{}, err
 	}
@@ -226,7 +241,37 @@ func parseNewArgs(args []string) (cliRequest, error) {
 	if err != nil {
 		return cliRequest{}, err
 	}
-	return cliRequest{Op: "new", Dir: absDir, NoWorkspace: *noWorkspace}, nil
+	req := cliRequest{Op: "new", Dir: absDir, NoWorkspace: *noWorkspace}
+	if prompt.set {
+		text := prompt.value
+		if text == "-" {
+			data, err := io.ReadAll(stdin)
+			if err != nil {
+				return cliRequest{}, fmt.Errorf("new: reading the prompt from stdin: %w", err)
+			}
+			text = string(data)
+		}
+		// 前後の空白と改行は落とす（echo やヒアドキュメントの末尾の改行）。中の改行は残す。
+		req.Prompt = strings.TrimSpace(text)
+		if req.Prompt == "" {
+			return cliRequest{}, errors.New("new: --prompt is empty")
+		}
+	}
+	return req, nil
+}
+
+// optionalString is a string flag that records whether it was given, so an
+// empty --prompt "" is an error rather than the same as no --prompt.
+type optionalString struct {
+	value string
+	set   bool
+}
+
+func (o *optionalString) String() string { return o.value }
+
+func (o *optionalString) Set(v string) error {
+	o.value, o.set = v, true
+	return nil
 }
 
 func parseListArgs(args []string) (cliRequest, error) {

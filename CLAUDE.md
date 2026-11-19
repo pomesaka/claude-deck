@@ -106,7 +106,7 @@ CLI を変えたら、同梱のスキル `deck-status:claude-deck`（`deckmod/sk
 
 | コマンド | 対応するキー |
 |------|------|
-| `claude-deck new [--dir DIR] [--no-workspace]` | `n`（`--no-workspace` は C-Enter） |
+| `claude-deck new [--dir DIR] [--no-workspace] [--prompt TEXT\|-]` | `n`（`--no-workspace` は C-Enter）。`--prompt` で最初の指示を渡す（TUI には無い） |
 | `claude-deck list [--alias TEXT]` | 一覧表示。`session_chain` と `forked_from` で `/clear` とフォークの系譜も返す。`--alias` はエイリアスの部分一致で絞る |
 | `claude-deck tree` | なし。Claude Code のセッションを `/clear` とフォークの親子関係でたどった木を、テキストで出す（[用語集](docs/00-glossary.md) の ForkedFrom） |
 | `claude-deck close <ID\|NAME>` | `x` |

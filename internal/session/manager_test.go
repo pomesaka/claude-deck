@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -124,11 +125,39 @@ func mustGet(t *testing.T, st *store.Store, id DeckSessionID) store.Record {
 func createPlainSession(t *testing.T, m *Manager) *Session {
 	t.Helper()
 	dir := t.TempDir()
-	sess, err := m.CreateSession(context.Background(), dir, dir, false)
+	sess, err := m.CreateSession(context.Background(), dir, dir, false, "")
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	return sess
+}
+
+// The first prompt reaches the agent as its last argument, after the plugin
+// and project arguments, and is not stored.
+func TestCreateSession_PassesPrompt(t *testing.T) {
+	for _, prompt := range []string{"hi", ""} {
+		t.Run(fmt.Sprintf("prompt=%q", prompt), func(t *testing.T) {
+			m, be := newTestManager(t)
+			m.config.PluginDir = "/data/plugin"
+			m.config.ProjectArgsFunc = func(string) []string { return []string{"--verbose"} }
+			dir := t.TempDir()
+			sess, err := m.CreateSession(context.Background(), dir, dir, false, prompt)
+			if err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			args := be.started[0].Args
+			if prompt == "" {
+				if slices.Contains(args, "--") {
+					t.Errorf("args %q have -- without a prompt", args)
+				}
+			} else if n := len(args); n < 2 || args[n-2] != "--" || args[n-1] != prompt {
+				t.Errorf("args %q do not end with -- %q", args, prompt)
+			}
+			if got := mustGet(t, m.store, sess.ID).Prompt; got != "" {
+				t.Errorf("stored prompt = %q, want none", got)
+			}
+		})
+	}
 }
 
 func TestCreateSession_WritesStoreBeforeReturning(t *testing.T) {
@@ -173,7 +202,7 @@ func TestCreateSession_MissingWorkDir(t *testing.T) {
 	repo := t.TempDir()
 	missing := filepath.Join(repo, "not-there")
 
-	if _, err := m.CreateSession(context.Background(), repo, missing, false); err == nil {
+	if _, err := m.CreateSession(context.Background(), repo, missing, false, ""); err == nil {
 		t.Fatal("CreateSession in a missing directory succeeded")
 	}
 	if len(be.started) != 0 {

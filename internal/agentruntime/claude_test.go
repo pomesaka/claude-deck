@@ -67,7 +67,23 @@ func TestClaudeRuntimeStartSpec(t *testing.T) {
 			},
 			want: StartSpec{
 				Command: "claude",
-				Args:    []string{"-p", "hello"},
+				Args:    []string{"--", "hello"},
+			},
+		},
+		{
+			// The prompt must not be read as a value of --add-dir, nor as an option.
+			name: "new prompt after options that take several values",
+			req: StartRequest{
+				Mode:           LaunchNew,
+				SessionName:    "anna-8cc7",
+				PermissionMode: "plan",
+				AdditionalArgs: []string{"--add-dir", "/a", "/b"},
+				Prompt:         "-- fix\nnext",
+			},
+			want: StartSpec{
+				Command: "claude",
+				Args: []string{"--permission-mode", "plan", "--name", "anna-8cc7",
+					"--add-dir", "/a", "/b", "--", "-- fix\nnext"},
 			},
 		},
 	}

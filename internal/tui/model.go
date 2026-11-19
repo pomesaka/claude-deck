@@ -33,7 +33,7 @@ type sessionManager interface {
 	ListSessions() []*session.Session
 	RefreshFromJSONL()
 	ResolveJSONLPaths(id session.DeckSessionID) (current string, prior []string)
-	CreateSession(ctx context.Context, repoPath, workingDir string, withWorkspace bool) (*session.Session, error)
+	CreateSession(ctx context.Context, repoPath, workingDir string, withWorkspace bool, prompt string) (*session.Session, error)
 	ForkSession(ctx context.Context, source session.DeckSessionID) (*session.Session, error)
 	ResumeSession(ctx context.Context, id session.DeckSessionID) error
 	Kill(id session.DeckSessionID) (session.CloseResult, error)

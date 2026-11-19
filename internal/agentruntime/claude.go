@@ -25,8 +25,9 @@ func (r ClaudeRuntime) StartSpec(req StartRequest) StartSpec {
 // The launch modes map to:
 //   - resume + fork → --resume <id> --fork-session
 //   - resume        → --resume <id>
-//   - new + prompt  → -p <prompt>
 //   - new           → no conversation args
+//   - a prompt      → "-- <prompt>" at the very end, in any mode. The session stays
+//     interactive with the prompt as its first message.
 func buildClaudeStartArgs(req StartRequest) []string {
 	var args []string
 	switch req.Mode {
@@ -38,10 +39,6 @@ func buildClaudeStartArgs(req StartRequest) []string {
 		if req.SessionID != "" {
 			args = append(args, "--resume", req.SessionID, "--fork-session")
 		}
-	case LaunchNew:
-		if req.Prompt != "" {
-			args = append(args, "-p", req.Prompt)
-		}
 	}
 	if req.PermissionMode != "" {
 		args = append(args, "--permission-mode", req.PermissionMode)
@@ -52,5 +49,12 @@ func buildClaudeStartArgs(req StartRequest) []string {
 	if req.PluginDir != "" {
 		args = append(args, "--plugin-dir", req.PluginDir)
 	}
-	return append(args, req.AdditionalArgs...)
+	args = append(args, req.AdditionalArgs...)
+	if req.Prompt != "" {
+		// WHY "--" を挟んで最後に置く: --add-dir のように値を複数取るオプションの後ろに置くと
+		// その値として読まれ、"-" で始まる指示はオプションと読まれる（Claude Code 2.1.327 で確認）。
+		// 長い指示は tmux のコマンドの長さの上限に当たるので、tmuxBackend がスクリプトを通して渡す。
+		args = append(args, "--", req.Prompt)
+	}
+	return args
 }

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
+	"io"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/pomesaka/claude-deck/internal/session"
@@ -19,6 +22,7 @@ func TestParseCLIArgs(t *testing.T) {
 		name    string
 		command string
 		args    []string
+		stdin   io.Reader // nil: reading stdin fails the test
 		want    cliRequest
 	}{
 		{
@@ -31,6 +35,31 @@ func TestParseCLIArgs(t *testing.T) {
 			command: "new",
 			args:    []string{"--dir", "/tmp/repo", "--no-workspace"},
 			want:    cliRequest{Op: "new", Dir: "/tmp/repo", NoWorkspace: true},
+		},
+		{
+			name:    "new with a prompt",
+			command: "new",
+			args:    []string{"--prompt", "fix the bug"},
+			want:    cliRequest{Op: "new", Dir: wd, Prompt: "fix the bug"},
+		},
+		{
+			name:    "new with a prompt that starts with dashes",
+			command: "new",
+			args:    []string{"--prompt", "--help me"},
+			want:    cliRequest{Op: "new", Dir: wd, Prompt: "--help me"},
+		},
+		{
+			name:    "new with dir, no workspace and a prompt",
+			command: "new",
+			args:    []string{"--dir", "/tmp/repo", "--no-workspace", "--prompt", "hi"},
+			want:    cliRequest{Op: "new", Dir: "/tmp/repo", NoWorkspace: true, Prompt: "hi"},
+		},
+		{
+			name:    "new reads the prompt from stdin, keeping inner newlines",
+			command: "new",
+			args:    []string{"--prompt", "-"},
+			stdin:   strings.NewReader("line1\nline2\n"),
+			want:    cliRequest{Op: "new", Dir: wd, Prompt: "line1\nline2"},
 		},
 		{
 			name:    "list",
@@ -128,7 +157,11 @@ func TestParseCLIArgs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := cliCommands[tt.command](tt.args)
+			stdin := tt.stdin
+			if stdin == nil {
+				stdin = failingReader{t}
+			}
+			got, err := cliCommands[tt.command](tt.args, stdin)
 			if err != nil {
 				t.Fatalf("parse %s %v: %v", tt.command, tt.args, err)
 			}
@@ -188,6 +221,7 @@ func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 		name    string
 		command string
 		args    []string
+		stdin   io.Reader
 	}{
 		{name: "new with positional argument", command: "new", args: []string{"extra"}},
 		{name: "list with positional argument", command: "list", args: []string{"extra"}},
@@ -196,7 +230,13 @@ func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 		{name: "alias with two aliases", command: "alias", args: []string{"--session", "abc", "a", "b"}},
 		{name: "alias without session", command: "alias", args: []string{"review"}},
 		{name: "close with two targets", command: "close", args: []string{"a", "b"}},
-		{name: "unknown flag", command: "new", args: []string{"--prompt", "hi"}},
+		{name: "unknown flag", command: "new", args: []string{"--bogus"}},
+		{name: "new with an empty prompt", command: "new", args: []string{"--prompt", ""}},
+		{name: "new with a blank prompt", command: "new", args: []string{"--prompt", " \n\t"}},
+		{name: "new with --prompt and no value", command: "new", args: []string{"--prompt"}},
+		{name: "new with an empty prompt on stdin", command: "new", args: []string{"--prompt", "-"}, stdin: strings.NewReader("")},
+		{name: "new with a blank prompt on stdin", command: "new", args: []string{"--prompt", "-"}, stdin: strings.NewReader(" \n ")},
+		{name: "new when stdin fails midway", command: "new", args: []string{"--prompt", "-"}, stdin: io.MultiReader(strings.NewReader("partial"), errReader{})},
 		{name: "gc with positional argument", command: "gc", args: []string{"extra"}},
 		{name: "tree with positional argument", command: "tree", args: []string{"extra"}},
 		{name: "project without operation", command: "project"},
@@ -217,7 +257,11 @@ func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := cliCommands[tt.command](tt.args); err == nil {
+			stdin := tt.stdin
+			if stdin == nil {
+				stdin = strings.NewReader("")
+			}
+			if _, err := cliCommands[tt.command](tt.args, stdin); err == nil {
 				t.Errorf("parse %s %v: want error, got nil", tt.command, tt.args)
 			}
 		})
@@ -245,3 +289,16 @@ func TestInfoFromSnapshot_WorkDir(t *testing.T) {
 		})
 	}
 }
+
+// failingReader fails the test when read: a command that was not asked to read
+// stdin must not block on it.
+type failingReader struct{ t *testing.T }
+
+func (r failingReader) Read([]byte) (int, error) {
+	r.t.Error("stdin was read")
+	return 0, io.EOF
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }

@@ -67,6 +67,9 @@ jq -c . /tmp/cdv/new1.json
 
 - `new` は数秒かかる。`tmux -L cdverify capture-pane -p -t cli` に `rc=0` が出てから JSON を読む。TUI の一覧に新しい行が出るのは、さらに次の更新（5 秒ごと）の後。
 - `close` と `list` は tmux の外から打ってよい。
+- 起動の引数の区切りは `/tmp/cdv/claude-args/` で見る。偽の claude が、起動のたびに引数を 1 つずつ `[ ]` で囲んで 1 ファイルに書く。画面の `fake claude args:` は空白でつなぐので、改行や空白を含む引数の境目が分からない。
+- プロジェクトの `claude_args` を入れるには `/tmp/cdv/cli.sh project args /tmp/cdv/jjrepo -- --add-dir /tmp/cdv/extra` を打つ。隔てた `config.toml` に書かれる。
+- `cli` の `zsh -f` の PATH には `rg` が無い。出力はファイルに書き出し、tmux の外で読む。
 - ワークスペースは `/tmp/cdv/data/workspace/-tmp-cdv-jjrepo/<名前>` にできる。`jj workspace list` は `/tmp/cdv/jjrepo` で `HOME=/tmp/cdv/home jj workspace list --ignore-working-copy` と打つ。
 - jj の作業コピーの取り込みを失敗させるには `touch /tmp/cdv/jjlogfail`（`jj log` だけが失敗する）。戻すときは `rm /tmp/cdv/jjlogfail`。呼ばれた jj は `/tmp/cdv/jj.log` に出る。
 - `r` で再開するには、行に Claude Code のセッション ID が要る。偽の claude は書かないので、`sqlite3 /tmp/cdv/data/deck.db "update sessions set session_chain='[\"11111111-1111-4111-8111-111111111111\"]' where name='<名前>'"` で入れる。再開したウィンドウの画面に、偽の claude が引数と作業フォルダを出す。ID は行ごとに変える。同じ ID の行が 2 つあると、次に起動したとき片方が重複として store から消える。
@@ -130,6 +133,7 @@ tmux -L cdverify capture-pane -p -t run | head -1
 - `?` の直後や再開中に `C-c` を押し、3 秒以上待つ。「終了しますか? (y/n)」が残るか。
 - store の `status` を `sqlite3` で知らない値（`bogus`）にする。落ちずに暗い印で出て、`x` で終了でき、`r` で再開できず、`claude-deck hook status idle` で上書きされないか。
 - 外部セッションを `r` で取り込んでから `x` で閉じる。`cwd` の jj ワークスペースが残るか（`jj workspace list` と `jj.log` に `workspace forget` が無いこと）。
+- `new --prompt -` に 16KB を超える指示を流す。tmux の `new-window` はそのままでは `Command too long` で断る（tmux 3.6a）ので、4096 バイトを超える起動のコマンドは一時的なスクリプトを通す。偽の claude が受け取った引数の長さと、`$TMPDIR/claude-deck-launch-*` が残っていないことを見る。
 - `x` のステータス行は 5 秒ほどで消え、幅で切れる。`tmux -L cdverify resize-window -t run -x 60` で狭くして見る。
 
 ## 止める

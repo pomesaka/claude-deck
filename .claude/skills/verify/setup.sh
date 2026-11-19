@@ -11,7 +11,8 @@
 #   <DIR>/cli.sh           run.sh と同じ環境で CLI（new、close、list）を実行する。new は tmux の中で実行する
 #   <DIR>/tmux.sh          隔てた環境で tmux を呼ぶ。tmux サーバーを起動する最初の new-session はこれで打つ
 #   <DIR>/jjrepo           セッションを作れる本物の jj リポジトリ。HOME の外に置くので、n の探索には出ない
-#   <DIR>/bin/claude       Claude Code の代わり。引数と作業フォルダを出して眠るだけ。hook は動かない
+#   <DIR>/bin/claude       Claude Code の代わり。引数と作業フォルダを出して眠るだけ。hook は動かない。
+#                          引数を 1 つずつ [ ] で囲んで <DIR>/claude-args/<時刻>-<pid>.txt に書く
 #   <DIR>/bin/jj           本物の jj を呼ぶ。呼ばれるたびに <DIR>/jj.log に 1 行書く。<DIR>/jjlogfail があると jj log だけ失敗する
 #   <DIR>/bin/tmux-slow    本物の tmux を呼ぶ。<DIR>/slowtmux があると select-window の前に 0〜0.5 秒待ち、<DIR>/select.log に書く。
 #                          <DIR>/slownew があると new-window の前に 4 秒待つ（作成、再開、フォークが遅くなる）
@@ -39,10 +40,12 @@ if [ -e "$DIR/fdfail" ]; then echo "forced failure" >&2; exit 1; fi
 EOF
 chmod +x "$DIR/bin/fd"
 
-cat > "$DIR/bin/claude" <<'EOF'
+cat > "$DIR/bin/claude" <<EOF
 #!/bin/sh
-echo "fake claude args: $*"
-echo "pwd=$(pwd)"
+mkdir -p "$DIR/claude-args"
+for a in "\$@"; do printf '[%s]\n' "\$a"; done > "$DIR/claude-args/\$(date +%s)-\$\$.txt"
+echo "fake claude args: \$*"
+echo "pwd=\$(pwd)"
 exec sleep 100000
 EOF
 cat > "$DIR/bin/jj" <<EOF

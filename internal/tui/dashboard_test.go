@@ -36,7 +36,7 @@ func (f *fakeManager) RefreshFromJSONL()                {}
 func (f *fakeManager) ResolveJSONLPaths(session.DeckSessionID) (string, []string) {
 	return "", nil
 }
-func (f *fakeManager) CreateSession(context.Context, string, string, bool) (*session.Session, error) {
+func (f *fakeManager) CreateSession(context.Context, string, string, bool, string) (*session.Session, error) {
 	return nil, errors.New("not used")
 }
 func (f *fakeManager) ForkSession(context.Context, session.DeckSessionID) (*session.Session, error) {

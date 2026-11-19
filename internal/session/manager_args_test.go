@@ -59,7 +59,7 @@ func TestStartSpec_SharedFlags(t *testing.T) {
 			m.config.ProjectArgsFunc = func(string) []string { return tt.projectArgs }
 			m.config.PluginDir = tt.pluginDir
 
-			got := m.startSpec(agentruntime.LaunchNew, "", "/repo", tt.sessName, "/repo").Args
+			got := m.startSpec(agentruntime.LaunchNew, "", "/repo", tt.sessName, "/repo", "").Args
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("startSpec(%q).Args = %v, want %v", tt.sessName, got, tt.want)
 			}
@@ -87,7 +87,7 @@ func TestStartSpec_ProjectArgsInEveryLaunchMode(t *testing.T) {
 				return []string{"--x"}
 			}
 
-			got := m.startSpec(tt.mode, "claude-1", "/ws", "anna-8cc7", "/repo").Args
+			got := m.startSpec(tt.mode, "claude-1", "/ws", "anna-8cc7", "/repo", "").Args
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("startSpec(%v).Args = %v, want %v", tt.mode, got, tt.want)
 			}
