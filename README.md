@@ -12,13 +12,16 @@ See which agent is waiting for you and jump to it with one key. Each session wor
 
 <!-- TODO(readme-demo): docs/assets/demo.gif — Ghostty で左に一覧、右に tmux。4〜5 本が違う色で並ぶ → 1 本が承認待ちに変わりヘッダーが [1 asking...] になる → Tab で右に飛ぶ → 承認する → ● が Running に戻る。12〜15 秒、ループしても不自然でないように -->
 
-## Highlights
+## Why claude-deck
 
-- **Status at a glance** — running, idle, subagents running, waiting for approval, waiting for an answer, done. Read from Claude Code's hooks, not guessed from the screen.
-- **`Tab` to the next agent that needs you** — the focus moves straight into its terminal.
-- **One jj workspace per session** — parallel agents work on separate copies of the repository. `.env` and other untracked files can be symlinked in.
-- **Nothing is lost when a session ends** — its changes stay in the repository, and you can browse its log, resume it, or fork it.
-- **Scriptable** — every command prints JSON, and Claude Code sessions started by claude-deck can start, list and close sibling sessions themselves.
+Run several Claude Code sessions in terminal tabs or tmux panes, and the same things keep going wrong. claude-deck answers each of them.
+
+- **An agent sits waiting for your approval in a pane you aren't looking at.** Every session shows whether it is running, idle, or waiting for your approval or answer, and `Tab` takes you straight into the next one that needs you.
+- **Two agents on the same repository overwrite each other's files.** Each session works in its own jj workspace, created when the session starts. `.env` and other untracked files can be symlinked in.
+- **Closing the terminal or the tool that runs your agents stops their work.** Sessions run in tmux, not inside claude-deck. Quit, upgrade or crash the dashboard and they keep working; the list comes back as it was when you start it again.
+- **You can't find last week's session, or where its changes went.** Finished sessions stay in the list with their log. Resuming one brings back its files and its conversation, and its changes are commits in your repository.
+- **Splitting work across agents means starting and briefing each one by hand.** Sessions started by claude-deck know its CLI through a bundled skill. One session can start others, give each a task, and talk to them through Claude Code's messages between sessions, working as a PM for a few coders. Pin the PM with `p`, and you always know where your small team starts.
+- **You'd rather not leave the terminal for yet another app.** claude-deck is a TUI. The list and the live sessions sit side by side in one terminal window, and everything is a key away.
 
 ## Quick Start
 
@@ -135,6 +138,8 @@ claude-deck close maika-7c78        # stop it and remove its workspace (ID or na
 
 Every session claude-deck starts also gets the bundled `deck-status:claude-deck` skill, which teaches Claude Code these commands. Ask such a session to "start another session to look into the flaky test" and the new one appears in the list, already working on it.
 
+The `name` a session gets is also its Claude Code session name, so sessions can message each other with SendMessage. Ask one session to act as a PM: it starts a session per task, sends each one its brief, and collects their reports. Pin it with `p` to keep it at the bottom of the list, where you can always find it.
+
 <details>
 <summary>Output, statuses, and driving a session from a script</summary>
 
@@ -164,6 +169,7 @@ Every session claude-deck starts also gets the bundled `deck-status:claude-deck`
 ## What makes it different
 
 - **Status from hooks.** A plugin claude-deck loads into each session reports what Claude Code is doing, so "waiting for approval" and "waiting for an answer" are told apart, and subagents still running after the turn are shown.
+- **Sessions don't depend on the dashboard.** Each Claude Code session runs in its own tmux window, not as a child of claude-deck, and its hooks write the status to claude-deck's database directly. When the TUI starts, it matches the database against the tmux windows and shows every session as it is.
 - **Workspaces that keep their changes.** jj records the files a session changed on its own, so closing a session never throws away uncommitted work, and resuming it brings the files back.
 - **Finished sessions stay.** They keep their log in the list and can be resumed or forked, until the oldest are pruned past `max_sessions` (30 by default).
 
