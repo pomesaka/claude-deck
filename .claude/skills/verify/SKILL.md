@@ -84,7 +84,18 @@ jq -c . /tmp/cdv/new1.json
 
 README の画面のように本物の Claude Code が要るときは、HOME を分けるのを claude-deck だけにする。Claude Code は偽の HOME では認証が通らず、`Not logged in` で止まる（v2.1.327、2026-11に確認）。
 
-- `config.toml` の `[commands] claude` に包みのスクリプトを指し、その中で HOME と PATH を本物に戻してから `claude` を起動する
+- `config.toml` の `[commands] claude` に包みのスクリプトを指し、その中で HOME と PATH を本物に戻してから `claude` を起動する。`run.sh` と `cli.sh` は `env -i` で `USER` と `LOGNAME` も落とすので、包みの中で戻す。HOME だけ戻しても、Keychain の認証が読めず `Not logged in` になる（v2.1.331、2026-11 に確認。`env -i HOME=$HOME PATH=/usr/bin:/bin claude auth status` が `"loggedIn": false`、`USER` と `LOGNAME` を足すと `true`）
+- 包みの例（`/tmp/cdv/bin/realclaude` に置き、`sed -i '' 's#^claude = .*#claude = "/tmp/cdv/bin/realclaude"#' /tmp/cdv/xdg/claude-deck/config.toml` で指す。`<本物のPATH>` は手元の `echo $PATH` から bun、node、tmux の入ったフォルダを選ぶ）:
+
+  ```sh
+  #!/bin/sh
+  export HOME=/Users/<名前> USER=<名前> LOGNAME=<名前>
+  export PATH=<本物のPATH>
+  exec "$HOME/.local/bin/claude" --setting-sources project,local --append-system-prompt "Answer in Japanese." "$@"
+  ```
+- 作業フォルダごとに最初の起動で trust のダイアログが出る。`tmux -L cdverify send-keys -t cdverify:<deck ID> Down` の後、別の呼び出しで `Enter` を送る。trust は本物の `~/.claude.json` に書かれる。`--no-workspace` で同じ `/tmp/cdv/jjrepo` を使い回すと、ダイアログは 1 回で済む
+- deck-status のステータスの移り変わりは、`/tmp/cdv/cli.sh list | jq -c '.[] | {name,status,status_reason}'` を 2 秒ごとに打って見る。TUI の ● の色は `capture-pane -p -e` の前景色で見分ける（running は `38;5;36`、idle は `38;5;102`、承認と質問と操作の待ちは `38;5;137`、終了は `38;5;237`）
+- TUI のデバッグのログは、`run.sh` が `env -i` で `CLAUDE_DECK_DEBUG` を落とすので、`sed 's#FD_DELAY=#CLAUDE_DECK_DEBUG=/tmp/cdv/debug.log FD_DELAY=#' /tmp/cdv/run.sh > /tmp/cdv/run-debug.sh` と `chmod +x /tmp/cdv/run-debug.sh` で作った `run-debug.sh` で起動して取る
 - 個人の設定と言語の指示は、`--setting-sources project,local` と `--append-system-prompt` で外す。認証の要る道具は HOME を変えずに、画面に出る個人の設定だけを外す
 - HOME と PATH を本物に戻し、`--setting-sources project,local` で起動しても、v2.1.332 では `Not logged in` で止まった（2026-11-25）。認証の通し方が分かるまで、この節の手順では起動の先へ進めない
 - トランスクリプトは本物の `~/.claude/projects` に書かれるので、偽の HOME の `.claude/projects` へ symlink すると TUI が読める
