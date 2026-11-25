@@ -185,13 +185,17 @@ export function parseWaitReason(input: unknown): { reason: string } | { error: s
  * a `! command` at the start of a line or inside backquotes, or a request word
  * (ログイン, 承認, …) and a please (ください, お願いします) in one sentence.
  * WHY `! ` はコードブロックの中も見る: `! コマンド` はコードブロックで示すのがふつうの頼み方。
- * WHY 依頼の文はコードブロックの中を見ない: コメントや例の文（# ここでログインしてください）で誤検知しやすい。
+ * WHY `!` の後が ASCII のコマンド名のときだけ数える: 「`! コマンド`」「`! <コマンド>`」のような
+ * 書き方の説明を頼みと取り違えた（2026-11-25、wait_for_user を説明した返答で止まった）。
+ * WHY 依頼の文はコードブロックとかぎ括弧・引用符の中を見ない: 例や引用（「… を実行してください」）は
+ * 頼みでなく紹介のことが多い（同じ返答で止まった）。
  * WHY 文を「。」「！」「？」と改行で区切る: `.` は URL やコマンドに出る。
  */
 export function asksUserToAct(text: string): boolean {
-  if (/(^|\n)[ \t]*! \S/.test(text) || /`! [^`]+`/.test(text)) return true
+  if (/(^|\n)[ \t]*! [A-Za-z0-9.\/_~-]/.test(text) || /`! [A-Za-z0-9.\/_~-][^`]*`/.test(text)) return true
   return text
     .replace(/```[\s\S]*?```/g, '')
+    .replace(/「[^」]*」|『[^』]*』|“[^”]*”|"[^"\n]*"/g, '')
     .split(/[。！？\n]/)
     .some(sentence => /ログイン|承認|認証|打って|押して|実行して/.test(sentence) && /ください|お願いします/.test(sentence))
 }

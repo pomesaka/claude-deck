@@ -41,6 +41,21 @@ const messages = [
   { name: '依頼の語だけ', text: 'ボタンを押して保存した。', want: false },
   { name: '別の文に分かれる', text: 'ログインしました。結果をご確認ください。', want: false },
   { name: 'コードブロックの中の依頼の文', text: '```sh\n# ここでログインしてください\n```', want: false },
+  // 2026-11-25 に wait_for_user の説明の返答で止まった 2 文。頼んでいない
+  {
+    name: 'インラインコードの ! コマンド という書き方の説明',
+    text: '呼ぶ場面: ターンを終える直前に、利用者が会話の外で操作するのを待つとき。ログイン、承認、`! コマンド`の実行、ブラウザでの操作が挙がっている',
+    want: false,
+  },
+  {
+    name: 'かぎ括弧で引いた例の中の依頼の文',
+    text: '理由の書き方: 一覧だけで分かる短い文を、返答の言語で書く。例は「gcloud auth login を ! で実行してください」',
+    want: false,
+  },
+  { name: 'インラインコードの ! <コマンド>', text: '`! <コマンド>` の形で頼む。', want: false },
+  { name: '引用符で引いた依頼の文', text: '説明文には "ログインしてください" とある。', want: false },
+  { name: 'インラインコードの実際のコマンドを頼む', text: '`! gcloud auth login` を打ってください', want: true },
+  { name: 'かぎ括弧の外で頼む', text: '「gh」でログインしてください。', want: true },
 ]
 for (const { name, text, want } of messages) {
   test(`操作の頼みの検知: ${name}`, () => {
