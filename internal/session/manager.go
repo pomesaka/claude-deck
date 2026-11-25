@@ -60,6 +60,9 @@ type ManagerConfig struct {
 	// ProjectArgsFunc returns the extra runtime arguments configured for the given
 	// repository. It is called on every launch. Nil passes nothing.
 	ProjectArgsFunc func(repoPath string) []string
+	// Getenv reads claude-deck's own environment, for the values a launched
+	// session inherits and extends. Nil reads the process environment.
+	Getenv func(key string) string
 
 	// DeckCommand is the absolute path of the claude-deck binary. Sessions run
 	// "<DeckCommand> hook exited" when Claude Code exits, and the plugin calls it
@@ -190,8 +193,18 @@ func (m *Manager) startSpec(mode agentruntime.LaunchMode, runtimeID RuntimeSessi
 }
 
 // processOpts assembles the ProcessStartOpts shared by every launch mode.
-func (m *Manager) processOpts(sessionID DeckSessionID, workDir string, spec agentruntime.StartSpec) ProcessStartOpts {
-	env := []string{EnvSessionID + "=" + string(sessionID), EnvDataDir + "=" + m.config.DataDir}
+func (m *Manager) processOpts(sessionID DeckSessionID, name, repoPath, workDir string, spec agentruntime.StartSpec) ProcessStartOpts {
+	env := []string{
+		EnvSessionID + "=" + string(sessionID),
+		EnvDataDir + "=" + m.config.DataDir,
+	}
+	getenv := m.config.Getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if attrs := otelResourceAttributes(getenv(envOTelResourceAttributes), sessionID, name, repoPath); attrs != "" {
+		env = append(env, envOTelResourceAttributes+"="+attrs)
+	}
 	var onExit []string
 	if m.config.DeckCommand != "" {
 		env = append(env, EnvCommand+"="+m.config.DeckCommand)
@@ -310,7 +323,7 @@ func (m *Manager) startNewSession(sess *Session, workDir string, spec agentrunti
 		return fmt.Errorf("saving session: %w", err)
 	}
 
-	pid, err := m.backend.StartProcess(sess.ID, m.processOpts(sess.ID, workDir, spec))
+	pid, err := m.backend.StartProcess(sess.ID, m.processOpts(sess.ID, rec.Name, rec.RepoPath, workDir, spec))
 	if err != nil {
 		if derr := m.store.Delete(string(sess.ID)); derr != nil {
 			debuglog.Printf("[startNewSession] store delete after failed start: %v", derr)
@@ -551,7 +564,7 @@ func (m *Manager) ResumeSession(ctx context.Context, sessionID DeckSessionID) er
 	}
 
 	spec := m.startSpec(agentruntime.LaunchResume, RuntimeSessionID(csID), workDir, rec.Name, rec.RepoPath, "")
-	pid, err := m.backend.StartProcess(sessionID, m.processOpts(sessionID, workDir, spec))
+	pid, err := m.backend.StartProcess(sessionID, m.processOpts(sessionID, rec.Name, rec.RepoPath, workDir, spec))
 	if err != nil {
 		debuglog.Printf("[ResumeSession] StartProcess failed: %v", err)
 		return fail(fmt.Errorf("resuming claude code: %w", err), false)

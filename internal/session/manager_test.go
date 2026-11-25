@@ -179,6 +179,69 @@ func TestStartSession_PassesPrompt(t *testing.T) {
 	}
 }
 
+// Every launch tags the session's telemetry with its own deck ID, name and
+// repository, after what claude-deck itself inherited, and sets the variable once.
+func TestStartSession_PassesResourceAttributes(t *testing.T) {
+	launches := []struct {
+		name  string
+		start func(t *testing.T, m *Manager) (*Session, error)
+	}{
+		{"create", func(t *testing.T, m *Manager) (*Session, error) {
+			dir := t.TempDir()
+			return m.CreateSession(context.Background(), dir, dir, false, "")
+		}},
+		{"fork", func(t *testing.T, m *Manager) (*Session, error) {
+			useFakeJJ(t, m, false)
+			src := createPlainSession(t, m)
+			if err := RecordSessionStart(m.store, src.ID, "ctx-1", SourceStartup); err != nil {
+				t.Fatalf("RecordSessionStart: %v", err)
+			}
+			m.Reload()
+			return m.ForkSession(context.Background(), src.ID, "")
+		}},
+		{"resume", func(t *testing.T, m *Manager) (*Session, error) {
+			sess := createPlainSession(t, m)
+			if err := RecordSessionStart(m.store, sess.ID, "claude-1", SourceStartup); err != nil {
+				t.Fatalf("RecordSessionStart: %v", err)
+			}
+			if _, err := m.Kill(sess.ID); err != nil {
+				t.Fatalf("Kill: %v", err)
+			}
+			return sess, m.ResumeSession(context.Background(), sess.ID)
+		}},
+	}
+	for _, launch := range launches {
+		t.Run(launch.name, func(t *testing.T) {
+			m, be := newTestManager(t)
+			m.config.Getenv = func(k string) string {
+				if k == envOTelResourceAttributes {
+					return "service.name=x"
+				}
+				return ""
+			}
+			sess, err := launch.start(t, m)
+			if err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			r := mustGet(t, m.store, sess.ID)
+			if r.Name == "" {
+				t.Fatal("the session has no name to pass")
+			}
+			want := envOTelResourceAttributes + "=service.name=x,deck.session_id=" + string(sess.ID) +
+				",deck.name=" + percentEncode(r.Name) + ",deck.repo=" + percentEncode(filepath.Base(r.RepoPath))
+			var got []string
+			for _, e := range be.started[len(be.started)-1].Env {
+				if strings.HasPrefix(e, envOTelResourceAttributes+"=") {
+					got = append(got, e)
+				}
+			}
+			if len(got) != 1 || got[0] != want {
+				t.Errorf("OTEL entries = %q, want [%q]", got, want)
+			}
+		})
+	}
+}
+
 func TestCreateSession_WritesStoreBeforeReturning(t *testing.T) {
 	m, be := newTestManager(t)
 	m.config.DeckCommand = "/opt/claude-deck"
@@ -234,7 +297,7 @@ func TestCreateSession_MissingWorkDir(t *testing.T) {
 
 func TestProcessOpts_WithoutDeckCommand(t *testing.T) {
 	m, _ := newTestManager(t)
-	opts := m.processOpts("abc", "/w", agentruntime.StartSpec{Command: "claude"})
+	opts := m.processOpts("abc", "", "", "/w", agentruntime.StartSpec{Command: "claude"})
 	if opts.OnExit != nil {
 		t.Errorf("OnExit = %v, want nil when DeckCommand is empty", opts.OnExit)
 	}

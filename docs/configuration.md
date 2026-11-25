@@ -86,6 +86,10 @@ claude_args = ["--dangerously-load-development-channels", "server:xwb"]
 - `codex`: Codex has no hooks. claude-deck reads the status from the Codex JSONL (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`) and writes it to its store, so the status is not updated while the TUI is not running. Only running and idle are shown; waiting for approval or an answer is not.
 - With `codex`, unless `data_dir` and `[tmux] session_name` are set explicitly, the data directory gets a `-codex` suffix and the tmux session is `claude-deck-codex`. Each provider has its own `deck.db`.
 
+## Telemetry attributes
+
+Every session claude-deck starts gets `OTEL_RESOURCE_ATTRIBUTES` with `deck.session_id`, `deck.name` (the session name, such as `maika-7c78`) and `deck.repo` (the last element of the repository path). If you turn on Claude Code's OpenTelemetry export, its events carry these, so a collector can filter them by session. Attributes claude-deck itself was started with are kept in front, except `deck.*` ones, which a session that runs `claude-deck new` passes down. The alias is not included, because it can change while the session runs; look it up by `deck.session_id` with `claude-deck list`.
+
 ## Project discovery
 
 - With `project_markers` empty (the default), only repository roots are offered.
