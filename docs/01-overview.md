@@ -125,7 +125,7 @@ Session の状態は store、JSONL、jj から組み立てる。項目ごとの�
        ▼ 対話中
   Hook: turn.start / tool.call   Status: Running
   Hook: PermissionRequest        Status: WaitingApproval / WaitingAnswer
-  Hook: turn.complete            Status: Idle / SubagentRunning
+  Hook: turn.complete            Status: Idle / SubagentRunning / WaitingAction
        │
        ▼ 終了
   ペインで claude-deck hook exited   Status: Completed

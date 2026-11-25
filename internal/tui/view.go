@@ -128,7 +128,7 @@ func sessionStatusIcon(snap session.Snapshot) string {
 		return statusIdleStyle.Render("●")
 	case session.StatusSubagentRunning:
 		return statusSubagentStyle.Render("●")
-	case session.StatusWaitingApproval, session.StatusWaitingAnswer:
+	case session.StatusWaitingApproval, session.StatusWaitingAnswer, session.StatusWaitingAction:
 		return statusApproveStyle.Render("●")
 	case session.StatusCompleted:
 		return statusDoneStyle.Render("●")
@@ -323,8 +323,10 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 
 	// ステータスアイコン（セッション名の前に付ける、全ステータスで幅を揃える）
 	var statusIcon string
-	// statusMessage: line2 末尾に表示するメッセージ（エラーの理由）
+	// statusMessage: line2 末尾に表示するメッセージ（エラーの理由、利用者を待つ理由）
 	var statusMessage string
+	// statusMessageStyle: statusMessage の色。状態の ● と同じ色にする
+	statusMessageStyle := statusErrorStyle
 	switch {
 	case snap.Origin == session.OriginExternal:
 		statusIcon = selBg(unmanagedIconStyle, selected).Render("●")
@@ -338,6 +340,10 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 		statusIcon = selBg(statusApproveStyle, selected).Render("●")
 	case snap.Status == session.StatusWaitingAnswer:
 		statusIcon = selBg(statusQuestionStyle, selected).Render("●")
+	case snap.Status == session.StatusWaitingAction:
+		statusIcon = selBg(statusQuestionStyle, selected).Render("●")
+		statusMessage = snap.StatusReason
+		statusMessageStyle = statusQuestionStyle
 	case snap.Status == session.StatusCompleted:
 		statusIcon = selBg(statusDoneStyle, selected).Render("●")
 	case snap.Status == session.StatusError:
@@ -395,7 +401,7 @@ func renderSessionItem(snap session.Snapshot, selected bool, width int) string {
 		rest -= lipgloss.Width(aliasCol) + 1
 	}
 	if statusMessage != "" && rest > 4 {
-		left2 += sp + selBg(statusErrorStyle, selected).Render(truncate(statusMessage, rest))
+		left2 += sp + selBg(statusMessageStyle, selected).Render(truncate(statusMessage, rest))
 	}
 	line2 := joinEnds(left2, aliasCol, cw, bg)
 

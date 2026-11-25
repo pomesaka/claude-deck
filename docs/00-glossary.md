@@ -75,15 +75,16 @@ deck セッションの実行状態。動いている間の活動（Activity）�
 | SubagentRunning | メインのターンは終わったが、バックグラウンドのサブエージェントが動いている (Hook turn.complete) |
 | WaitingApproval | ツール承認待ち (Hook PermissionRequest) |
 | WaitingAnswer | ユーザー質問待ち (Hook PermissionRequest / AskUserQuestion の tool.call) |
+| WaitingAction | メインのターンを終えて、利用者が会話の外でする操作（ログイン、承認、`!` のコマンドの実行）を待っている。モデルが `wait_for_user` を呼んでからターンを終えたとき (Hook turn.complete)。理由（store の `status_reason`）を持ち、次のメインのターンの開始と `/clear` で外れる |
 | Completed | プロセス終了 (ウィンドウのコマンドの `hook exited` / close / ウィンドウ消失の検知) |
 | Error | 再開でワークスペースを作り直せなかった、または終了済みセッションの作業ディレクトリが消えている |
 | Unknown | store にこの版の知らない値がある（新しい版の claude-deck が書いた）。動いているとも終わったとも扱わず、hook も再開も prune も行に触れない。外部セッションの Status もこれ |
 
-Idle から WaitingAnswer までの 5 つが活動（**型**: `session.Activity`）で、hook と Codex の JSONL が報告できるのはこれだけ。
+Idle から WaitingAction までの 6 つが活動（**型**: `session.Activity`）で、hook と Codex の JSONL が報告できるのはこれだけ。
 
 遷移の規則は次の 3 つ。
 
-- hook が報告するステータス（Idle、Running、SubagentRunning、WaitingApproval、WaitingAnswer）は、動いているセッションにだけ適用する。動いている間は、この 5 つのどれからどれへも移る。終了済み（Completed / Error）と Unknown の行には適用しない
+- hook が報告するステータス（Idle、Running、SubagentRunning、WaitingApproval、WaitingAnswer、WaitingAction）は、動いているセッションにだけ適用する。動いている間は、この 6 つのどれからどれへも移る。終了済み（Completed / Error）と Unknown の行には適用しない
 - 終了は、ウィンドウのコマンドの `hook exited`、`x` と `claude-deck close`、ウィンドウ消失の検知の 3 経路で記録し、Completed にする。すでに Error の行は Error のまま
 - Completed と Error から Idle に戻るのは、再開（`r`）と、TUI の起動時にそのセッションの tmux ウィンドウが生きていた場合だけ。外部セッションを再開すると、deck のセッションとして取り込んでから再開する
 

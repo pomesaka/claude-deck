@@ -37,6 +37,7 @@ type PreviewSpec struct {
 	Display          string                   `json:"display"` // "jsonl" | "tmux" | ""
 	CurrentTool      string                   `json:"current_tool"`
 	ErrorMessage     string                   `json:"error_message"`
+	StatusReason     string                   `json:"status_reason,omitempty"` // waiting_action のとき、利用者がすること
 	NeedsAttention   bool                     `json:"needs_attention"`
 	TranscriptLayout string                   `json:"transcript_layout,omitempty"` // "claude" | "codex"
 	// JSONL パスは main プロセス側で解決済み。preview は claude projects を探索しない。

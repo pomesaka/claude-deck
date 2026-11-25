@@ -602,6 +602,7 @@ func (m *Model) buildPreviewSpecFromSnap(snap session.Snapshot) preview.PreviewS
 		Display:          snap.Display.String(),
 		CurrentTool:      snap.CurrentTool,
 		ErrorMessage:     snap.ErrorMessage,
+		StatusReason:     snap.StatusReason,
 		NeedsAttention:   snap.Status.NeedsAttention(),
 		TranscriptLayout: m.config.RuntimeProvider(),
 		JSONLPath:        jsonlPath,

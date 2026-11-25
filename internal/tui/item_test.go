@@ -68,6 +68,18 @@ func TestRenderSessionItem(t *testing.T) {
 			},
 		},
 		{
+			name: "the reason of a wait for the user's action on the second line",
+			snap: session.Snapshot{
+				Name: "kiara-7655", RepoPath: "/src/pomesaka/claude-deck", RepoName: "claude-deck",
+				Status: session.StatusWaitingAction, StatusReason: "gh にログインしてください", StartedAt: started, LastActivity: updated, Elapsed: 18*time.Hour + 54*time.Minute,
+			},
+			width: 70,
+			want: []string{
+				"● /src/pomesaka/claude-deck                               kiara-7655",
+				"  18h54m 10/10 10:13 gh にログインしてください",
+			},
+		},
+		{
 			name: "error reason on the second line",
 			snap: session.Snapshot{
 				Name: "kiara-7655", RepoPath: "/src/pomesaka/claude-deck", RepoName: "claude-deck",

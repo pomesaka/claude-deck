@@ -46,11 +46,14 @@ type Record struct {
 	SessionChain []string
 	// ForkedFrom is the runtime session ID this session was forked from: an
 	// element of another record's SessionChain, or empty when it is not a fork.
-	ForkedFrom    string
-	Status        string
-	FinishedAt    *time.Time
-	PID           int
-	ErrorMessage  string
+	ForkedFrom   string
+	Status       string
+	FinishedAt   *time.Time
+	PID          int
+	ErrorMessage string
+	// StatusReason is why the session waits on the user, while Status is
+	// waiting_action. Empty in any other status.
+	StatusReason  string
 	TerminalTitle string
 	BookmarkName  string
 
@@ -99,7 +102,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 	forked_from                 TEXT NOT NULL DEFAULT '',
 	alias                       TEXT NOT NULL DEFAULT '',
 	pinned                      INTEGER NOT NULL DEFAULT 0,
-	isolation                   TEXT NOT NULL DEFAULT ''
+	isolation                   TEXT NOT NULL DEFAULT '',
+	status_reason               TEXT NOT NULL DEFAULT ''
 );`
 
 // Values of the isolation column.
@@ -133,12 +137,13 @@ var addedColumns = []struct{ name, ddl string }{
 	{"alias", "alias TEXT NOT NULL DEFAULT ''"},
 	{"pinned", "pinned INTEGER NOT NULL DEFAULT 0"},
 	{"isolation", "isolation TEXT NOT NULL DEFAULT ''"},
+	{"status_reason", "status_reason TEXT NOT NULL DEFAULT ''"},
 }
 
 const columns = `id, name, repo_path, repo_name, workspace_path, workspace_name, sub_project_dir,
 	session_chain, status, finished_at, pid, error_message, terminal_title, bookmark_name,
 	last_jj_revision, last_jj_parent_revision, prompt, permission_mode, started_at, last_activity,
-	closing_at, launching_at, forked_from, alias, pinned, isolation`
+	closing_at, launching_at, forked_from, alias, pinned, isolation, status_reason`
 
 // upsert writes one row: it inserts it, or, when the ID exists, updates the
 // columns this binary knows.
@@ -405,7 +410,7 @@ func (t *Tx) Put(r Record) error {
 		r.ID, r.Name, r.RepoPath, r.RepoName, r.WorkspacePath, r.WorkspaceName, r.SubProjectDir,
 		string(chainJSON), r.Status, nullableTime(r.FinishedAt), r.PID, r.ErrorMessage, r.TerminalTitle, r.BookmarkName,
 		r.LastJJRevision, r.LastJJParentRevision, r.Prompt, r.PermissionMode, unixNano(r.StartedAt), unixNano(r.LastActivity),
-		nullableTime(r.ClosingAt), nullableTime(r.LaunchingAt), r.ForkedFrom, r.Alias, r.Pinned, r.Isolation,
+		nullableTime(r.ClosingAt), nullableTime(r.LaunchingAt), r.ForkedFrom, r.Alias, r.Pinned, r.Isolation, r.StatusReason,
 	)
 	return err
 }
@@ -452,7 +457,7 @@ func scanAll(rows *sql.Rows) ([]Record, error) {
 			&r.ID, &r.Name, &r.RepoPath, &r.RepoName, &r.WorkspacePath, &r.WorkspaceName, &r.SubProjectDir,
 			&chainJSON, &r.Status, &finishedAt, &r.PID, &r.ErrorMessage, &r.TerminalTitle, &r.BookmarkName,
 			&r.LastJJRevision, &r.LastJJParentRevision, &r.Prompt, &r.PermissionMode, &startedAt, &lastActivity,
-			&closingAt, &launchingAt, &r.ForkedFrom, &r.Alias, &r.Pinned, &r.Isolation,
+			&closingAt, &launchingAt, &r.ForkedFrom, &r.Alias, &r.Pinned, &r.Isolation, &r.StatusReason,
 		); err != nil {
 			return nil, err
 		}

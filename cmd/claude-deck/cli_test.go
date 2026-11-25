@@ -156,6 +156,19 @@ func TestParseCLIArgs(t *testing.T) {
 			want:    cliRequest{Op: "hook", HookEvent: "status", Activity: session.ActivityWaitingApproval, Session: "abc"},
 		},
 		{
+			name:    "hook status waiting_action with a reason",
+			command: "hook",
+			args:    []string{"status", "waiting_action", "--reason", "gh にログインしてください", "--session", "abc"},
+			want:    cliRequest{Op: "hook", HookEvent: "status", Activity: session.ActivityWaitingAction, StatusReason: "gh にログインしてください", Session: "abc"},
+		},
+		{
+			// The plugin always passes --reason; empty means no reason.
+			name:    "hook status with an empty reason",
+			command: "hook",
+			args:    []string{"status", "idle", "--reason", "", "--session", "abc"},
+			want:    cliRequest{Op: "hook", HookEvent: "status", Activity: session.ActivityIdle, Session: "abc"},
+		},
+		{
 			name:    "hook session-start",
 			command: "hook",
 			args:    []string{"session-start", "--claude-session-id", "uuid-1", "--source", "clear", "--session", "abc"},
@@ -300,6 +313,12 @@ func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 		{name: "hook status without status", command: "hook", args: []string{"status"}},
 		{name: "hook status unknown status", command: "hook", args: []string{"status", "busy", "--session", "abc"}},
 		{name: "hook status completed", command: "hook", args: []string{"status", "completed", "--session", "abc"}},
+		{name: "hook status waiting_action without a reason", command: "hook", args: []string{"status", "waiting_action", "--session", "abc"}},
+		{name: "hook status waiting_action with an empty reason", command: "hook", args: []string{"status", "waiting_action", "--reason", "", "--session", "abc"}},
+		{name: "hook status waiting_action with a blank reason", command: "hook", args: []string{"status", "waiting_action", "--reason", " ", "--session", "abc"}},
+		{name: "hook status waiting_action with --reason and no value", command: "hook", args: []string{"status", "waiting_action", "--reason"}},
+		{name: "hook status waiting_action with a line break in the reason", command: "hook", args: []string{"status", "waiting_action", "--reason", "gh に\nログイン", "--session", "abc"}},
+		{name: "hook status idle with a reason", command: "hook", args: []string{"status", "idle", "--reason", "x", "--session", "abc"}},
 		{name: "hook without session", command: "hook", args: []string{"exited"}},
 		{name: "hook rate-limits without JSON", command: "hook", args: []string{"rate-limits"}},
 		{name: "hook rate-limits with invalid JSON", command: "hook", args: []string{"rate-limits", "five_hour=12", "--session", "abc"}},

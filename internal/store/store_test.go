@@ -41,7 +41,7 @@ func TestStore_RoundTrip(t *testing.T) {
 				ID: "b", Name: "maika-548e", RepoPath: "/repo", RepoName: "repo",
 				WorkspacePath: "/ws/maika-548e/sub", WorkspaceName: "maika-548e", SubProjectDir: "sub", Isolation: IsolationWorkspace,
 				SessionChain: []string{"old", "new"}, ForkedFrom: "source", Alias: "review-pr-12", Status: "completed", FinishedAt: &finished, PID: 42,
-				ErrorMessage: "boom", TerminalTitle: "title", BookmarkName: "feat/x",
+				ErrorMessage: "boom", StatusReason: "ログインしてください", TerminalTitle: "title", BookmarkName: "feat/x",
 				LastJJRevision: "abc", LastJJParentRevision: "def",
 				Prompt: "hello", PermissionMode: "plan",
 				StartedAt: time.Unix(1_700_000_000, 1), LastActivity: time.Unix(1_700_000_050, 2),
@@ -113,13 +113,14 @@ func TestStore_MigratesAddedColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Name != "anna-8cc7" || got.ForkedFrom != "" || got.Alias != "" || got.Pinned {
-		t.Errorf("old row = %+v, want name anna-8cc7, no ForkedFrom, no Alias and not pinned", got)
+	if got.Name != "anna-8cc7" || got.ForkedFrom != "" || got.Alias != "" || got.Pinned || got.StatusReason != "" {
+		t.Errorf("old row = %+v, want name anna-8cc7, no ForkedFrom, no Alias, not pinned and no StatusReason", got)
 	}
 	if _, err := st.Update("a", func(r *Record) error {
 		r.ForkedFrom = "source"
 		r.Alias = "review-pr-12"
 		r.Pinned = true
+		r.StatusReason = "ログインしてください"
 		return nil
 	}); err != nil {
 		t.Fatalf("Update: %v", err)
@@ -131,8 +132,8 @@ func TestStore_MigratesAddedColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after reopening: %v", err)
 	}
-	if got.ForkedFrom != "source" || got.Alias != "review-pr-12" || !got.Pinned {
-		t.Errorf("after reopening: ForkedFrom = %q, Alias = %q, Pinned = %v; want source, review-pr-12, true", got.ForkedFrom, got.Alias, got.Pinned)
+	if got.ForkedFrom != "source" || got.Alias != "review-pr-12" || !got.Pinned || got.StatusReason != "ログインしてください" {
+		t.Errorf("after reopening: ForkedFrom = %q, Alias = %q, Pinned = %v, StatusReason = %q; want source, review-pr-12, true, ログインしてください", got.ForkedFrom, got.Alias, got.Pinned, got.StatusReason)
 	}
 }
 

@@ -85,7 +85,7 @@ func (m *Manager) recordRuntimeStatus(sess *Session, status Activity) {
 	if sess.GetStatus() == status.Status() {
 		return
 	}
-	if err := RecordHookStatus(m.store, sess.ID, status); err != nil {
+	if err := RecordHookStatus(m.store, sess.ID, status, ""); err != nil {
 		debuglog.Printf("[recordRuntimeStatus] %s: %v", sess.ID, err)
 		return
 	}

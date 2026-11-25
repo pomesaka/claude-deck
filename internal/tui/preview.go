@@ -13,6 +13,7 @@ import (
 	"github.com/pomesaka/claude-deck/internal/config"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/preview"
+	"github.com/pomesaka/claude-deck/internal/session"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
@@ -376,7 +377,7 @@ func (m PreviewModel) render() string {
 			sections = append(sections, statusRunningStyle.Render(truncate(fmt.Sprintf("   🔧 %s", m.spec.CurrentTool), innerWidth)))
 		}
 		if m.spec.NeedsAttention {
-			sections = append(sections, statusApproveStyle.Render(truncate("   👆 Waiting for approval — answer it in the tmux window", innerWidth)))
+			sections = append(sections, statusApproveStyle.Render(truncate("   👆 "+m.attentionText()+" — answer it in the tmux window", innerWidth)))
 		}
 
 	default:
@@ -409,7 +410,7 @@ func (m PreviewModel) renderHeader(innerWidth int) []string {
 		h = append(h, statusRunningStyle.Render(truncate(fmt.Sprintf("   🔧 %s", m.spec.CurrentTool), innerWidth)))
 	}
 	if m.spec.NeedsAttention {
-		h = append(h, statusApproveStyle.Render(truncate("   👆 Waiting for approval", innerWidth)))
+		h = append(h, statusApproveStyle.Render(truncate("   👆 "+m.attentionText(), innerWidth)))
 	}
 	if m.spec.Status == "error" && m.spec.ErrorMessage != "" {
 		h = append(h, statusErrorStyle.Render(truncate("   ✗ "+m.spec.ErrorMessage, innerWidth)))
@@ -419,6 +420,15 @@ func (m PreviewModel) renderHeader(innerWidth int) []string {
 }
 
 // ── internal helpers ──────────────────────────────────────────────────────────
+
+// attentionText says what the session waits on the user for.
+// WHY waiting_action だけ分ける: 待っているのは承認でなく会話の外の操作で、その中身（理由）が要る。
+func (m PreviewModel) attentionText() string {
+	if m.spec.Status == session.StatusWaitingAction.ID() && m.spec.StatusReason != "" {
+		return "Waiting for your action: " + m.spec.StatusReason
+	}
+	return "Waiting for approval"
+}
 
 // headerLineCount returns how many lines renderHeader will produce.
 func (m *PreviewModel) headerLineCount() int {

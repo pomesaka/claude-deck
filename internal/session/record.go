@@ -37,6 +37,7 @@ func (s *Session) recordLocked() store.Record {
 		FinishedAt:     copyTimePtr(s.FinishedAt),
 		PID:            s.PID,
 		ErrorMessage:   s.ErrorMessage,
+		StatusReason:   s.StatusReason,
 		TerminalTitle:  s.TerminalTitle,
 		BookmarkName:   s.BookmarkName,
 		Prompt:         s.Prompt,
@@ -83,6 +84,7 @@ func (s *Session) applyControlRecordLocked(r store.Record) {
 	s.FinishedAt = copyTimePtr(r.FinishedAt)
 	s.PID = r.PID
 	s.ErrorMessage = r.ErrorMessage
+	s.StatusReason = r.StatusReason
 }
 
 // applyProjectionRecordLocked copies the fields the TUI projects from JSONL

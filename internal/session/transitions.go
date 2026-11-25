@@ -48,18 +48,28 @@ var ErrLaunching = errors.New("session is still being launched")
 // The functions below are the state transitions on a store row. Every process
 // (TUI, CLI, hook commands, the pane's exit command) applies them inside a
 // store transaction, so the rules live here rather than in any one process.
-// 既存の行の Status を書き換えるのはこのファイルの関数だけにする（rg 'r\.Status = ' internal/session で確かめる）。
+// 既存の行の Status を書き換えるのはこのファイルの setStatus だけにする（rg 'r\.Status = ' internal/session で確かめる）。
 
 // applyHookStatus sets the activity reported by a hook (or the Codex JSONL).
 // Activities only come from a live process, so a row that is not live is left
 // as is: a hook delivered after the exit was recorded must not bring it back,
 // and a status this version does not know is not ours to overwrite.
-func applyHookStatus(r *store.Record, a Activity) (changed bool) {
+//
+// reason is kept only with ActivityWaitingAction; any other activity clears it.
+// The same status with a new reason is a change: the list shows the reason.
+func applyHookStatus(r *store.Record, a Activity, reason string) (changed bool) {
 	current, _ := StatusFromID(r.Status)
-	if !current.IsLive() || current == a.Status() {
+	if !current.IsLive() {
 		return false
 	}
-	r.Status = a.Status().ID()
+	if a != ActivityWaitingAction {
+		reason = ""
+	}
+	if current == a.Status() && r.StatusReason == reason {
+		return false
+	}
+	setStatus(r, a.Status())
+	r.StatusReason = reason
 	return true
 }
 
@@ -97,7 +107,7 @@ func applySessionStart(r *store.Record, claudeID, source string) (changed bool) 
 // deck sessions never share a Claude session ID.
 func applyExited(r *store.Record, others []store.Record, hasConversation func(claudeID string) bool, now time.Time) {
 	if status, ok := StatusFromID(r.Status); !ok || !status.IsTerminal() {
-		r.Status = StatusCompleted.ID()
+		setStatus(r, StatusCompleted)
 		r.FinishedAt = &now
 	}
 	// 終了したプロセスの PID を残すと、後の close が再利用された別プロセスに SIGTERM を送りうる。
@@ -169,7 +179,7 @@ func beginResume(r *store.Record, now time.Time) error {
 	if closingActive(*r, now) {
 		return fmt.Errorf("%w: %s", ErrClosing, r.ID)
 	}
-	r.Status = StatusIdle.ID()
+	setStatus(r, StatusIdle)
 	r.FinishedAt = nil
 	r.ErrorMessage = ""
 	r.ClosingAt = nil
@@ -180,14 +190,14 @@ func beginResume(r *store.Record, now time.Time) error {
 // abortResume returns a row whose resume could not start a process to Completed.
 func abortResume(r *store.Record, now time.Time) {
 	r.LaunchingAt = nil
-	r.Status = StatusCompleted.ID()
+	setStatus(r, StatusCompleted)
 	r.FinishedAt = &now
 }
 
 // markAdopted turns the row built from an external session into a finished deck
 // session, so beginResume accepts it.
 func markAdopted(r *store.Record, now time.Time) {
-	r.Status = StatusCompleted.ID()
+	setStatus(r, StatusCompleted)
 	r.FinishedAt = &now
 }
 
@@ -198,7 +208,7 @@ func reviveForLiveWindow(r *store.Record, pid int) (changed bool) {
 	if !ok || !status.IsTerminal() {
 		return false
 	}
-	r.Status = StatusIdle.ID()
+	setStatus(r, StatusIdle)
 	r.FinishedAt = nil
 	r.ErrorMessage = ""
 	r.ClosingAt = nil
@@ -224,9 +234,16 @@ func recordWorkspaceRecreated(r *store.Record, workDir string) {
 
 // setError marks the row as failed with a reason.
 func setError(r *store.Record, msg string, now time.Time) {
-	r.Status = StatusError.ID()
+	setStatus(r, StatusError)
 	r.ErrorMessage = msg
 	if r.FinishedAt == nil {
 		r.FinishedAt = &now
 	}
+}
+
+// setStatus moves the row to s. A reason belongs to the wait it was given for,
+// so every move clears it; applyHookStatus sets it again for WaitingAction.
+func setStatus(r *store.Record, s Status) {
+	r.Status = s.ID()
+	r.StatusReason = ""
 }

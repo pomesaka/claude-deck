@@ -23,6 +23,10 @@ const (
 	// StatusSubagentRunning: the main loop has ended its turn while subagents it
 	// started in the background still run. The session works without the user.
 	StatusSubagentRunning
+	// StatusWaitingAction: the main loop has ended its turn to wait for the user
+	// to act outside the conversation (log in, approve, run a `!` command). The
+	// model reported it with the wait_for_user tool, with a reason.
+	StatusWaitingAction
 	StatusCompleted
 	StatusError
 )
@@ -34,6 +38,7 @@ var statusInfo = map[Status]struct{ id, label string }{
 	StatusWaitingAnswer:   {"waiting_answer", "waiting for an answer"},
 	StatusIdle:            {"idle", "idle"},
 	StatusSubagentRunning: {"subagent_running", "subagents running"},
+	StatusWaitingAction:   {"waiting_action", "waiting for your action"},
 	StatusCompleted:       {"completed", "completed"},
 	StatusError:           {"error", "error"},
 }
@@ -57,13 +62,13 @@ func (s Status) ID() string {
 
 // NeedsAttention returns true if the session requires user action.
 func (s Status) NeedsAttention() bool {
-	return s == StatusWaitingApproval || s == StatusWaitingAnswer
+	return s == StatusWaitingApproval || s == StatusWaitingAnswer || s == StatusWaitingAction
 }
 
 // IsLive reports whether the status is one of the activities of a running process.
 func (s Status) IsLive() bool {
 	switch s {
-	case StatusRunning, StatusWaitingApproval, StatusWaitingAnswer, StatusIdle, StatusSubagentRunning:
+	case StatusRunning, StatusWaitingApproval, StatusWaitingAnswer, StatusIdle, StatusSubagentRunning, StatusWaitingAction:
 		return true
 	}
 	return false
@@ -85,6 +90,7 @@ const (
 	ActivityWaitingApproval
 	ActivityWaitingAnswer
 	ActivitySubagentRunning
+	ActivityWaitingAction
 )
 
 var activityStatus = map[Activity]Status{
@@ -93,6 +99,7 @@ var activityStatus = map[Activity]Status{
 	ActivityWaitingApproval: StatusWaitingApproval,
 	ActivityWaitingAnswer:   StatusWaitingAnswer,
 	ActivitySubagentRunning: StatusSubagentRunning,
+	ActivityWaitingAction:   StatusWaitingAction,
 }
 
 // Status is the status a session takes on while doing a.
@@ -203,6 +210,7 @@ type Session struct {
 	// --- Runtime fields (not persisted, protected by sess.mu unless noted) ---
 	CurrentTool  string `json:"-"` // パーサー検出中のツール名
 	ErrorMessage string `json:"-"` // 終了の理由（store の error_message）
+	StatusReason string `json:"-"` // 利用者を待つ理由（store の status_reason）。Status が WaitingAction のときだけ入る
 }
 
 // hasProcessLocked reports whether the session has a running process.
@@ -296,6 +304,7 @@ type Snapshot struct {
 	FinishedAt     *time.Time
 	CurrentTool    string
 	ErrorMessage   string
+	StatusReason   string
 	TerminalTitle  string
 	BookmarkName   string
 	Elapsed        time.Duration
@@ -366,6 +375,7 @@ func (s *Session) Snapshot() Snapshot {
 		FinishedAt:       finishedAt,
 		CurrentTool:      s.CurrentTool,
 		ErrorMessage:     s.ErrorMessage,
+		StatusReason:     s.StatusReason,
 		TerminalTitle:    s.TerminalTitle,
 		BookmarkName:     s.BookmarkName,
 		Elapsed:          elapsed,
@@ -465,12 +475,12 @@ func (s *Session) isPinned() bool {
 //	0: 外部セッション / Completed / Error / Unknown（非アクティブ）
 //	1: Idle
 //	2: Running / SubagentRunning
-//	3: WaitingApproval / WaitingAnswer（要手動介入）
+//	3: WaitingApproval / WaitingAnswer / WaitingAction（要手動介入）
 func (s *Session) sortGroup() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	switch s.Status {
-	case StatusWaitingApproval, StatusWaitingAnswer:
+	case StatusWaitingApproval, StatusWaitingAnswer, StatusWaitingAction:
 		return 3
 	case StatusRunning, StatusSubagentRunning:
 		return 2

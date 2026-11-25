@@ -10,31 +10,80 @@ import (
 )
 
 func TestApplyHookStatus(t *testing.T) {
+	const r1, r2 = "gcloud auth login を実行してください", "PR を承認してください"
 	tests := []struct {
 		name        string
 		from        string
+		fromReason  string
 		to          Activity
+		reason      string
 		wantStatus  string
+		wantReason  string
 		wantChanged bool
 	}{
-		{"idle to running", "idle", ActivityRunning, "running", true},
-		{"running to waiting approval", "running", ActivityWaitingApproval, "waiting_approval", true},
-		{"waiting answer to idle", "waiting_answer", ActivityIdle, "idle", true},
-		{"running to subagent running", "running", ActivitySubagentRunning, "subagent_running", true},
-		{"subagent running to idle", "subagent_running", ActivityIdle, "idle", true},
-		{"same status is not a change", "running", ActivityRunning, "running", false},
-		{"completed is not revived by a late hook", "completed", ActivityRunning, "completed", false},
-		{"error is not revived by a late hook", "error", ActivityIdle, "error", false},
-		{"unknown stored status is left alone", "bogus", ActivityRunning, "bogus", false},
+		{"idle to running", "idle", "", ActivityRunning, "", "running", "", true},
+		{"running to waiting approval", "running", "", ActivityWaitingApproval, "", "waiting_approval", "", true},
+		{"waiting answer to idle", "waiting_answer", "", ActivityIdle, "", "idle", "", true},
+		{"running to subagent running", "running", "", ActivitySubagentRunning, "", "subagent_running", "", true},
+		{"subagent running to idle", "subagent_running", "", ActivityIdle, "", "idle", "", true},
+		{"same status is not a change", "running", "", ActivityRunning, "", "running", "", false},
+		{"completed is not revived by a late hook", "completed", "", ActivityRunning, "", "completed", "", false},
+		{"error is not revived by a late hook", "error", "", ActivityIdle, "", "error", "", false},
+		{"unknown stored status is left alone", "bogus", "", ActivityRunning, "", "bogus", "", false},
+		{"running to waiting action keeps the reason", "running", "", ActivityWaitingAction, r1, "waiting_action", r1, true},
+		{"a new reason for the same wait is a change", "waiting_action", r1, ActivityWaitingAction, r2, "waiting_action", r2, true},
+		{"the same wait and reason is not a change", "waiting_action", r1, ActivityWaitingAction, r1, "waiting_action", r1, false},
+		{"leaving the wait for running clears the reason", "waiting_action", r1, ActivityRunning, "", "running", "", true},
+		{"leaving the wait for idle clears the reason", "waiting_action", r1, ActivityIdle, "", "idle", "", true},
+		{"a reason with another activity is dropped", "running", "", ActivityIdle, r1, "idle", "", true},
+		{"completed is not made to wait", "completed", "", ActivityWaitingAction, r1, "completed", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := store.Record{ID: "s", Status: tt.from}
-			changed := applyHookStatus(&r, tt.to)
-			if r.Status != tt.wantStatus || changed != tt.wantChanged {
-				t.Errorf("got (%q, %v), want (%q, %v)", r.Status, changed, tt.wantStatus, tt.wantChanged)
+			r := store.Record{ID: "s", Status: tt.from, StatusReason: tt.fromReason}
+			changed := applyHookStatus(&r, tt.to, tt.reason)
+			if r.Status != tt.wantStatus || r.StatusReason != tt.wantReason || changed != tt.wantChanged {
+				t.Errorf("got (%q, %q, %v), want (%q, %q, %v)", r.Status, r.StatusReason, changed, tt.wantStatus, tt.wantReason, tt.wantChanged)
 			}
 		})
+	}
+}
+
+// 守る決まり: status_reason は waiting_action の行にだけ入る。どの遷移の後でも破れない。
+func TestStatusReasonOnlyWhileWaitingAction(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	activities := []Activity{ActivityRunning, ActivityIdle, ActivityWaitingApproval, ActivityWaitingAnswer, ActivitySubagentRunning, ActivityWaitingAction}
+	const reason = "ログインしてください"
+	for _, a := range activities {
+		r := store.Record{ID: "s", Status: StatusWaitingAction.ID(), StatusReason: reason}
+		applyHookStatus(&r, a, reason)
+		if r.Status != StatusWaitingAction.ID() && r.StatusReason != "" {
+			t.Errorf("hook %v: status %q kept reason %q", a.Status(), r.Status, r.StatusReason)
+		}
+	}
+	// The other transitions, each from a row it acts on. A finished row with a reason
+	// was left by a binary older than this rule.
+	steps := []struct {
+		name string
+		from Status
+		step func(r *store.Record)
+	}{
+		{"exited", StatusWaitingAction, func(r *store.Record) { applyExited(r, nil, func(string) bool { return true }, now) }},
+		{"error", StatusWaitingAction, func(r *store.Record) { setError(r, "boom", now) }},
+		{"adopted", StatusWaitingAction, func(r *store.Record) { markAdopted(r, now) }},
+		{"resume", StatusCompleted, func(r *store.Record) { _ = beginResume(r, now) }},
+		{"revive", StatusCompleted, func(r *store.Record) { reviveForLiveWindow(r, 1) }},
+		{"abort resume", StatusIdle, func(r *store.Record) { abortResume(r, now) }},
+	}
+	for _, tt := range steps {
+		r := store.Record{ID: "s", Status: tt.from.ID(), StatusReason: reason}
+		tt.step(&r)
+		if r.Status == tt.from.ID() {
+			t.Errorf("%s: status stayed %q; the step did not act", tt.name, r.Status)
+		}
+		if r.StatusReason != "" {
+			t.Errorf("%s: status %q kept reason %q", tt.name, r.Status, r.StatusReason)
+		}
 	}
 }
 

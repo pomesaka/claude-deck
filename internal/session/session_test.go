@@ -20,6 +20,7 @@ func TestStatus_String(t *testing.T) {
 		{StatusError, "error"},
 		{StatusIdle, "idle"},
 		{StatusSubagentRunning, "subagents running"},
+		{StatusWaitingAction, "waiting for your action"},
 		{StatusUnknown, "unknown"},
 		{Status(99), "unknown"},
 	}
@@ -43,6 +44,7 @@ func TestStatus_IsLiveIsTerminal(t *testing.T) {
 		{StatusWaitingAnswer, true, false},
 		{StatusIdle, true, false},
 		{StatusSubagentRunning, true, false},
+		{StatusWaitingAction, true, false},
 		{StatusCompleted, false, true},
 		{StatusError, false, true},
 	}
@@ -59,7 +61,7 @@ func TestStatus_IsLiveIsTerminal(t *testing.T) {
 // The store holds Status.ID strings; parsing must round-trip them and turn
 // anything else into Unknown.
 func TestStatusFromID(t *testing.T) {
-	for _, s := range []Status{StatusRunning, StatusWaitingApproval, StatusWaitingAnswer, StatusIdle, StatusSubagentRunning, StatusCompleted, StatusError} {
+	for _, s := range []Status{StatusRunning, StatusWaitingApproval, StatusWaitingAnswer, StatusIdle, StatusSubagentRunning, StatusWaitingAction, StatusCompleted, StatusError} {
 		if got, ok := StatusFromID(s.ID()); !ok || got != s {
 			t.Errorf("StatusFromID(%q) = %v, %v; want %v, true", s.ID(), got, ok, s)
 		}
@@ -75,7 +77,7 @@ func TestStatusFromID(t *testing.T) {
 // with the same ID.
 func TestActivityFromID(t *testing.T) {
 	seen := map[Status]bool{}
-	for _, id := range []string{"running", "idle", "waiting_approval", "waiting_answer", "subagent_running"} {
+	for _, id := range []string{"running", "idle", "waiting_approval", "waiting_answer", "subagent_running", "waiting_action"} {
 		a, ok := ActivityFromID(id)
 		if !ok {
 			t.Errorf("ActivityFromID(%q) not accepted", id)
@@ -109,6 +111,7 @@ func TestStatus_NeedsAttention(t *testing.T) {
 		{StatusIdle, false},
 		{StatusUnknown, false},
 		{StatusSubagentRunning, false},
+		{StatusWaitingAction, true},
 	}
 	for _, tt := range tests {
 		if got := tt.status.NeedsAttention(); got != tt.want {

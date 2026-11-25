@@ -28,13 +28,16 @@ CLI のサブコマンドやフラグを変えたら、スキルも同時に直�
 | Claude Code のイベント | store への書き込み | 備考 |
 |---|---|---|
 | `classic.SessionStart`（`agent_id` なし） | `hook session-start --claude-session-id <id> --source <source>` | SessionChain を更新する。モデルに claude-deck の案内を渡す |
-| `turn.start`（メイン） | `hook status running` | ほかの Mod が `prompt.submit` で止めた入力では発火しない（Claude Code 2.1.327 で確認） |
-| `turn.start`（サブエージェント） | メインのターンが終わった後で、待ち状態でなければ `subagent_running` | サブエージェントの実行でも発火する（同じ版で確認）。Mod がメインの停止中に立てたエージェントは、メインの `turn.complete` を通らない |
+| `turn.start`（メイン） | `hook status running`。待ちの理由を消す | ほかの Mod が `prompt.submit` で止めた入力では発火しない（Claude Code 2.1.327 で確認） |
+| `turn.start`（サブエージェント） | メインのターンが終わった後で、待ち状態でも `waiting_action` でもなければ `subagent_running` | サブエージェントの実行でも発火する（同じ版で確認）。Mod がメインの停止中に立てたエージェントは、メインの `turn.complete` を通らない |
 | `tool.call`（メイン） | `running`（待ち状態のときは変えない）。`AskUserQuestion` のときは `waiting_answer`。実行中のツール呼び出しがすべて返ったら `running` | `next(e)` は承認ダイアログと質問への回答を待つので、返った時点でユーザーが答えている。並行して走る別の呼び出しの承認ダイアログが開いている間は、待ち状態を消さない |
 | `tool.call`（サブエージェントと、Mod が起こした呼び出し） | 実行中のツール呼び出しがすべて返り、直前が `waiting_approval` / `waiting_answer` なら `running`。メインのターンが終わった後なら、動いているサブエージェントの有無で `subagent_running` か `idle` | サブエージェントの承認ダイアログもユーザーを待たせる。Mod の `$.agent.spawn` は `agentId` の無い `Agent` の呼び出しとして、メインのターンの外でも届く。`tool_use_id` が `toolu_plugin_` で始まることで見分ける（Claude Code 2.1.327 で確認） |
 | `classic.PermissionRequest` | `waiting_approval`。`AskUserQuestion` のときは `waiting_answer` | サブエージェントでも書く |
-| `turn.complete`（メイン） | `idle`。動いているサブエージェントがあれば `subagent_running` | 拒否・中断・API エラーでも発火する。サブエージェントは `$.agent.list()` の `pending` / `running` / `waiting` を数える |
+| `turn.complete`（メイン） | 待ちの理由があれば `waiting_action --reason <理由>`。無ければ `idle`、動いているサブエージェントがあれば `subagent_running` | 拒否・中断・API エラーでも発火する。サブエージェントは `$.agent.list()` の `pending` / `running` / `waiting` を数える |
 | `turn.complete`（サブエージェント） | 直前が `subagent_running` で、動いているサブエージェントが無くなったら `idle` | メインのターンが終わった後も、バックグラウンドのサブエージェントは動き続ける |
+| `tool.call`（`mcp__deck-status__wait_for_user`） | 書かない。待ちの理由をプラグインのメモリに置く | 下の「利用者の操作待ち」 |
+| `classic.Stop` | 書かない。条件に合えば 1 回だけ止める | 下の「利用者の操作待ち」 |
+| `classic.SessionStart`（source が `clear`） | 待ちの理由があれば消して、`idle` か `subagent_running` | 頼んだ会話が消えるので、待ちも消す |
 | `session.measure`（`changed` に `rateLimits` があるとき） | `hook rate-limits <JSON>` | store ではなく `{DataDir}/rate-limits.json` に書く（下の節） |
 
 サブエージェントとして数えるのは `$.agent.list()` に出るエージェントだけ。バックグラウンドのシェルとモニターは数えないので、それだけが動いている間は `idle` になる。ワークフローのエージェントも一覧に出ない（Mods の型定義 `AgentLoop.agentId` の説明。動作は未確認）。
@@ -42,6 +45,24 @@ CLI のサブコマンドやフラグを変えたら、スキルも同時に直�
 終了は別経路で、プラグインは関与しない（[ウィンドウの終了検知](architecture.md#プロセス終了の検知)）。
 
 `session-start` の source ごとの SessionChain の更新は [session-id.md](session-id.md#sessionstart-の-source) にある。
+
+## 利用者の操作待ち
+
+モデルがログインや `! コマンド` の実行を文章で頼んでターンを終えると、`idle` では仕事が終わったのか待っているのかが分からない。そこでプラグインがツール `wait_for_user`（モデルからは `mcp__deck-status__wait_for_user`）を登録し、モデルが待つときに呼ばせる。
+
+- ツールは `session.start` で登録する。deck のセッションでだけ登録するので、ほかのセッションには出ない
+- 入力は `{ reason }`。一覧の 2 行目の末尾に 1 行で出すので 80 文字まで。空のとき、改行を含むとき、超えたときは切らずにエラーで返し、呼び直させる。サブエージェントからの呼び出しも断る
+- 呼ばれた時点では store に書かない。メインの `turn.complete` で `idle` の代わりに `waiting_action` を書く。書くのは理由がターンの終わりまで残ったときだけ
+- バックグラウンドのサブエージェントが動いていても `waiting_action` を出す。利用者にすることがあるほうを優先する
+- 次のメインの `turn.start`（利用者の次の発言）と `/clear` で外す。`! コマンド` の実行で `turn.start` が発火するかは未確認
+
+### 呼び忘れを止める Stop の検査
+
+メインの `classic.Stop` で、そのターンに `wait_for_user` が呼ばれておらず、`last_assistant_message` が利用者に操作を頼んでいれば、`block` で 1 回だけ止めて、呼ぶか、そのまま終えるかを選ばせる。
+
+- 頼んでいると見なすのは、行頭かバッククォートの中の `! ` で始まるコマンド（コードブロックの中も見る）と、「ログイン」「承認」「認証」「打って」「押して」「実行して」のどれかと「ください」「お願いします」のどれかが 1 つの文にあるとき（コードブロックの中は見ない）。依頼の語は日本語だけを見る。英語で話すセッションでは、`! ` のコマンドを書いたときだけ止める
+- 同じターンでは 2 回目を止めない。`stop_hook_active` のときも止めない。言い回しで見るので誤検知があり、止め続けるとターンが終わらないため
+- 止めたことと、その後に呼ばれたかを、デバッグのログ（`claude --debug`）に `deck-status:` で始まる 1 行ずつ書く。誤検知の率を後で見るため
 
 ## レート制限
 

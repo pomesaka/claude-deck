@@ -666,7 +666,7 @@ func TestReload_FollowsOtherProcesses(t *testing.T) {
 	if err := RecordSessionStart(other, sess.ID, "claude-1", SourceStartup); err != nil {
 		t.Fatalf("RecordSessionStart: %v", err)
 	}
-	if err := RecordHookStatus(other, sess.ID, ActivityWaitingApproval); err != nil {
+	if err := RecordHookStatus(other, sess.ID, ActivityWaitingApproval, ""); err != nil {
 		t.Fatalf("RecordHookStatus: %v", err)
 	}
 	m.Reload()
@@ -677,6 +677,23 @@ func TestReload_FollowsOtherProcesses(t *testing.T) {
 	}
 	if m.GetSession("ext") != nil {
 		t.Error("external session for a Claude ID now owned by a deck session was kept")
+	}
+
+	// A wait for the user's action reaches the list with its reason, and the next activity clears it.
+	const reason = "gcloud auth login を実行してください"
+	if err := RecordHookStatus(other, sess.ID, ActivityWaitingAction, reason); err != nil {
+		t.Fatalf("RecordHookStatus: %v", err)
+	}
+	m.Reload()
+	if snap := m.GetSession(sess.ID).Snapshot(); snap.Status != StatusWaitingAction || snap.StatusReason != reason {
+		t.Errorf("after the wait: status=%v reason=%q, want waiting_action and %q", snap.Status, snap.StatusReason, reason)
+	}
+	if err := RecordHookStatus(other, sess.ID, ActivityRunning, ""); err != nil {
+		t.Fatalf("RecordHookStatus: %v", err)
+	}
+	m.Reload()
+	if snap := m.GetSession(sess.ID).Snapshot(); snap.Status != StatusRunning || snap.StatusReason != "" {
+		t.Errorf("after the next turn: status=%v reason=%q, want running and no reason", snap.Status, snap.StatusReason)
 	}
 
 	if err := other.Delete(string(sess.ID)); err != nil {
@@ -693,7 +710,7 @@ func TestReload_KeepsProjectedFields(t *testing.T) {
 	sess := createPlainSession(t, m)
 	sess.ApplyFileActivity(time.Unix(1_800_000_000, 0))
 
-	if err := RecordHookStatus(otherProcess(t, m), sess.ID, ActivityRunning); err != nil {
+	if err := RecordHookStatus(otherProcess(t, m), sess.ID, ActivityRunning, ""); err != nil {
 		t.Fatalf("RecordHookStatus: %v", err)
 	}
 	m.Reload()
@@ -1239,7 +1256,7 @@ func TestWatchStore_ReloadsOnOtherProcessWrite(t *testing.T) {
 	defer cancel()
 	go m.WatchStore(ctx)
 
-	if err := RecordHookStatus(otherProcess(t, m), sess.ID, ActivityRunning); err != nil {
+	if err := RecordHookStatus(otherProcess(t, m), sess.ID, ActivityRunning, ""); err != nil {
 		t.Fatalf("RecordHookStatus: %v", err)
 	}
 	deadline := time.Now().Add(3 * time.Second)

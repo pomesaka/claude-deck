@@ -38,7 +38,9 @@ type cliRequest struct {
 	Session   string
 	// Activity is what `hook status` reports. Completed and Error are not
 	// activities: they come from the exit command and close, which also record FinishedAt.
-	Activity        session.Activity
+	Activity session.Activity
+	// StatusReason is why a waiting_action session waits on the user.
+	StatusReason    string
 	ClaudeSessionID string
 	Source          string
 	RateLimits      string // JSON, as ratelimits.ParseMeasured reads it
@@ -72,10 +74,12 @@ type SessionInfo struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	// Alias is the label given with `claude-deck alias`.
-	Alias           string `json:"alias,omitempty"`
-	RepoPath        string `json:"repo_path"`
-	WorkDir         string `json:"work_dir"`
-	Status          string `json:"status"`
+	Alias    string `json:"alias,omitempty"`
+	RepoPath string `json:"repo_path"`
+	WorkDir  string `json:"work_dir"`
+	Status   string `json:"status"`
+	// StatusReason is what the user has to do, while Status is waiting_action.
+	StatusReason    string `json:"status_reason,omitempty"`
 	ClaudeSessionID string `json:"claude_session_id,omitempty"`
 	// SessionChain is every Claude Code session ID of the session, oldest first
 	// (one more for each /clear). The last one is ClaudeSessionID.
@@ -97,6 +101,7 @@ func infoFromSnapshot(s session.Snapshot) SessionInfo {
 		RepoPath:        s.RepoPath,
 		WorkDir:         s.WorkDir(),
 		Status:          s.Status.ID(),
+		StatusReason:    s.StatusReason,
 		ClaudeSessionID: string(s.RuntimeSessionID),
 		SessionChain:    chain,
 		ForkedFrom:      string(s.ForkedFrom),
@@ -541,7 +546,7 @@ const (
 // parseHookArgs parses `hook <event> [args] --session ID`. These are called by
 // the deck-status plugin and by the pane's exit command, not by people.
 func parseHookArgs(args []string) (cliRequest, error) {
-	usage := "Usage: claude-deck hook status <running|idle|waiting_approval|waiting_answer|subagent_running> | session-start --claude-session-id ID --source SOURCE | exited | rate-limits <JSON>  [--session DECK_ID]"
+	usage := "Usage: claude-deck hook status <running|idle|waiting_approval|waiting_answer|subagent_running|waiting_action --reason TEXT> | session-start --claude-session-id ID --source SOURCE | exited | rate-limits <JSON>  [--session DECK_ID]"
 	if len(args) == 0 {
 		return cliRequest{}, fmt.Errorf("hook: missing event\n%s", usage)
 	}
@@ -558,6 +563,7 @@ func parseHookArgs(args []string) (cliRequest, error) {
 			return cliRequest{}, fmt.Errorf("hook status: unknown status %q", args[1])
 		}
 		req.Activity = a
+		fs.StringVar(&req.StatusReason, "reason", "", "why the session waits on the user (waiting_action only)")
 		args = args[2:]
 	case hookSessionStart:
 		fs.StringVar(&req.ClaudeSessionID, "claude-session-id", "", "Claude Code session ID")
@@ -583,6 +589,11 @@ func parseHookArgs(args []string) (cliRequest, error) {
 	if fs.NArg() > 0 {
 		return cliRequest{}, fmt.Errorf("hook %s: unexpected arguments: %v", req.HookEvent, fs.Args())
 	}
+	if req.HookEvent == hookStatus {
+		if err := checkStatusReason(req.Activity, req.StatusReason); err != nil {
+			return cliRequest{}, err
+		}
+	}
 	if req.Session == "" {
 		return cliRequest{}, fmt.Errorf("hook %s: no session (--session or $%s)", req.HookEvent, session.EnvSessionID)
 	}
@@ -599,7 +610,7 @@ func runHook(req cliRequest, st *store.Store, dataDir string) error {
 		}
 		return ratelimits.Save(dataDir, status)
 	case hookStatus:
-		return session.RecordHookStatus(st, id, req.Activity)
+		return session.RecordHookStatus(st, id, req.Activity, req.StatusReason)
 	case hookSessionStart:
 		return session.RecordSessionStart(st, id, session.ClaudeSessionID(req.ClaudeSessionID), req.Source)
 	case hookExited:
@@ -629,5 +640,21 @@ func printJSON(v any) error {
 		return fmt.Errorf("writing output: %w", err)
 	}
 	fmt.Println()
+	return nil
+}
+
+// checkStatusReason requires --reason with waiting_action and refuses it with
+// any other status: the list shows the reason only for that wait.
+// WHY 長さはここで見ない: 上限は wait_for_user のツールの約束で、プラグインがエラーで返して呼び直させる。
+func checkStatusReason(a session.Activity, reason string) error {
+	switch {
+	case a == session.ActivityWaitingAction && strings.TrimSpace(reason) == "":
+		return fmt.Errorf("hook status %s: --reason is required", a.Status().ID())
+	case strings.ContainsAny(reason, "\r\n"):
+		// 一覧の 2 行目に 1 行で出すので、改行があると行が崩れる。
+		return fmt.Errorf("hook status %s: --reason must be one line", a.Status().ID())
+	case a != session.ActivityWaitingAction && reason != "":
+		return fmt.Errorf("hook status %s: --reason is only for %s", a.Status().ID(), session.StatusWaitingAction.ID())
+	}
 	return nil
 }

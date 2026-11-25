@@ -32,6 +32,24 @@ func TestSortSessions_Pinned(t *testing.T) {
 			want: []string{"done", "idle", "approve"},
 		},
 		{
+			name: "a wait for the user's action sorts with approvals, by time",
+			sessions: []in{
+				{"idle", StatusIdle, false, 0},
+				{"action-old", StatusWaitingAction, false, time.Hour},
+				{"approve-new", StatusWaitingApproval, false, time.Minute},
+			},
+			want: []string{"idle", "action-old", "approve-new"},
+		},
+		{
+			name: "a newer wait for the user's action goes below an older approval",
+			sessions: []in{
+				{"idle", StatusIdle, false, 0},
+				{"approve-old", StatusWaitingApproval, false, time.Hour},
+				{"action-new", StatusWaitingAction, false, time.Minute},
+			},
+			want: []string{"idle", "approve-old", "action-new"},
+		},
+		{
 			name: "a pinned finished session goes below an unpinned approval",
 			sessions: []in{
 				{"approve", StatusWaitingApproval, false, 0},

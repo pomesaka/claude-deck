@@ -78,12 +78,16 @@ func TestHookContract_Statuses(t *testing.T) {
 	}
 	slices.Sort(got)
 
-	want := []string{"idle", "running", "subagent_running", "waiting_answer", "waiting_approval"}
+	want := []string{"idle", "running", "subagent_running", "waiting_action", "waiting_answer", "waiting_approval"}
 	if !slices.Equal(got, want) {
 		t.Errorf("plugin statuses = %v, want %v", got, want)
 	}
 	for _, status := range got {
-		if _, err := parseHookArgs([]string{"status", status, "--session", "abc"}); err != nil {
+		args := []string{"status", status, "--session", "abc"}
+		if status == session.StatusWaitingAction.ID() {
+			args = append(args, "--reason", "gcloud auth login を実行してください")
+		}
+		if _, err := parseHookArgs(args); err != nil {
 			t.Errorf("hook status %s: %v", status, err)
 		}
 	}
@@ -107,7 +111,8 @@ func TestHookContract_Calls(t *testing.T) {
 		event  string
 		values []string
 	}{
-		{"status", []string{"running"}},
+		{"status", []string{"running", ""}},
+		{"status", []string{"waiting_action", "gcloud auth login を実行してください"}},
 		{"session-start", []string{"11111111-aaaa", "clear"}},
 		{"rate-limits", []string{`[{"kind":"five_hour","percentUsed":12,"resetsAt":"2026-10-09T12:00:00Z"}]`}},
 	}
@@ -152,6 +157,7 @@ func TestHookContract_Calls(t *testing.T) {
 	}
 	slices.Sort(called)
 	slices.Sort(tested)
+	tested = slices.Compact(tested) // an event may have a row for each status it carries
 	if !slices.Equal(called, tested) {
 		t.Errorf("plugin calls hooks %v, this test covers %v", called, tested)
 	}
