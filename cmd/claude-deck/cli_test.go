@@ -62,6 +62,25 @@ func TestParseCLIArgs(t *testing.T) {
 			want:    cliRequest{Op: "new", Dir: wd, Prompt: "line1\nline2"},
 		},
 		{
+			name:    "fork another session",
+			command: "fork",
+			args:    []string{"--session", "anna-8cc7"},
+			want:    cliRequest{Op: "fork", Target: "anna-8cc7"},
+		},
+		{
+			name:    "fork with a prompt",
+			command: "fork",
+			args:    []string{"--session", "anna-8cc7", "--prompt", "fix"},
+			want:    cliRequest{Op: "fork", Target: "anna-8cc7", Prompt: "fix"},
+		},
+		{
+			name:    "fork reads the prompt from stdin, keeping inner newlines",
+			command: "fork",
+			args:    []string{"--session", "anna-8cc7", "--prompt", "-"},
+			stdin:   strings.NewReader("line1\nline2\n"),
+			want:    cliRequest{Op: "fork", Target: "anna-8cc7", Prompt: "line1\nline2"},
+		},
+		{
 			name:    "list",
 			command: "list",
 			want:    cliRequest{Op: "list"},
@@ -203,6 +222,31 @@ func TestAliasMatches(t *testing.T) {
 	}
 }
 
+// Without --session, fork forks the calling session; --session wins over it.
+func TestParseForkArgs_SessionFromEnv(t *testing.T) {
+	t.Setenv("CLAUDE_DECK_SESSION_ID", "from-env")
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"from the environment", nil, "from-env"},
+		{"--session wins", []string{"--session", "anna-8cc7"}, "anna-8cc7"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := cliCommands["fork"](tt.args, failingReader{t})
+			if err != nil {
+				t.Fatalf("parse fork: %v", err)
+			}
+			want := cliRequest{Op: "fork", Target: tt.want}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("got %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
 func TestParseAliasArgs_SessionFromEnv(t *testing.T) {
 	t.Setenv("CLAUDE_DECK_SESSION_ID", "from-env")
 	got, err := parseAliasArgs([]string{"review"})
@@ -237,6 +281,11 @@ func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 		{name: "new with an empty prompt on stdin", command: "new", args: []string{"--prompt", "-"}, stdin: strings.NewReader("")},
 		{name: "new with a blank prompt on stdin", command: "new", args: []string{"--prompt", "-"}, stdin: strings.NewReader(" \n ")},
 		{name: "new when stdin fails midway", command: "new", args: []string{"--prompt", "-"}, stdin: io.MultiReader(strings.NewReader("partial"), errReader{})},
+		{name: "fork with positional argument", command: "fork", args: []string{"--session", "a", "extra"}},
+		{name: "fork without session", command: "fork"},
+		{name: "fork with a blank prompt", command: "fork", args: []string{"--session", "a", "--prompt", " \n\t"}},
+		{name: "fork with --prompt and no value", command: "fork", args: []string{"--session", "a", "--prompt"}},
+		{name: "fork when stdin fails midway", command: "fork", args: []string{"--session", "a", "--prompt", "-"}, stdin: io.MultiReader(strings.NewReader("partial"), errReader{})},
 		{name: "gc with positional argument", command: "gc", args: []string{"extra"}},
 		{name: "tree with positional argument", command: "tree", args: []string{"extra"}},
 		{name: "project without operation", command: "project"},

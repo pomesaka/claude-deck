@@ -7,7 +7,7 @@ store（`{DataDir}/deck.db`）が deck セッションの信頼できる唯一�
 | プロセス | 書くもの |
 |---|---|
 | TUI | セッションの作成・再開・フォーク・close、ステータスの補完、JSONL・jj から投影した項目 |
-| CLI `new` / `close` | TUI と同じ処理（`Manager.CreateSession` / `Manager.Kill`） |
+| CLI `new` / `fork` / `close` | TUI と同じ処理（`Manager.CreateSession` / `Manager.ForkSession` / `Manager.Kill`） |
 | `claude-deck hook status` / `session-start` | ステータス、SessionChain（deck-status プラグインが呼ぶ） |
 | `claude-deck hook exited` | Completed、`/clear` 直後に終了したときの SessionChain の巻き戻し（tmux ウィンドウのコマンドが呼ぶ） |
 

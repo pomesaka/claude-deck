@@ -120,7 +120,7 @@ jj git push --change <change-id>        # or a closed one's, by the change ID jj
 
 ### Resume, fork, and trace
 
-`r` resumes a finished session, recreating its workspace where it left off. `f` forks a session into a new one. Claude Code sessions you started yourself, outside claude-deck, appear in the list too; `r` adopts one. `claude-deck tree` shows how your conversations branched through `/clear` and forks; `←` marks the conversation each session continues on resume, with its status.
+`r` resumes a finished session, recreating its workspace where it left off. `f` (or `claude-deck fork`) forks a session into a new one. Claude Code sessions you started yourself, outside claude-deck, appear in the list too; `r` adopts one. `claude-deck tree` shows how your conversations branched through `/clear` and forks; `←` marks the conversation each session continues on resume, with its status.
 
 ![claude-deck tree](docs/assets/tree.png)
 
@@ -131,6 +131,7 @@ Every command prints JSON and works without the TUI running, from any shell or a
 ```bash
 claude-deck new --dir ~/src/api --prompt "Add retries to the HTTP client"   # start a session on a task
 echo "$long_task" | claude-deck new --prompt -    # or read the task from stdin
+claude-deck fork --prompt "Measure the cold start"   # fork this session's conversation into a new one
 claude-deck list                    # every session, in the order of the list (an array)
 claude-deck list --alias invoice    # only sessions whose label contains "invoice"
 claude-deck close maika-7c78        # stop it and remove its workspace (ID or name)
@@ -143,7 +144,7 @@ The `name` a session gets is also its Claude Code session name, so sessions can 
 <details>
 <summary>Output, statuses, and driving a session from a script</summary>
 
-`new`, `close` and `alias` print one session; `list` prints an array of them:
+`new`, `fork`, `close` and `alias` print one session; `list` prints an array of them:
 
 ```json
 {
@@ -160,9 +161,9 @@ The `name` a session gets is also its Claude Code session name, so sessions can 
 
 `status` is one of `running`, `idle`, `subagent_running`, `waiting_approval`, `waiting_answer`, `completed` and `error`. There is no wait command; poll `list`.
 
-`--prompt` gives the session its first task; it stays an interactive session you can talk to afterwards. Without it, the session starts waiting for one.
+`--prompt` (on `new` and `fork`) gives the session its first task; it stays an interactive session you can talk to afterwards. Without it, the session starts waiting for one.
 
-`new` returns as soon as the session's tmux window opens, before Claude Code has started on the task, and its `status` is already `idle`. To wait for the task to finish, wait for `running` first, then for `idle` (its turn ended). No command returns the session's last reply; it is in the Claude Code transcript, `~/.claude/projects/*/<claude_session_id>.jsonl`. To keep sessions from stopping for approvals, set [`permission_mode`](docs/configuration.md).
+`new` and `fork` return as soon as the session's tmux window opens, before Claude Code has started on the task, and its `status` is already `idle`. To wait for the task to finish, wait for `running` first, then for `idle` (its turn ended). No command returns the session's last reply; it is in the Claude Code transcript, `~/.claude/projects/*/<claude_session_id>.jsonl`. To keep sessions from stopping for approvals, set [`permission_mode`](docs/configuration.md).
 
 </details>
 

@@ -133,30 +133,49 @@ func createPlainSession(t *testing.T, m *Manager) *Session {
 }
 
 // The first prompt reaches the agent as its last argument, after the plugin
-// and project arguments, and is not stored.
-func TestCreateSession_PassesPrompt(t *testing.T) {
-	for _, prompt := range []string{"hi", ""} {
-		t.Run(fmt.Sprintf("prompt=%q", prompt), func(t *testing.T) {
-			m, be := newTestManager(t)
-			m.config.PluginDir = "/data/plugin"
-			m.config.ProjectArgsFunc = func(string) []string { return []string{"--verbose"} }
+// and project arguments, and is not stored. Without one there is no "--".
+func TestStartSession_PassesPrompt(t *testing.T) {
+	launches := []struct {
+		name  string
+		start func(t *testing.T, m *Manager, prompt string) (*Session, error)
+	}{
+		{"create", func(t *testing.T, m *Manager, prompt string) (*Session, error) {
 			dir := t.TempDir()
-			sess, err := m.CreateSession(context.Background(), dir, dir, false, prompt)
-			if err != nil {
-				t.Fatalf("CreateSession: %v", err)
+			return m.CreateSession(context.Background(), dir, dir, false, prompt)
+		}},
+		{"fork", func(t *testing.T, m *Manager, prompt string) (*Session, error) {
+			useFakeJJ(t, m, false)
+			src := createPlainSession(t, m)
+			if err := RecordSessionStart(m.store, src.ID, "ctx-1", SourceStartup); err != nil {
+				t.Fatalf("RecordSessionStart: %v", err)
 			}
-			args := be.started[0].Args
-			if prompt == "" {
-				if slices.Contains(args, "--") {
-					t.Errorf("args %q have -- without a prompt", args)
+			m.Reload()
+			return m.ForkSession(context.Background(), src.ID, prompt)
+		}},
+	}
+	for _, launch := range launches {
+		for _, prompt := range []string{"hi", ""} {
+			t.Run(fmt.Sprintf("%s prompt=%q", launch.name, prompt), func(t *testing.T) {
+				m, be := newTestManager(t)
+				m.config.PluginDir = "/data/plugin"
+				m.config.ProjectArgsFunc = func(string) []string { return []string{"--verbose"} }
+				sess, err := launch.start(t, m, prompt)
+				if err != nil {
+					t.Fatalf("start: %v", err)
 				}
-			} else if n := len(args); n < 2 || args[n-2] != "--" || args[n-1] != prompt {
-				t.Errorf("args %q do not end with -- %q", args, prompt)
-			}
-			if got := mustGet(t, m.store, sess.ID).Prompt; got != "" {
-				t.Errorf("stored prompt = %q, want none", got)
-			}
-		})
+				args := be.started[len(be.started)-1].Args
+				if prompt == "" {
+					if slices.Contains(args, "--") {
+						t.Errorf("args %q have -- without a prompt", args)
+					}
+				} else if n := len(args); n < 2 || args[n-2] != "--" || args[n-1] != prompt {
+					t.Errorf("args %q do not end with -- %q", args, prompt)
+				}
+				if got := mustGet(t, m.store, sess.ID).Prompt; got != "" {
+					t.Errorf("stored prompt = %q, want none", got)
+				}
+			})
+		}
 	}
 }
 
@@ -981,7 +1000,7 @@ func TestForkSession_RecordsForkedFrom(t *testing.T) {
 	}
 	m.Reload()
 
-	fork, err := m.ForkSession(context.Background(), src.ID)
+	fork, err := m.ForkSession(context.Background(), src.ID, "")
 	if err != nil {
 		t.Fatalf("ForkSession: %v", err)
 	}
@@ -998,6 +1017,56 @@ func TestForkSession_RecordsForkedFrom(t *testing.T) {
 	}
 	if got := mustGet(t, m.store, src.ID).ForkedFrom; got != "" {
 		t.Errorf("source ForkedFrom = %q, want empty", got)
+	}
+}
+
+// A fork continues the source's latest conversation, after its /clear.
+func TestForkSession_ResumesLatestConversation(t *testing.T) {
+	m, be := newTestManager(t)
+	useFakeJJ(t, m, false)
+	src := createPlainSession(t, m)
+	for _, start := range []struct {
+		id     ClaudeSessionID
+		source string
+	}{{"ctx-1", SourceStartup}, {"ctx-2", SourceClear}} {
+		if err := RecordSessionStart(m.store, src.ID, start.id, start.source); err != nil {
+			t.Fatalf("RecordSessionStart: %v", err)
+		}
+	}
+	m.Reload()
+
+	if _, err := m.ForkSession(context.Background(), src.ID, ""); err != nil {
+		t.Fatalf("ForkSession: %v", err)
+	}
+	args := be.started[len(be.started)-1].Args
+	if i := slices.Index(args, "--resume"); i < 0 || i+1 >= len(args) || args[i+1] != "ctx-2" {
+		t.Errorf("args %q do not resume ctx-2", args)
+	}
+}
+
+// A source without a conversation is refused before anything is made.
+func TestForkSession_WithoutConversation(t *testing.T) {
+	m, be := newTestManager(t)
+	jjCalls := useFakeJJ(t, m, false)
+	src := createPlainSession(t, m)
+
+	if _, err := m.ForkSession(context.Background(), src.ID, "hi"); err == nil {
+		t.Fatal("ForkSession without a conversation succeeded")
+	}
+	if len(be.started) != 1 {
+		t.Errorf("started %d processes, want only the source", len(be.started))
+	}
+	recs, err := m.store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Errorf("store has %d rows, want only the source", len(recs))
+	}
+	for _, c := range jjCalls() {
+		if strings.HasPrefix(c, "workspace add") {
+			t.Errorf("a workspace was made: %q", c)
+		}
 	}
 }
 

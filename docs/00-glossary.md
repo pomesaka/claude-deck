@@ -47,7 +47,7 @@ deck が作成時に付ける名前（`emiri-f7d9` のような形）。作っ�
 
 ### ForkedFrom
 
-フォークで作った Session の分岐元のランタイムセッション ID。別の Session の SessionChain の要素を指す。フォークでなければ空。claude-deck の `f`（`ForkSession`）で作ったフォークにだけ付き、Claude Code の中で分岐させた会話は記録されない。`claude-deck tree` は、SessionChain と ForkedFrom からランタイムセッション ID の木を組み立てる。
+フォークで作った Session の分岐元のランタイムセッション ID。別の Session の SessionChain の要素を指す。フォークでなければ空。claude-deck の `f` か `claude-deck fork`（どちらも `ForkSession`）で作ったフォークにだけ付き、Claude Code の中で分岐させた会話は記録されない。`claude-deck tree` は、SessionChain と ForkedFrom からランタイムセッション ID の木を組み立てる。
 
 **フィールド**: `Session.ForkedFrom RuntimeSessionID`
 

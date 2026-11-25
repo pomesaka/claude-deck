@@ -595,7 +595,13 @@ func (m *Manager) adoptExternal(sessionID DeckSessionID) error {
 // ForkSession creates a new session that forks from an existing session's conversation.
 // Uses claude --resume <sourceClaudeSessionID> --fork-session to inherit conversation
 // history while creating a new Claude Code session ID and JSONL file.
-func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID) (*Session, error) {
+// prompt is the first instruction for the forked agent, or "" to start it waiting for one.
+//
+// WHY 動いているセッションをフォークしてよい: Claude Code は起動に時間がかかるので、
+// 元のセッションが `claude-deck fork` を呼んだ場合でも、フォーク先が JSONL を読むのは
+// その呼び出しに結果が付いた後になる。フォーク先は会話と指示を壊さずに引き継いだ
+// （Claude Code 2.1.332 で確認）。
+func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID, prompt string) (*Session, error) {
 	m.mu.RLock()
 	srcSess, ok := m.sessions[sourceSessionID]
 	m.mu.RUnlock()
@@ -636,7 +642,7 @@ func (m *Manager) ForkSession(ctx context.Context, sourceSessionID DeckSessionID
 	sess.SubProjectDir = srcSubProjectDir
 	sess.ForkedFrom = srcClaudeID
 
-	spec := m.startSpec(agentruntime.LaunchFork, srcClaudeID, actualWorkDir, sess.Name, repoPath, "")
+	spec := m.startSpec(agentruntime.LaunchFork, srcClaudeID, actualWorkDir, sess.Name, repoPath, prompt)
 	if err := m.startNewSession(sess, actualWorkDir, spec); err != nil {
 		m.ws().discard(repoPath, wsName)
 		return nil, fmt.Errorf("starting forked session: %w", err)

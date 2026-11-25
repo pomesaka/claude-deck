@@ -39,7 +39,7 @@ func (f *fakeManager) ResolveJSONLPaths(session.DeckSessionID) (string, []string
 func (f *fakeManager) CreateSession(context.Context, string, string, bool, string) (*session.Session, error) {
 	return nil, errors.New("not used")
 }
-func (f *fakeManager) ForkSession(context.Context, session.DeckSessionID) (*session.Session, error) {
+func (f *fakeManager) ForkSession(context.Context, session.DeckSessionID, string) (*session.Session, error) {
 	return nil, errors.New("not used")
 }
 func (f *fakeManager) ResumeSession(context.Context, session.DeckSessionID) error { return nil }

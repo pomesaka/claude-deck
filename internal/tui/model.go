@@ -34,7 +34,7 @@ type sessionManager interface {
 	RefreshFromJSONL()
 	ResolveJSONLPaths(id session.DeckSessionID) (current string, prior []string)
 	CreateSession(ctx context.Context, repoPath, workingDir string, withWorkspace bool, prompt string) (*session.Session, error)
-	ForkSession(ctx context.Context, source session.DeckSessionID) (*session.Session, error)
+	ForkSession(ctx context.Context, source session.DeckSessionID, prompt string) (*session.Session, error)
 	ResumeSession(ctx context.Context, id session.DeckSessionID) error
 	Kill(id session.DeckSessionID) (session.CloseResult, error)
 	SetPinned(id session.DeckSessionID, pinned bool) error

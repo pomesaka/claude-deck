@@ -326,7 +326,7 @@ func (m *Model) forkSelected() tea.Cmd {
 	ctx := m.ctx
 	id := m.selectedID
 	return func() tea.Msg {
-		newSess, err := mgr.ForkSession(ctx, id)
+		newSess, err := mgr.ForkSession(ctx, id, "") // the TUI has no way to type a first instruction
 		var newID session.DeckSessionID
 		if newSess != nil {
 			newID = newSess.ID

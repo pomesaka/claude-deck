@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -27,8 +26,8 @@ type cliRequest struct {
 	Dir         string // new
 	NoWorkspace bool   // new
 	// Prompt is the first instruction given to the new session's agent, or "".
-	Prompt string // new
-	Target string // close, alias
+	Prompt string // new, fork
+	Target string // close, alias, fork
 	Alias  string // alias: the alias to set. list: the text to filter aliases by
 	DryRun bool   // gc
 	// project (Dir is the project)
@@ -58,6 +57,7 @@ func ignoreStdin(parse func(args []string) (cliRequest, error)) cliParser {
 // TUI does not need to be running.
 var cliCommands = map[string]cliParser{
 	"new":     parseNewArgs,
+	"fork":    parseForkArgs,
 	"list":    ignoreStdin(parseListArgs),
 	"tree":    ignoreStdin(parseTreeArgs),
 	"close":   ignoreStdin(parseCloseArgs),
@@ -67,7 +67,7 @@ var cliCommands = map[string]cliParser{
 	"hook":    ignoreStdin(parseHookArgs),
 }
 
-// SessionInfo is the JSON form of a session printed by new / list / close.
+// SessionInfo is the JSON form of a session printed by new / fork / list / close.
 type SessionInfo struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -185,7 +185,7 @@ func runCLI(name string, args []string) error {
 		return printJSON(infoFromGCReport(report))
 	}
 
-	// new / close start or stop processes, which needs tmux.
+	// new / fork / close start or stop processes, which needs tmux.
 	ctx := context.Background()
 	mgr := session.NewManager(ctx, st, mcfg)
 	mgr.Reload()
@@ -198,6 +198,16 @@ func runCLI(name string, args []string) error {
 			return fmt.Errorf("%s is not a jj repository, so no workspace can be made (use --no-workspace to run in place)", req.Dir)
 		}
 		sess, err := mgr.CreateSession(ctx, repoPath, workingDir, withWorkspace, req.Prompt)
+		if err != nil {
+			return err
+		}
+		return printJSON(infoFromSnapshot(sess.Snapshot()))
+	case "fork":
+		src, err := mgr.FindSession(req.Target)
+		if err != nil {
+			return err
+		}
+		sess, err := mgr.ForkSession(ctx, src.ID, req.Prompt)
 		if err != nil {
 			return err
 		}
@@ -241,23 +251,37 @@ func parseNewArgs(args []string, stdin io.Reader) (cliRequest, error) {
 	if err != nil {
 		return cliRequest{}, err
 	}
-	req := cliRequest{Op: "new", Dir: absDir, NoWorkspace: *noWorkspace}
-	if prompt.set {
-		text := prompt.value
-		if text == "-" {
-			data, err := io.ReadAll(stdin)
-			if err != nil {
-				return cliRequest{}, fmt.Errorf("new: reading the prompt from stdin: %w", err)
-			}
-			text = string(data)
-		}
-		// 前後の空白と改行は落とす（echo やヒアドキュメントの末尾の改行）。中の改行は残す。
-		req.Prompt = strings.TrimSpace(text)
-		if req.Prompt == "" {
-			return cliRequest{}, errors.New("new: --prompt is empty")
-		}
+	text, err := prompt.read("new", stdin)
+	if err != nil {
+		return cliRequest{}, err
 	}
-	return req, nil
+	return cliRequest{Op: "new", Dir: absDir, NoWorkspace: *noWorkspace, Prompt: text}, nil
+}
+
+func parseForkArgs(args []string, stdin io.Reader) (cliRequest, error) {
+	fs := flag.NewFlagSet("fork", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "Usage: claude-deck fork [--session ID|NAME] [--prompt TEXT|-]")
+		fmt.Fprintln(fs.Output(), "Forks a session's conversation into a new session in a new workspace, as f does in the TUI, and prints the new session as JSON.")
+		fs.PrintDefaults()
+	}
+	target := fs.String("session", os.Getenv(session.EnvSessionID), "ID or name of the session to fork (default: $"+session.EnvSessionID+", this session)")
+	var prompt optionalString
+	fs.Var(&prompt, "prompt", "first instruction for the forked session's agent; - reads it from stdin")
+	if err := fs.Parse(args); err != nil {
+		return cliRequest{}, err
+	}
+	if fs.NArg() > 0 {
+		return cliRequest{}, fmt.Errorf("fork: unexpected arguments: %v", fs.Args())
+	}
+	if *target == "" {
+		return cliRequest{}, fmt.Errorf("fork: no session (--session or $%s)", session.EnvSessionID)
+	}
+	text, err := prompt.read("fork", stdin)
+	if err != nil {
+		return cliRequest{}, err
+	}
+	return cliRequest{Op: "fork", Target: *target, Prompt: text}, nil
 }
 
 // optionalString is a string flag that records whether it was given, so an
@@ -272,6 +296,28 @@ func (o *optionalString) String() string { return o.value }
 func (o *optionalString) Set(v string) error {
 	o.value, o.set = v, true
 	return nil
+}
+
+// read returns the --prompt text: "" when it was not given, stdin when it is "-".
+// An empty or blank prompt is an error for the command cmd.
+func (o *optionalString) read(cmd string, stdin io.Reader) (string, error) {
+	if !o.set {
+		return "", nil
+	}
+	text := o.value
+	if text == "-" {
+		data, err := io.ReadAll(stdin)
+		if err != nil {
+			return "", fmt.Errorf("%s: reading the prompt from stdin: %w", cmd, err)
+		}
+		text = string(data)
+	}
+	// 前後の空白と改行は落とす（echo やヒアドキュメントの末尾の改行）。中の改行は残す。
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "", fmt.Errorf("%s: --prompt is empty", cmd)
+	}
+	return text, nil
 }
 
 func parseListArgs(args []string) (cliRequest, error) {

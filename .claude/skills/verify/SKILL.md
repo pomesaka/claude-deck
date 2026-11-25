@@ -73,6 +73,8 @@ jq -c . /tmp/cdv/new1.json
 - ワークスペースは `/tmp/cdv/data/workspace/-tmp-cdv-jjrepo/<名前>` にできる。`jj workspace list` は `/tmp/cdv/jjrepo` で `HOME=/tmp/cdv/home jj workspace list --ignore-working-copy` と打つ。
 - jj の作業コピーの取り込みを失敗させるには `touch /tmp/cdv/jjlogfail`（`jj log` だけが失敗する）。戻すときは `rm /tmp/cdv/jjlogfail`。呼ばれた jj は `/tmp/cdv/jj.log` に出る。
 - `r` で再開するには、行に Claude Code のセッション ID が要る。偽の claude は書かないので、`sqlite3 /tmp/cdv/data/deck.db "update sessions set session_chain='[\"11111111-1111-4111-8111-111111111111\"]' where name='<名前>'"` で入れる。再開したウィンドウの画面に、偽の claude が引数と作業フォルダを出す。ID は行ごとに変える。同じ ID の行が 2 つあると、次に起動したとき片方が重複として store から消える。
+- `fork` と `tree` を試すにも、元の行に Claude Code のセッション ID が要る。このときは sqlite3 で書かず、プラグインと同じ入口の `/tmp/cdv/cli.sh hook session-start --claude-session-id 11111111-1111-4111-8111-111111111111 --source startup --session <deck ID>` で入れる。フォーク先には `--source fork` を使う。
+- `cli.sh` は `env -i` で `CLAUDE_DECK_SESSION_ID` を落とす。`--session` を省いた `fork` と `alias` を試すときは、`env -i` の並びに `CLAUDE_DECK_SESSION_ID="$SID"` を足した包みを作り、`SID=<deck ID> <包み> fork ...` と打つ。
 - 行をまとめて作るときは、ワークスペースを作らない `new` を繰り返す。`tmux -L cdverify send-keys -t cli 'for i in $(seq 1 16); do /tmp/cdv/cli.sh new --dir /tmp/cdv/jjrepo --no-workspace > /dev/null; echo rc$i=$?; done; echo ALLDONE' Enter`
 - `touch /tmp/cdv/slownew` で `new-window` が 4 秒遅れ、作成、再開、フォークの完了を待つ間に操作できる。戻すときは `rm /tmp/cdv/slownew`。
 - TUI の `n` から作るには、偽 HOME の候補は `.jj` だけの空のフォルダなので、本物の jj リポジトリを置いてから探索を待つ。`mkdir -p /tmp/cdv/home/repos/realrepo` の後、`HOME=/tmp/cdv/home jj git init /tmp/cdv/home/repos/realrepo` を打つ。
@@ -84,6 +86,7 @@ README の画面のように本物の Claude Code が要るときは、HOME を�
 
 - `config.toml` の `[commands] claude` に包みのスクリプトを指し、その中で HOME と PATH を本物に戻してから `claude` を起動する
 - 個人の設定と言語の指示は、`--setting-sources project,local` と `--append-system-prompt` で外す。認証の要る道具は HOME を変えずに、画面に出る個人の設定だけを外す
+- HOME と PATH を本物に戻し、`--setting-sources project,local` で起動しても、v2.1.332 では `Not logged in` で止まった（2026-11-25）。認証の通し方が分かるまで、この節の手順では起動の先へ進めない
 - トランスクリプトは本物の `~/.claude/projects` に書かれるので、偽の HOME の `.claude/projects` へ symlink すると TUI が読める
 - 偽の HOME で `claude -p` を試すと、偽の `~/.claude/projects` に記録が残り、外部セッションとして一覧に出る。試した後は消す
 
