@@ -645,7 +645,7 @@ func printJSON(v any) error {
 
 // checkStatusReason requires --reason with waiting_action and refuses it with
 // any other status: the list shows the reason only for that wait.
-// WHY 長さはここで見ない: 上限は wait_for_user のツールの約束で、プラグインがエラーで返して呼び直させる。
+// WHY 長さはここで見ない: 理由の文はプラグインが作り、一覧に収まる長さに切ってから渡す。
 func checkStatusReason(a session.Activity, reason string) error {
 	switch {
 	case a == session.ActivityWaitingAction && strings.TrimSpace(reason) == "":

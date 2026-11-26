@@ -4,9 +4,9 @@ type On = Parameters<TestBody>[1]
 
 const END = { answer: '', durationMs: 0, isAborted: false, reason: 'answer' } as const
 const AGENT = 'a1'
-const WAIT_TOOL = 'mcp__deck-status__wait_for_user'
-// 80 characters, the most wait_for_user takes, all of them wide.
-const LONGEST_REASON = 'あ'.repeat(80)
+// The main loop's last message asks the user to run a command.
+const ASKS = '次を実行してください。\n\n```\n! gh auth login\n```'
+const WAITING = 'waiting_action: `! gh auth login` の実行を待っています'
 
 type Step =
   | { event: 'turn.start' | 'turn.complete'; agentId?: string }
@@ -14,8 +14,8 @@ type Step =
   | { event: 'tool.call'; toolUseId: string }
   // What $.agent.list() answers from here on.
   | { agent: 'running' | 'completed' }
-  // The main loop calls wait_for_user.
-  | { wait: string }
+  // The main loop's turn stops with this last message (classic.Stop).
+  | { stop: string }
   // /clear: SessionStart with source clear.
   | { clear: true }
   // An approval dialog opens (PermissionRequest).
@@ -101,20 +101,27 @@ const cases: { name: string; steps: Step[]; statuses: string[] }[] = [
     statuses: ['running', 'subagent_running', 'idle'],
   },
   {
-    name: 'wait_for_user を呼んだターンは、理由つきの waiting_action で終わり、次のターンで消える',
+    name: '最後の返答に行頭の ! コマンドがあるターンは、理由つきの waiting_action で終わり、次のターンで消える',
     steps: [
       { event: 'turn.start' },
-      { wait: LONGEST_REASON },
+      { stop: ASKS },
       { event: 'turn.complete' },
       { event: 'turn.start' },
+      { stop: '終わりました。' },
       { event: 'turn.complete' },
     ],
-    statuses: ['running', `waiting_action: ${LONGEST_REASON}`, 'running', 'idle'],
+    statuses: ['running', WAITING, 'running', 'idle'],
   },
   {
-    name: '断られた理由では待ちにならず、idle で終わる',
-    steps: [{ event: 'turn.start' }, { wait: `${LONGEST_REASON}あ` }, { event: 'turn.complete' }],
+    name: 'バッククォートの中の ! コマンドだけなら idle で終わる',
+    steps: [{ event: 'turn.start' }, { stop: '`! gh auth login` のように書くと、利用者が実行できます。' }, { event: 'turn.complete' }],
     statuses: ['running', 'idle'],
+  },
+  {
+    // Stop と turn.complete のどちらが先に届くかは確かめていないので、後に届いても待ちを書く。
+    name: 'ターンの終わりの後に Stop が届いても waiting_action にする',
+    steps: [{ event: 'turn.start' }, { event: 'turn.complete' }, { stop: ASKS }],
+    statuses: ['running', 'idle', WAITING],
   },
   {
     // 守る不具合: サブエージェントの終わりで subagent_running や idle を書くと、利用者の操作待ちが一覧から消える。
@@ -123,21 +130,21 @@ const cases: { name: string; steps: Step[]; statuses: string[] }[] = [
       { event: 'turn.start' },
       { agent: 'running' },
       { event: 'turn.start', agentId: AGENT },
-      { wait: 'gh auth login を実行してください' },
+      { stop: ASKS },
       { event: 'turn.complete' },
       { agent: 'completed' },
       { event: 'turn.complete', agentId: AGENT },
       { event: 'turn.start' },
       { event: 'turn.complete' },
     ],
-    statuses: ['running', 'waiting_action: gh auth login を実行してください', 'running', 'idle'],
+    statuses: ['running', WAITING, 'running', 'idle'],
   },
   {
     // 守る不具合: 待ちの間に開いた承認ダイアログが閉じたとき、idle や subagent_running を書くと待ちが消える。
     name: '待ちの間に開いた承認ダイアログが閉じたら、同じ理由の waiting_action に戻す',
     steps: [
       { event: 'turn.start' },
-      { wait: 'gh auth login を実行してください' },
+      { stop: ASKS },
       { event: 'turn.complete' },
       { approval: true },
       // The call the dialog was for, raised outside the main loop.
@@ -145,15 +152,15 @@ const cases: { name: string; steps: Step[]; statuses: string[] }[] = [
     ],
     statuses: [
       'running',
-      'waiting_action: gh auth login を実行してください',
+      WAITING,
       'waiting_approval',
-      'waiting_action: gh auth login を実行してください',
+      WAITING,
     ],
   },
   {
     name: '/clear で待ちを外す',
-    steps: [{ event: 'turn.start' }, { wait: 'gh auth login を実行してください' }, { event: 'turn.complete' }, { clear: true }],
-    statuses: ['running', 'waiting_action: gh auth login を実行してください', 'idle'],
+    steps: [{ event: 'turn.start' }, { stop: ASKS }, { event: 'turn.complete' }, { clear: true }],
+    statuses: ['running', WAITING, 'idle'],
   },
 ]
 
@@ -163,8 +170,8 @@ for (const one of cases) {
     for (const step of one.steps) {
       if ('agent' in step) {
         seen.agent = step.agent
-      } else if ('wait' in step) {
-        await $.tool.call({ tool: WAIT_TOOL, reason: step.wait })
+      } else if ('stop' in step) {
+        await $.classic.Stop({ stop_hook_active: false, last_assistant_message: step.stop })
       } else if ('clear' in step) {
         await $.classic.SessionStart({ source: 'clear' })
       } else if ('approval' in step) {
@@ -180,25 +187,3 @@ for (const one of cases) {
     expect(seen.statuses).toEqual(one.statuses)
   })
 }
-
-test('利用者に操作を頼んで wait_for_user を呼ばずに終えるターンは、1 回だけ止める', async ($, on) => {
-  world(on)
-  await $.turn.start({ text: '', turnId: 't1' })
-  const stop = { stop_hook_active: false, last_assistant_message: '`! gcloud auth login` を打ってください' }
-  const first = await $.classic.Stop(stop)
-  expect(first.block).toContain(WAIT_TOOL)
-  const second = await $.classic.Stop(stop)
-  expect(second.block).toBeUndefined()
-  await $.turn.complete({ ...END, turnId: 't1' })
-})
-
-test('wait_for_user を呼んだターンは止めない', async ($, on) => {
-  world(on)
-  await $.turn.start({ text: '', turnId: 't1' })
-  await $.tool.call({ tool: WAIT_TOOL, reason: 'gcloud auth login を実行してください' })
-  const result = await $.classic.Stop({ stop_hook_active: false, last_assistant_message: '`! gcloud auth login` を打ってください' })
-  expect(result.block).toBeUndefined()
-  await $.turn.complete({ ...END, turnId: 't1' })
-  await $.turn.start({ text: '', turnId: 't2' })
-  await $.turn.complete({ ...END, turnId: 't2' })
-})

@@ -24,8 +24,8 @@ const (
 	// started in the background still run. The session works without the user.
 	StatusSubagentRunning
 	// StatusWaitingAction: the main loop has ended its turn to wait for the user
-	// to act outside the conversation (log in, approve, run a `!` command). The
-	// model reported it with the wait_for_user tool, with a reason.
+	// to run a `!` command outside the conversation. The deck-status plugin finds
+	// the command in the turn's last message and gives it as the reason.
 	StatusWaitingAction
 	StatusCompleted
 	StatusError

@@ -4,27 +4,8 @@ import type { EngineInterface, Register } from 'claude-code'
 type DeckStatus = 'running' | 'idle' | 'waiting_approval' | 'waiting_answer' | 'subagent_running' | 'waiting_action'
 
 const ASK_USER_QUESTION = 'AskUserQuestion'
-// The tool the model calls before it ends a turn to wait on the user. The engine
-// names a plugin's tool mcp__<plugin>__<name>; the plugin is deck-status (.claude-plugin/plugin.json).
-const WAIT_TOOL = 'wait_for_user'
-const WAIT_TOOL_ID = 'mcp__deck-status__wait_for_user'
-// WHY 80 文字: 一覧の 2 行目の末尾に出す。超えたら切らずにエラーで返し、短くして呼び直させる。
-// 黙って切ると、一覧の理由が途中で途切れる（pomesaka と決めた）。
+// WHY 80 文字: 一覧の 2 行目の末尾に 1 行で出す（Go の側は長さを見ない）。
 const MAX_WAIT_REASON = 80
-const WAIT_TOOL_DESCRIPTION = `Call this right before you end your turn to wait for the user to act outside this conversation: logging in, approving something, running a \`! command\` you asked them to type, or doing something in a browser. claude-deck then lists this session as waiting for the user's action, with the reason, until the user's next message. For a question whose answer the user picks right here, use AskUserQuestion instead. Do not call it when you are not waiting on the user.`
-const WAIT_TOOL_SCHEMA = {
-  type: 'object',
-  properties: {
-    reason: {
-      type: 'string',
-      description: `What the user has to do, as a short sentence they understand from the session list alone (at most ${MAX_WAIT_REASON} characters), in the language you answer the user in. Example: "gcloud auth login を ! で実行してください"`,
-    },
-  },
-  required: ['reason'],
-  additionalProperties: false,
-}
-// What the Stop check tells the model when its last message asks the user to act but it did not call the tool.
-const WAIT_NUDGE = `If you are waiting for the user to act (log in, approve, run a \`! command\`), call ${WAIT_TOOL_ID} with the reason, then end your turn. If you are not waiting on the user, end your turn as it is.`
 const HOOK_TIMEOUT_MS = 5_000
 // How the engine starts the tool_use_id of a call a plugin raised ($.agent.spawn, $.tool.call).
 const PLUGIN_TOOL_USE_PREFIX = 'toolu_plugin_'
@@ -42,13 +23,9 @@ let lastStatus: DeckStatus | undefined
 // The reason written with lastStatus (waiting_action only).
 let lastReason: string | undefined
 
-// Why the model waits on the user, from wait_for_user in the current main turn.
-// Written as waiting_action when the turn ends; the next main turn clears it.
+// What the user has to run, found in the last message of the main turn (classic.Stop).
+// Written as waiting_action when the turn ends; the next main turn and /clear clear it.
 let waitReason: string | undefined
-
-// Whether the Stop check has stopped the current main turn once.
-// WHY 1 回だけ: 判定は文の言い回しで見るので誤検知がある。止め続けるとターンが終わらない。
-let nudgedThisTurn = false
 
 // Tool calls (main loop and subagents) between tool.call and its result.
 // WHY 数える: 並行に走るツール呼び出しの 1 つが終わった時点で Running に戻すと、
@@ -138,7 +115,7 @@ async function hasActiveSubagent($: EngineInterface): Promise<boolean> {
 
 /**
  * Writes the status of a session whose main loop is not in a turn.
- * A wait the model reported outranks subagents: the user has something to do either way.
+ * A `! command` the user was asked to run outranks subagents: the user has something to do either way.
  */
 async function setRestingStatus($: EngineInterface): Promise<void> {
   if (waitReason !== undefined) {
@@ -148,72 +125,34 @@ async function setRestingStatus($: EngineInterface): Promise<void> {
   await setStatus($, (await hasActiveSubagent($)) ? 'subagent_running' : 'idle')
 }
 
-/** Whether the Stop check stops the turn: once per main turn, when the model asked the user to act without the tool. */
-export function shouldNudge(stop: {
-  isMain: boolean
-  stopHookActive: boolean
-  calledWait: boolean
-  nudged: boolean
-  lastMessage: string
-}): boolean {
-  if (!stop.isMain || stop.stopHookActive || stop.calledWait || stop.nudged) return false
-  return asksUserToAct(stop.lastMessage)
-}
-
-/** Checks the reason given to wait_for_user; returns the error to answer, or the reason. */
-export function parseWaitReason(input: unknown): { reason: string } | { error: string } {
-  // A plugin tool's input fields arrive on the tool.call event itself (Claude Code 2.1.331 の claude plugin test で確認).
-  const reason: unknown = typeof input === 'object' && input !== null ? Reflect.get(input, 'reason') : undefined
-  if (typeof reason !== 'string' || reason.trim() === '') {
-    return { error: `${WAIT_TOOL}: reason is required: what the user has to do, in one short sentence.` }
-  }
-  // WHY 改行を断る: 一覧の 2 行目に 1 行で出すので、改行があると行が崩れる。
-  if (/[\r\n]/.test(reason.trim())) {
-    return { error: `${WAIT_TOOL}: reason must be one line. Call again without line breaks.` }
-  }
-  const length = [...reason.trim()].length
-  if (length > MAX_WAIT_REASON) {
-    return {
-      error: `${WAIT_TOOL}: reason is ${length} characters; the list shows at most ${MAX_WAIT_REASON}. Shorten it and call again.`,
-    }
-  }
-  return { reason: reason.trim() }
-}
+// A `! command` the user is asked to type: `! ` at the start of a line, with an
+// ASCII command name right after it. Lines in code blocks count: a `! command`
+// is usually shown in one.
+// WHY ASCII のコマンド名のときだけ: 「! コマンド」「! <コマンド>」のような書き方の説明を
+// 頼みと取り違えた（2026-11-25）。
+// WHY NOT バッククォートの中の `! ` を数える: 説明の文に例として書いたコマンドで操作待ちになる（pomesaka と決めた）。
+// WHY NOT 「ログイン」「ください」のような文の言い回しで見る: 引用や説明を頼みと取り違え、
+// 裏の verifier を待つだけのターンも操作待ちに見えた（pomesaka と決めた）。
+const BANG_COMMAND = /(?:^|\n)[ \t]*! ([A-Za-z0-9.\/_~-][^\n]*)/
 
 /**
- * Whether the model's last message asks the user to act outside the conversation:
- * a `! command` at the start of a line or inside backquotes, or a request word
- * (ログイン, 承認, …) and a please (ください, お願いします) in one sentence.
- * WHY `! ` はコードブロックの中も見る: `! コマンド` はコードブロックで示すのがふつうの頼み方。
- * WHY `!` の後が ASCII のコマンド名のときだけ数える: 「`! コマンド`」「`! <コマンド>`」のような
- * 書き方の説明を頼みと取り違えた（2026-11-25、wait_for_user を説明した返答で止まった）。
- * WHY 依頼の文はコードブロックとかぎ括弧・引用符の中を見ない: 例や引用（「… を実行してください」）は
- * 頼みでなく紹介のことが多い（同じ返答で止まった）。
- * WHY 文を「。」「！」「？」と改行で区切る: `.` は URL やコマンドに出る。
+ * The wait the main loop's last message asks for: what to show in the list for
+ * the first `! command` in it, or undefined when there is none.
  */
-export function asksUserToAct(text: string): boolean {
-  if (/(^|\n)[ \t]*! [A-Za-z0-9.\/_~-]/.test(text) || /`! [A-Za-z0-9.\/_~-][^`]*`/.test(text)) return true
-  return text
-    .replace(/```[\s\S]*?```/g, '')
-    .replace(/「[^」]*」|『[^』]*』|“[^”]*”|"[^"\n]*"/g, '')
-    .split(/[。！？\n]/)
-    .some(sentence => /ログイン|承認|認証|打って|押して|実行して/.test(sentence) && /ください|お願いします/.test(sentence))
+export function detectWait(text: string): string | undefined {
+  const m = BANG_COMMAND.exec(text)
+  const command = m?.[1]?.trim()
+  if (!command) return undefined
+  const reason = (c: string) => `\`! ${c}\` の実行を待っています`
+  const room = MAX_WAIT_REASON - [...reason('')].length
+  const chars = [...command]
+  return reason(chars.length <= room ? command : `${chars.slice(0, room - 1).join('')}…`)
 }
 
 export const register: Register = on => {
   // The Claude session ID is linked here: on startup, resume and fork the first one,
   // on /clear and compact the new one. Those also drop the earlier context, so
   // the claude-deck note is handed to the model on every source.
-  // WHY next(e) より先に登録する: Claude Code は最初のプロンプトの前に session.start の hook を待つので、
-  // 先に登録すれば最初のターンからツールが見える（Mods の型定義の session.start の説明、Claude Code 2.1.331）。
-  // deck のセッションでだけ登録する。
-  on('session.start', async ($, e, next) => {
-    if (await deckEnv($)) {
-      await $.tool.register({ name: WAIT_TOOL, description: WAIT_TOOL_DESCRIPTION, inputSchema: WAIT_TOOL_SCHEMA, isDeferred: false })
-    }
-    return next(e)
-  }).catch(($, e, next) => next(e))
-
   on('classic.SessionStart', async ($, e, next) => {
     if (e.agent_id !== undefined) return next(e)
     await deck($, ['session-start', '--claude-session-id', e.session_id, '--source', e.source])
@@ -235,7 +174,6 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       inMainTurn = true
       waitReason = undefined
-      nudgedThisTurn = false
       await setStatus($, 'running')
     } else if (!inMainTurn && !isWaiting() && waitReason === undefined) {
       await setStatus($, 'subagent_running')
@@ -274,33 +212,17 @@ export const register: Register = on => {
   // WHY tool.check の ask で判定しない: auto モードでは ask でもダイアログを出さずに実行される。
   // ダイアログが出たときだけ PermissionRequest が発火する（Claude Code 2.1.287 で確認）。
   // サブエージェントのダイアログも利用者を待たせるので agent_id で除外しない。
-  // The call only notes the reason: the list changes when the turn ends (turn.complete below),
-  // so it does not show a wait while the model is still writing its answer.
-  // WHY サブエージェントからは断る: waiting_action はメインのターンの終わりにだけ入る状態で、
-  // サブエージェントの理由をいつ消すかの規則が要らなくなる。
-  on('tool.call', { tool: WAIT_TOOL_ID }, async (_$, e) => {
-    if (e.agentId !== undefined) return { deny: `${WAIT_TOOL} is for the main conversation only.` }
-    const parsed = parseWaitReason(e)
-    if ('error' in parsed) return { deny: parsed.error }
-    waitReason = parsed.reason
-    return { result: 'claude-deck lists this session as waiting for your action once the turn ends. End your turn now.' }
-  }).catch((_$, _e, next) => ({ deny: `${WAIT_TOOL} failed: ${next.error.message}` }))
 
-  // WHY classic.Stop で見る: last_assistant_message と stop_hook_active が来る。block で同じターンを続けさせられる
-  // （Claude Code 2.1.331 の型定義 StopHookInput と ClassicResult.block）。
+  // WHY classic.Stop で見る: ターンの最後の返答（last_assistant_message）が来るのはここだけ
+  // （Claude Code 2.1.331 の型定義 StopHookInput）。Stop はメインのもので、サブエージェントの終わりは SubagentStop。
+  // Stop only notes the wait: the list changes when the turn ends (turn.complete below).
+  // WHY 既にターンが終わっていたら書く: Stop と turn.complete のどちらが先に届くかは確かめていない。
   on('classic.Stop', async ($, e, next) => {
-    const stop = {
-      // Stop is the main loop's; a subagent's end is SubagentStop. agent_id is checked in case that changes.
-      isMain: e.agent_id === undefined,
-      stopHookActive: e.stop_hook_active,
-      calledWait: waitReason !== undefined,
-      nudged: nudgedThisTurn,
-      lastMessage: e.last_assistant_message ?? '',
+    if (e.agent_id === undefined) {
+      waitReason = detectWait(e.last_assistant_message ?? '')
+      if (!inMainTurn) await setRestingStatus($)
     }
-    if (!shouldNudge(stop) || !(await deckEnv($))) return next(e)
-    nudgedThisTurn = true
-    $.ui.log(`deck-status: stopped the turn once to ask for ${WAIT_TOOL}`, { to: 'debug' })
-    return { ...(await next(e)), block: WAIT_NUDGE }
+    return next(e)
   }).catch(($, e, next) => next(e))
 
   on('classic.PermissionRequest', async ($, e, next) => {
@@ -320,9 +242,6 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       inMainTurn = false
-      if (nudgedThisTurn) {
-        $.ui.log(`deck-status: after the stop, ${WAIT_TOOL} was ${waitReason === undefined ? 'not ' : ''}called`, { to: 'debug' })
-      }
       await setRestingStatus($)
     } else if (lastStatus === 'subagent_running') {
       await setRestingStatus($)
