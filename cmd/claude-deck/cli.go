@@ -29,6 +29,7 @@ type cliRequest struct {
 	Prompt string // new, fork
 	Target string // close, alias, fork
 	Alias  string // alias: the alias to set. list: the text to filter aliases by
+	Repo   string // list: the text to filter repository names by
 	DryRun bool   // gc
 	// project (Dir is the project)
 	ProjectOp  string
@@ -158,7 +159,7 @@ func runCLI(name string, args []string) error {
 		}
 		infos := []SessionInfo{}
 		for _, s := range snaps {
-			if aliasMatches(s.Alias, req.Alias) {
+			if aliasMatches(s.Alias, req.Alias) && repoMatches(s.RepoPath, req.Repo) {
 				infos = append(infos, infoFromSnapshot(s))
 			}
 		}
@@ -328,18 +329,19 @@ func (o *optionalString) read(cmd string, stdin io.Reader) (string, error) {
 func parseListArgs(args []string) (cliRequest, error) {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: claude-deck list [--alias TEXT]")
+		fmt.Fprintln(fs.Output(), "Usage: claude-deck list [--alias TEXT] [--repo TEXT]")
 		fmt.Fprintln(fs.Output(), "Prints the claude-deck sessions as JSON, in the order of the TUI list. External sessions are not included.")
 		fs.PrintDefaults()
 	}
 	alias := fs.String("alias", "", "only sessions whose alias contains this text (case-insensitive)")
+	repo := fs.String("repo", "", "only sessions whose repository name (the last element of repo_path) contains this text (case-insensitive)")
 	if err := fs.Parse(args); err != nil {
 		return cliRequest{}, err
 	}
 	if fs.NArg() > 0 {
 		return cliRequest{}, fmt.Errorf("list: unexpected arguments: %v", fs.Args())
 	}
-	return cliRequest{Op: "list", Alias: *alias}, nil
+	return cliRequest{Op: "list", Alias: *alias, Repo: *repo}, nil
 }
 
 // aliasMatches reports whether a session with the alias passes `list --alias filter`.
@@ -347,6 +349,16 @@ func parseListArgs(args []string) (cliRequest, error) {
 // filter, ignoring case, so a session without an alias never passes.
 func aliasMatches(alias, filter string) bool {
 	return filter == "" || strings.Contains(strings.ToLower(alias), strings.ToLower(filter))
+}
+
+// repoMatches reports whether a session in the repository repoPath passes
+// `list --repo filter`. An empty filter passes every session; otherwise the
+// repository's name, the last element of repoPath, must contain the filter,
+// ignoring case.
+// WHY 末尾の名前だけ: パス全体だと、親ディレクトリ（github.com や利用者名）の語に
+// どのリポジトリも当たってしまう。
+func repoMatches(repoPath, filter string) bool {
+	return filter == "" || strings.Contains(strings.ToLower(filepath.Base(repoPath)), strings.ToLower(filter))
 }
 
 // WHY NOT list --tree: フラグの有無で list の出力が JSON とテキストに分かれる。

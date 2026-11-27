@@ -92,6 +92,18 @@ func TestParseCLIArgs(t *testing.T) {
 			want:    cliRequest{Op: "list", Alias: "review"},
 		},
 		{
+			name:    "list filtered by repository",
+			command: "list",
+			args:    []string{"--repo", "deck"},
+			want:    cliRequest{Op: "list", Repo: "deck"},
+		},
+		{
+			name:    "list filtered by alias and repository",
+			command: "list",
+			args:    []string{"--alias", "review", "--repo", "deck"},
+			want:    cliRequest{Op: "list", Alias: "review", Repo: "deck"},
+		},
+		{
 			name:    "alias of another session",
 			command: "alias",
 			args:    []string{"--session", "anna-8cc7", "review-pr-12"},
@@ -232,6 +244,29 @@ func TestAliasMatches(t *testing.T) {
 		if got := aliasMatches(tt.alias, tt.filter); got != tt.want {
 			t.Errorf("aliasMatches(%q, %q) = %v, want %v", tt.alias, tt.filter, got, tt.want)
 		}
+	}
+}
+
+func TestRepoMatches(t *testing.T) {
+	tests := []struct {
+		name, repoPath, filter string
+		want                   bool
+	}{
+		{"no filter passes", "/src/github.com/pomesaka/claude-deck", "", true},
+		{"no filter passes an empty path", "", "", true},
+		{"whole name", "/src/github.com/pomesaka/claude-deck", "claude-deck", true},
+		{"part of the name", "/src/github.com/pomesaka/claude-deck", "deck", true},
+		{"case is ignored", "/src/github.com/pomesaka/claude-deck", "Deck", true},
+		{"trailing slash", "/src/github.com/pomesaka/claude-deck/", "deck", true},
+		{"a parent directory does not match", "/src/github.com/pomesaka/claude-deck", "pomesaka", false},
+		{"another repository", "/src/github.com/pomesaka/dotclaude", "deck", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := repoMatches(tt.repoPath, tt.filter); got != tt.want {
+				t.Errorf("repoMatches(%q, %q) = %v, want %v", tt.repoPath, tt.filter, got, tt.want)
+			}
+		})
 	}
 }
 

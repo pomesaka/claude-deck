@@ -108,7 +108,7 @@ CLI を変えたら、同梱のスキル `deck-status:claude-deck`（`deckmod/sk
 |------|------|
 | `claude-deck new [--dir DIR] [--no-workspace] [--prompt TEXT\|-]` | `n`（`--no-workspace` は C-Enter）。`--prompt` で最初の指示を渡す（TUI には無い） |
 | `claude-deck fork [--session ID\|NAME] [--prompt TEXT\|-]` | `f`。`--session` を省くと自分のセッション（`$CLAUDE_DECK_SESSION_ID`）。`--prompt` で最初の指示を渡す（TUI には無い） |
-| `claude-deck list [--alias TEXT]` | 一覧表示。`session_chain` と `forked_from` で `/clear` とフォークの系譜も返す。`--alias` はエイリアスの部分一致で絞る |
+| `claude-deck list [--alias TEXT] [--repo TEXT]` | 一覧表示。`session_chain` と `forked_from` で `/clear` とフォークの系譜も返す。`--alias` はエイリアスの部分一致、`--repo` はリポジトリの名前（`repo_path` の末尾）の部分一致で絞る。両方付けると両方に当たるもの |
 | `claude-deck tree` | なし。Claude Code のセッションを `/clear` とフォークの親子関係でたどった木を、テキストで出す（[用語集](docs/00-glossary.md) の ForkedFrom） |
 | `claude-deck close <ID\|NAME>` | `x` |
 | `claude-deck alias [--session ID\|NAME] <ALIAS>` | なし。セッションに表示用の名前を付ける（英数字と `-` `_` `.`、40 文字まで）。`--session` を省くと自分のセッション（`$CLAUDE_DECK_SESSION_ID`）。空文字で消す |

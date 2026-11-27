@@ -134,6 +134,7 @@ echo "$long_task" | claude-deck new --prompt -    # or read the task from stdin
 claude-deck fork --prompt "Measure the cold start"   # fork this session's conversation into a new one
 claude-deck list                    # every session, in the order of the list (an array)
 claude-deck list --alias invoice    # only sessions whose label contains "invoice"
+claude-deck list --repo api         # only sessions in a repository whose name contains "api"
 claude-deck close maika-7c78        # stop it and remove its workspace (ID or name)
 ```
 
