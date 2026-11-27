@@ -32,6 +32,17 @@ func (r *Runner) command() string {
 	return "jj"
 }
 
+// run runs jj with args in dir under the repository's lock (lockRepo), and
+// returns its combined output. Every command that may write a jj operation
+// goes through here.
+func (r *Runner) run(dir string, args ...string) ([]byte, error) {
+	unlock := lockRepo(dir)
+	defer unlock()
+	cmd := exec.Command(r.command(), args...)
+	cmd.Dir = dir
+	return cmd.CombinedOutput()
+}
+
 // CreateWorkspaceAt creates a new jj workspace at the specified path.
 // The parent directory is created automatically if it doesn't exist.
 // For colocated repos a .git symlink is created so git-dependent tools work.
@@ -53,11 +64,7 @@ func (r *Runner) CreateWorkspaceAt(repoPath, name, wsPath string, opts Workspace
 	}
 
 	debuglog.Printf("[jj.CreateWorkspaceAt] running: jj workspace add --name %s %s", name, wsPath)
-	jjCmd := r.command()
-	cmd := exec.Command(jjCmd, "workspace", "add", "--name", name, wsPath)
-	cmd.Dir = repoPath
-
-	output, err := cmd.CombinedOutput()
+	output, err := r.run(repoPath, "workspace", "add", "--name", name, wsPath)
 	if err != nil {
 		debuglog.Printf("[jj.CreateWorkspaceAt] jj workspace add failed: %v output=%q", err, string(output))
 		return fmt.Errorf("jj workspace add: %s: %w", strings.TrimSpace(string(output)), err)
@@ -83,8 +90,6 @@ func (r *Runner) CreateWorkspaceAt(repoPath, name, wsPath string, opts Workspace
 // setUpWorkspace prepares the workspace jj workspace add has just created at
 // wsPath: the symlinks, and the revision to start from.
 func (r *Runner) setUpWorkspace(repoPath, wsPath string, opts WorkspaceOptions) error {
-	jjCmd := r.command()
-
 	// colocated リポジトリなら .git への symlink を作成
 	gitDir := filepath.Join(repoPath, ".git")
 	if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
@@ -106,18 +111,14 @@ func (r *Runner) setUpWorkspace(repoPath, wsPath string, opts WorkspaceOptions) 
 	// リモートから最新を取得し、trunk 上に新 revision を作成
 	// fetch 失敗はネットワーク不通等で起こりうるので無視して続行
 	debuglog.Printf("[jj.CreateWorkspaceAt] running: jj git fetch (may hang on network)")
-	fetch := exec.Command(jjCmd, "git", "fetch")
-	fetch.Dir = wsPath
-	fetchOut, fetchErr := fetch.CombinedOutput()
+	fetchOut, fetchErr := r.run(wsPath, "git", "fetch")
 	debuglog.Printf("[jj.CreateWorkspaceAt] jj git fetch done: err=%v output=%q", fetchErr, strings.TrimSpace(string(fetchOut)))
 
 	// revision 復元: AtRev → ParentRev → trunk() の順で試みる。
 	// @ の change_id が保存されている場合は jj edit で直接そのコミットに戻す。
 	// jj new と異なり余分なコミットが増えず、変更中だったファイルもそのまま復元できる。
 	if opts.AtRev != "" {
-		editCmd := exec.Command(jjCmd, "edit", opts.AtRev)
-		editCmd.Dir = wsPath
-		if out, err := editCmd.CombinedOutput(); err != nil {
+		if out, err := r.run(wsPath, "edit", opts.AtRev); err != nil {
 			// @ が abandon 済みの場合（空のまま workspace forget された）は次の fallback へ。
 			debuglog.Printf("[jj.CreateWorkspaceAt] jj edit %s failed: %v output=%q, falling back to opts.ParentRev", opts.AtRev, err, strings.TrimSpace(string(out)))
 		} else {
@@ -128,9 +129,7 @@ func (r *Runner) setUpWorkspace(repoPath, wsPath string, opts WorkspaceOptions) 
 
 	// @- の change_id が保存されている場合は jj new <opts.ParentRev> でその上から再開。
 	if opts.ParentRev != "" {
-		newCmd := exec.Command(jjCmd, "new", opts.ParentRev)
-		newCmd.Dir = wsPath
-		if out, err := newCmd.CombinedOutput(); err != nil {
+		if out, err := r.run(wsPath, "new", opts.ParentRev); err != nil {
 			debuglog.Printf("[jj.CreateWorkspaceAt] jj new %s failed: %v output=%q, falling back to trunk()", opts.ParentRev, err, strings.TrimSpace(string(out)))
 		} else {
 			debuglog.Printf("[jj.CreateWorkspaceAt] jj new %s done", opts.ParentRev)
@@ -143,9 +142,7 @@ func (r *Runner) setUpWorkspace(repoPath, wsPath string, opts WorkspaceOptions) 
 	// （jj 0.37.0、2026-11に確認）。エージェントはそこで中身が見つからず、元のリポジトリを読みに行く。
 	// FIXME: trunk() が root() のときに警告を出すか決める
 	debuglog.Printf("[jj.CreateWorkspaceAt] running: jj new trunk()")
-	trunkCmd := exec.Command(jjCmd, "new", "trunk()")
-	trunkCmd.Dir = wsPath
-	if out, err := trunkCmd.CombinedOutput(); err != nil {
+	if out, err := r.run(wsPath, "new", "trunk()"); err != nil {
 		return fmt.Errorf("jj new trunk(): %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	debuglog.Printf("[jj.CreateWorkspaceAt] jj new trunk() done")
@@ -193,18 +190,12 @@ func createExtraSymlink(repoPath, wsPath, rel string) error {
 // Failure to retrieve @- (e.g., @ is root) is treated as success with an empty parentRev.
 // Callers should treat both fields as valid only when err == nil.
 func (r *Runner) GetWorkspaceRevisions(wsPath string) (atRev, parentRev string, err error) {
-	jjCmd := r.command()
-
-	atCmd := exec.Command(jjCmd, "log", "--no-graph", "--color=never", "-r", "@", "-T", "change_id")
-	atCmd.Dir = wsPath
-	atOut, atErr := atCmd.CombinedOutput()
+	atOut, atErr := r.run(wsPath, "log", "--no-graph", "--color=never", "-r", "@", "-T", "change_id")
 	if atErr != nil {
 		return "", "", fmt.Errorf("jj log @: %w: %s", atErr, strings.TrimSpace(string(atOut)))
 	}
 
-	parentCmd := exec.Command(jjCmd, "log", "--no-graph", "--color=never", "-r", "@-", "-T", "change_id")
-	parentCmd.Dir = wsPath
-	parentOut, parentErr := parentCmd.CombinedOutput() // @ が root の場合 @- は存在しないため無視
+	parentOut, parentErr := r.run(wsPath, "log", "--no-graph", "--color=never", "-r", "@-", "-T", "change_id") // @ が root の場合 @- は存在しないため無視
 	if parentErr != nil {
 		debuglog.Printf("[jj.GetWorkspaceRevisions] jj log @- failed (@ may be root): %v output=%q", parentErr, strings.TrimSpace(string(parentOut)))
 	}
@@ -223,6 +214,8 @@ func (r *Runner) GetNearestBookmark(dir string) (string, error) {
 	//   付けると操作を 1 件も書かないことを使い捨てのリポジトリで確認した
 	// WHY NOT GetWorkspaceRevisions にも付ける: Kill 直前の @ の記録は、編集途中のファイルを snapshot で
 	//   @ に取り込んでから行う必要がある（付けると未 snapshot の変更が workspace forget で失われる）
+	// WHY NOT run（lockRepo）を通す: 上のとおり操作を書かないので、分岐の元にならない。一覧の
+	//   表示のたびに呼ばれるので、close や new の jj を待たせると表示が遅れる
 	cmd := exec.Command(r.command(), "--ignore-working-copy", "log", "--no-graph", "--color=never",
 		"-r", "latest(::@ & bookmarks())",
 		"-T", "bookmarks")
@@ -259,14 +252,10 @@ func (r *Runner) GetNearestBookmark(dir string) (string, error) {
 // 使い捨てのリポジトリで確認した（jj 0.37.0）。
 // 消すワークスペースの snapshot が要る呼び出し元は、先に GetWorkspaceRevisions を呼ぶ。
 func (r *Runner) ForgetWorkspace(dir, name string) error {
-	cmd := exec.Command(r.command(), "--ignore-working-copy", "workspace", "forget", name)
-	cmd.Dir = dir
-
-	output, err := cmd.CombinedOutput()
+	output, err := r.run(dir, "--ignore-working-copy", "workspace", "forget", name)
 	if err != nil {
 		return fmt.Errorf("jj workspace forget: %s: %w", strings.TrimSpace(string(output)), err)
 	}
 
 	return nil
 }
-

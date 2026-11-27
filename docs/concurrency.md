@@ -49,6 +49,8 @@ deck セッションの状態は複数のプロセス（TUI、CLI、hook コマ�
 - close 中（`closing_at`）と起動中（`launching_at`）の印の規則は [architecture.md の「close の排他」](architecture.md#close-の排他) にある
 - ウィンドウの一覧と store を読む順序は判定ごとに決めている。終了扱いにするときは store を先に読み、トランザクション内で行を読み直してから書く。孤立ウィンドウを消すときはウィンドウを先に読む（行は必ずウィンドウより先に作られるので、後から読んだ store に含まれる）
 
+jj の操作の排他は store とは別に持つ。claude-deck が操作を書きうる jj（close の snapshot と `workspace forget`、new と resume の `workspace add` から `jj new` まで）は、`internal/jj` がリポジトリの `.jj/repo` を flock してから 1 つずつ走らせる。並べて走らせると jj の操作ログが分岐し、jj 0.37 では作業コピーが「sibling of the working copy's operation」で使えなくなることがある（理由は `internal/jj/lock.go`）。排他は claude-deck の jj の間だけで、エージェントが打つ jj とは並びうる。
+
 `PRAGMA data_version` は接続ごとの値で、自分以外の接続がコミットしたときだけ変わる。`Store` は専用の接続で読む。
 
 ## TUI から外部副作用を発行する時の順序保証
