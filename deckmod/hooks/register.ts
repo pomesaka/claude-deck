@@ -23,9 +23,12 @@ let lastStatus: DeckStatus | undefined
 // The reason written with lastStatus (waiting_action only).
 let lastReason: string | undefined
 
-// What the user has to run, found in the last message of the main turn (classic.Stop).
+// What the user has to do: run the `! command` found in the last message of the main turn (classic.Stop),
+// or send anything after an API error ended the turn (turn.complete).
 // Written as waiting_action when the turn ends; the next main turn and /clear clear it.
 let waitReason: string | undefined
+
+const API_ERROR_REASON = 'API の誤りで止まりました。何か送ると再開します'
 
 // Tool calls (main loop and subagents) between tool.call and its result.
 // WHY 数える: 並行に走るツール呼び出しの 1 つが終わった時点で Running に戻すと、
@@ -239,9 +242,13 @@ export const register: Register = on => {
   // メインの turn.complete の時点では、バックグラウンドのサブエージェントは一覧に running で出る（同じ版で確認）。
   // WHY NOT classic.Stop の background_tasks で数える: シェルやワークフローも入るが、メインが止まったまま
   // サブエージェントが終わったときに読み直す契機が無い。
+  // WHY API の誤りを利用者の操作待ちにする: 通信が落ちたセッションは idle になり、報告を待っているだけの
+  // セッションと一覧で見分けられなかった。再開するには利用者が何か送るしかないので、! コマンドと同じ待ちにする。
+  // reason が error になるのは、Claude Code が自分で再試行し終えた後（Mods の型定義 TurnCompleteReason）。
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       inMainTurn = false
+      if (e.reason === 'error') waitReason = API_ERROR_REASON
       await setRestingStatus($)
     } else if (lastStatus === 'subagent_running') {
       await setRestingStatus($)

@@ -159,7 +159,7 @@ The `name` a session gets is also its Claude Code session name, so sessions can 
 }
 ```
 
-`status` is one of `running`, `idle`, `subagent_running`, `waiting_approval`, `waiting_answer`, `waiting_action`, `completed` and `error`. `waiting_action` means the session ended its turn asking you to run a `!` command (a line starting with `! ` in its last message); `status_reason` says which. There is no wait command; poll `list`.
+`status` is one of `running`, `idle`, `subagent_running`, `waiting_approval`, `waiting_answer`, `waiting_action`, `completed` and `error`. `waiting_action` means the session ended its turn asking you to run a `!` command (a line starting with `! ` in its last message), or stopped on an API error (a network outage, say) and resumes when you send anything; `status_reason` says which. There is no wait command; poll `list`.
 
 `--prompt` (on `new` and `fork`) gives the session its first task; it stays an interactive session you can talk to afterwards. Without it, the session starts waiting for one.
 

@@ -7,9 +7,12 @@ const AGENT = 'a1'
 // The main loop's last message asks the user to run a command.
 const ASKS = '次を実行してください。\n\n```\n! gh auth login\n```'
 const WAITING = 'waiting_action: `! gh auth login` の実行を待っています'
+const STOPPED = 'waiting_action: API の誤りで止まりました。何か送ると再開します'
 
 type Step =
   | { event: 'turn.start' | 'turn.complete'; agentId?: string }
+  // The turn ends on an API error (a network outage, an overloaded API) after Claude Code's own retries.
+  | { event: 'turn.complete'; reason: 'error' }
   // An Agent call with no agentId: the main loop's, or one a plugin raised (its id starts with toolu_plugin_).
   | { event: 'tool.call'; toolUseId: string }
   // What $.agent.list() answers from here on.
@@ -158,6 +161,31 @@ const cases: { name: string; steps: Step[]; statuses: string[] }[] = [
     ],
   },
   {
+    // 守る不具合: 通信の誤りで止まったセッションが idle になり、報告を待っているだけのセッションと見分けられなかった。
+    name: 'API の誤りで終わったターンは、理由つきの waiting_action で終わり、次のターンで消える',
+    steps: [
+      { event: 'turn.start' },
+      { event: 'turn.complete', reason: 'error' },
+      { event: 'turn.start' },
+      { event: 'turn.complete' },
+    ],
+    statuses: ['running', STOPPED, 'running', 'idle'],
+  },
+  {
+    name: 'API の誤りの待ちは、バックグラウンドのサブエージェントの終わりで上書きしない',
+    steps: [
+      { event: 'turn.start' },
+      { agent: 'running' },
+      { event: 'turn.start', agentId: AGENT },
+      { event: 'turn.complete', reason: 'error' },
+      { agent: 'completed' },
+      { event: 'turn.complete', agentId: AGENT },
+      { event: 'turn.start' },
+      { event: 'turn.complete' },
+    ],
+    statuses: ['running', STOPPED, 'running', 'idle'],
+  },
+  {
     name: '/clear で待ちを外す',
     steps: [{ event: 'turn.start' }, { stop: ASKS }, { event: 'turn.complete' }, { clear: true }],
     statuses: ['running', WAITING, 'idle'],
@@ -180,6 +208,8 @@ for (const one of cases) {
         await $.tool.call({ tool: 'Agent', tool_use_id: step.toolUseId, description: 'writer', prompt: 'write', subagent_type: 'general-purpose' })
       } else if (step.event === 'turn.start') {
         await $.turn.start({ text: '', turnId: 't1', ...(step.agentId === undefined ? {} : { agentId: step.agentId }) })
+      } else if ('reason' in step) {
+        await $.turn.complete({ ...END, reason: step.reason, turnId: 't1' })
       } else {
         await $.turn.complete({ ...END, turnId: 't1', ...(step.agentId === undefined ? {} : { agentId: step.agentId }) })
       }

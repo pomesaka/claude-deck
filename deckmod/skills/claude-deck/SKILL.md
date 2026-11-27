@@ -33,7 +33,7 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
   "repo_path": "リポジトリのルート",
   "work_dir": "Claude Code が動いているディレクトリ",
   "status": "idle | running | subagent_running | waiting_approval | waiting_answer | waiting_action | completed | error",
-  "status_reason": "waiting_action のとき、利用者が実行する `!` のコマンド（ほかの状態では無い）",
+  "status_reason": "waiting_action のとき、利用者がすること。実行する `!` のコマンドか、API の誤りで止まったこと（ほかの状態では無い）",
   "claude_session_id": "Claude Code のセッション ID（まだ届いていなければ無い）",
   "session_chain": ["/clear をまたいだ Claude Code のセッション ID。古い順で、末尾が claude_session_id"],
   "forked_from": "フォークで作ったセッションの、分岐元の Claude Code のセッション ID（別のセッションの session_chain の要素。フォークでなければ無い）"

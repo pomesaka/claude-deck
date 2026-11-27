@@ -33,7 +33,7 @@ CLI のサブコマンドやフラグを変えたら、スキルも同時に直�
 | `tool.call`（メイン） | `running`（待ち状態のときは変えない）。`AskUserQuestion` のときは `waiting_answer`。実行中のツール呼び出しがすべて返ったら `running` | `next(e)` は承認ダイアログと質問への回答を待つので、返った時点でユーザーが答えている。並行して走る別の呼び出しの承認ダイアログが開いている間は、待ち状態を消さない |
 | `tool.call`（サブエージェントと、Mod が起こした呼び出し） | 実行中のツール呼び出しがすべて返り、直前が `waiting_approval` / `waiting_answer` なら `running`。メインのターンが終わった後なら、動いているサブエージェントの有無で `subagent_running` か `idle` | サブエージェントの承認ダイアログもユーザーを待たせる。Mod の `$.agent.spawn` は `agentId` の無い `Agent` の呼び出しとして、メインのターンの外でも届く。`tool_use_id` が `toolu_plugin_` で始まることで見分ける（Claude Code 2.1.327 で確認） |
 | `classic.PermissionRequest` | `waiting_approval`。`AskUserQuestion` のときは `waiting_answer` | サブエージェントでも書く |
-| `turn.complete`（メイン） | 待ちの理由があれば `waiting_action --reason <理由>`。無ければ `idle`、動いているサブエージェントがあれば `subagent_running` | 拒否・中断・API エラーでも発火する。サブエージェントは `$.agent.list()` の `pending` / `running` / `waiting` を数える |
+| `turn.complete`（メイン） | 待ちの理由（`! コマンド`か、`reason` が `error`）があれば `waiting_action --reason <理由>`。無ければ `idle`、動いているサブエージェントがあれば `subagent_running` | 拒否・中断・API エラーでも発火する。サブエージェントは `$.agent.list()` の `pending` / `running` / `waiting` を数える |
 | `turn.complete`（サブエージェント） | 直前が `subagent_running` で、動いているサブエージェントが無くなったら `idle` | メインのターンが終わった後も、バックグラウンドのサブエージェントは動き続ける |
 | `classic.Stop`（メイン） | 書かない。最後の返答から待ちの理由を作り、プラグインのメモリに置く。メインのターンが既に終わっていたら、`turn.complete` と同じ規則で書く | 下の「利用者の操作待ち」 |
 | `classic.SessionStart`（source が `clear`） | 待ちの理由があれば消して、`idle` か `subagent_running` | 頼んだ会話が消えるので、待ちも消す |
@@ -54,6 +54,7 @@ CLI のサブコマンドやフラグを変えたら、スキルも同時に直�
 - 理由の文は、見つけた最初のコマンドから「`` `! コマンド` ``の実行を待っています」の形で作る。一覧の 2 行目の末尾に出すので 80 文字までにし、超えたらコマンドを切って `…` を付ける
 - `classic.Stop` の時点では store に書かない。メインの `turn.complete` で `idle` の代わりに `waiting_action` を書く
 - バックグラウンドのサブエージェントが動いていても `waiting_action` を出す。利用者にすることがあるほうを優先する
+- メインの `turn.complete` の `reason` が `error`（Claude Code が再試行し終えた後の API の誤り。通信が落ちたときなど）なら、同じ `waiting_action` を「API の誤りで止まりました。何か送ると再開します」の理由で書く。`idle` のままだと、報告を待っているだけのセッションと一覧で見分けられない。再開するには利用者が何か送るしかないので、新しい状態を作らずに操作待ちに入れる
 - 次のメインの `turn.start`（利用者の次の発言）と `/clear` で外す。`! コマンド` の実行で `turn.start` が発火するかは未確認
 
 ## レート制限
