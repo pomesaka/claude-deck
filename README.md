@@ -135,7 +135,10 @@ claude-deck fork --prompt "Measure the cold start"   # fork this session's conve
 claude-deck list                    # every session, in the order of the list (an array)
 claude-deck list --alias invoice    # only sessions whose label contains "invoice"
 claude-deck list --repo api         # only sessions in a repository whose name contains "api"
-claude-deck clear --id maika-7c78   # type /clear into it, only while it is idle with nothing typed
+claude-deck list --only maika-7c78,sana-d999   # only these sessions (ID or name, exactly)
+claude-deck send --id maika-7c78 -p "Go on"   # type a line into it, only while it is idle with nothing typed
+claude-deck broadcast -p /reload-plugins --repo api   # the same, into every live session that passes the filters of list
+claude-deck clear --id maika-7c78   # send -p /clear
 claude-deck close maika-7c78        # stop it and remove its workspace (ID or name)
 ```
 
@@ -166,7 +169,7 @@ The `name` a session gets is also its Claude Code session name, so sessions can 
 
 `status` is one of `running`, `idle`, `subagent_running`, `waiting_approval`, `waiting_answer`, `waiting_action`, `completed` and `error`. `waiting_action` means the session ended its turn asking you to run a `!` command (a line starting with `! ` in its last message), or stopped on an API error (a network outage, say) and resumes when you send anything; `status_reason` says which. There is no wait command; poll `list`.
 
-`context` is the context window's fill as Claude Code last measured it, and `compactions` how many times the current conversation was compacted (`/clear` starts it again from 0); either is `null` until measured. `hints` lists next steps derived from these each time you list: `context_full` (the context is at least half full, or was compacted: run `claude-deck clear` at a good stopping point), `api_error` (an API error stopped it: send anything to resume), `stale` (it has not moved for two days: close it if it is not needed) and, after `stale`, `unsaved` (its workspace has uncommitted files or commits not pushed: decide before closing). `clear` refuses, with a non-zero exit, a session that is working, waiting on a dialog, or has text typed into its prompt, and never types into the session it runs in.
+`context` is the context window's fill as Claude Code last measured it, and `compactions` how many times the current conversation was compacted (`/clear` starts it again from 0); either is `null` until measured. `hints` lists next steps derived from these each time you list: `context_full` (the context is at least half full, or was compacted: run `claude-deck clear` at a good stopping point), `api_error` (an API error stopped it: send anything to resume), `stale` (it has not moved for two days: close it if it is not needed) and, after `stale`, `unsaved` (its workspace has uncommitted files or commits not pushed: decide before closing). `send` and `clear` refuse, with a non-zero exit, a session that is working, waiting on a dialog, or has text typed into its prompt, and never type into the session they run in. The text must be one line. `broadcast` takes the filters of `list` (`--alias`, `--repo`, `--only`, all of which must hold), so the same `list` shows where it will go, and refuses an `--only` name that matches no live session or more than one; it prints `{id, name, sent, skipped_reason, dry_run}` for each live session that passes, and fails only when none does.
 
 `--prompt` (on `new` and `fork`) gives the session its first task; it stays an interactive session you can talk to afterwards. Without it, the session starts waiting for one.
 

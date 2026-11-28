@@ -32,10 +32,13 @@ type cliRequest struct {
 	NoWorkspace bool   // new
 	// Prompt is the first instruction given to the new session's agent, or "".
 	Prompt string // new, fork
-	Target string // close, alias, fork, clear
-	Alias  string // alias: the alias to set. list: the text to filter aliases by
-	Repo   string // list: the text to filter repository names by
-	DryRun bool   // gc, clear
+	Target string // close, alias, fork, send
+	Alias  string // alias: the alias to set
+	// Filter is which sessions list and broadcast take.
+	Filter sessionFilter
+	// Text is what send and broadcast type into the sessions' input boxes.
+	Text   string
+	DryRun bool // gc, send, broadcast
 	// project (Dir is the project)
 	ProjectOp  string
 	ClaudeArgs []string // projectSetArgs: the arguments to set
@@ -70,16 +73,18 @@ func ignoreStdin(parse func(args []string) (cliRequest, error)) cliParser {
 // cliCommands are the subcommands. Each one works on the store directly, so the
 // TUI does not need to be running.
 var cliCommands = map[string]cliParser{
-	"new":     parseNewArgs,
-	"fork":    parseForkArgs,
-	"list":    ignoreStdin(parseListArgs),
-	"tree":    ignoreStdin(parseTreeArgs),
-	"close":   ignoreStdin(parseCloseArgs),
-	"alias":   ignoreStdin(parseAliasArgs),
-	"gc":      ignoreStdin(parseGCArgs),
-	"project": ignoreStdin(parseProjectArgs),
-	"clear":   ignoreStdin(parseClearArgs),
-	"hook":    ignoreStdin(parseHookArgs),
+	"new":       parseNewArgs,
+	"fork":      parseForkArgs,
+	"list":      ignoreStdin(parseListArgs),
+	"tree":      ignoreStdin(parseTreeArgs),
+	"close":     ignoreStdin(parseCloseArgs),
+	"alias":     ignoreStdin(parseAliasArgs),
+	"gc":        ignoreStdin(parseGCArgs),
+	"project":   ignoreStdin(parseProjectArgs),
+	"clear":     ignoreStdin(parseClearArgs),
+	"send":      ignoreStdin(parseSendArgs),
+	"broadcast": ignoreStdin(parseBroadcastArgs),
+	"hook":      ignoreStdin(parseHookArgs),
 }
 
 // SessionInfo is the JSON form of a session printed by new / fork / list / close.
@@ -206,7 +211,7 @@ func runCLI(name string, args []string) error {
 		now := time.Now()
 		jjRunner := &jj.Runner{Command: cfg.Commands.JJ}
 		for _, s := range snaps {
-			if aliasMatches(s.Alias, req.Alias) && repoMatches(s.RepoPath, req.Repo) {
+			if req.Filter.matches(s) {
 				infos = append(infos, infoFromSnapshot(s, listHints(s, now, jjRunner)))
 			}
 		}
@@ -217,13 +222,20 @@ func runCLI(name string, args []string) error {
 			return err
 		}
 		return printJSON(infoWithHints(snap))
-	case "clear":
+	case "send":
 		runner := &tmux.Runner{Command: cfg.Tmux.Command, SessionName: cfg.Tmux.SessionName}
-		info, err := clearSession(st, runner, session.DeckSessionID(os.Getenv(session.EnvSessionID)), req.Target, req.DryRun)
+		info, err := sendSession(st, runner, session.DeckSessionID(os.Getenv(session.EnvSessionID)), req.Target, req.Text, req.DryRun)
 		if err != nil {
 			return err
 		}
 		return printJSON(info)
+	case "broadcast":
+		runner := &tmux.Runner{Command: cfg.Tmux.Command, SessionName: cfg.Tmux.SessionName}
+		infos, err := broadcast(st, runner, session.DeckSessionID(os.Getenv(session.EnvSessionID)), req.Filter, req.Text, req.DryRun)
+		if err != nil {
+			return err
+		}
+		return printJSON(infos)
 	case "tree":
 		snaps, err := session.ListStored(st)
 		if err != nil {
@@ -412,36 +424,19 @@ func listHints(s session.Snapshot, now time.Time, ws workspaceReader) []session.
 func parseListArgs(args []string) (cliRequest, error) {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: claude-deck list [--alias TEXT] [--repo TEXT]")
+		fmt.Fprintln(fs.Output(), "Usage: claude-deck list [--alias TEXT] [--repo TEXT] [--only ID|NAME,...]")
 		fmt.Fprintln(fs.Output(), "Prints the claude-deck sessions as JSON, in the order of the TUI list. External sessions are not included.")
 		fs.PrintDefaults()
 	}
-	alias := fs.String("alias", "", "only sessions whose alias contains this text (case-insensitive)")
-	repo := fs.String("repo", "", "only sessions whose repository name (the last element of repo_path) contains this text (case-insensitive)")
+	var filter sessionFilter
+	filter.register(fs)
 	if err := fs.Parse(args); err != nil {
 		return cliRequest{}, err
 	}
 	if fs.NArg() > 0 {
 		return cliRequest{}, fmt.Errorf("list: unexpected arguments: %v", fs.Args())
 	}
-	return cliRequest{Op: "list", Alias: *alias, Repo: *repo}, nil
-}
-
-// aliasMatches reports whether a session with the alias passes `list --alias filter`.
-// An empty filter passes every session; otherwise the alias must contain the
-// filter, ignoring case, so a session without an alias never passes.
-func aliasMatches(alias, filter string) bool {
-	return filter == "" || strings.Contains(strings.ToLower(alias), strings.ToLower(filter))
-}
-
-// repoMatches reports whether a session in the repository repoPath passes
-// `list --repo filter`. An empty filter passes every session; otherwise the
-// repository's name, the last element of repoPath, must contain the filter,
-// ignoring case.
-// WHY 末尾の名前だけ: パス全体だと、親ディレクトリ（github.com や利用者名）の語に
-// どのリポジトリも当たってしまう。
-func repoMatches(repoPath, filter string) bool {
-	return filter == "" || strings.Contains(strings.ToLower(filepath.Base(repoPath)), strings.ToLower(filter))
+	return cliRequest{Op: "list", Filter: filter}, nil
 }
 
 // WHY NOT list --tree: フラグの有無で list の出力が JSON とテキストに分かれる。

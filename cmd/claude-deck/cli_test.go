@@ -89,19 +89,19 @@ func TestParseCLIArgs(t *testing.T) {
 			name:    "list filtered by alias",
 			command: "list",
 			args:    []string{"--alias", "review"},
-			want:    cliRequest{Op: "list", Alias: "review"},
+			want:    cliRequest{Op: "list", Filter: sessionFilter{Alias: "review"}},
 		},
 		{
 			name:    "list filtered by repository",
 			command: "list",
 			args:    []string{"--repo", "deck"},
-			want:    cliRequest{Op: "list", Repo: "deck"},
+			want:    cliRequest{Op: "list", Filter: sessionFilter{Repo: "deck"}},
 		},
 		{
 			name:    "list filtered by alias and repository",
 			command: "list",
 			args:    []string{"--alias", "review", "--repo", "deck"},
-			want:    cliRequest{Op: "list", Alias: "review", Repo: "deck"},
+			want:    cliRequest{Op: "list", Filter: sessionFilter{Alias: "review", Repo: "deck"}},
 		},
 		{
 			name:    "alias of another session",
@@ -215,13 +215,43 @@ func TestParseCLIArgs(t *testing.T) {
 			name:    "clear",
 			command: "clear",
 			args:    []string{"--id", "abc"},
-			want:    cliRequest{Op: "clear", Target: "abc"},
+			want:    cliRequest{Op: "send", Target: "abc", Text: "/clear"},
 		},
 		{
 			name:    "clear dry run",
 			command: "clear",
 			args:    []string{"--id", "anna-8cc7", "--dry-run"},
-			want:    cliRequest{Op: "clear", Target: "anna-8cc7", DryRun: true},
+			want:    cliRequest{Op: "send", Target: "anna-8cc7", Text: "/clear", DryRun: true},
+		},
+		{
+			name:    "send",
+			command: "send",
+			args:    []string{"--id", "anna-8cc7", "-p", "続けて"},
+			want:    cliRequest{Op: "send", Target: "anna-8cc7", Text: "続けて"},
+		},
+		{
+			name:    "send dry run",
+			command: "send",
+			args:    []string{"--id", "abc", "-p", "/reload-plugins", "--dry-run"},
+			want:    cliRequest{Op: "send", Target: "abc", Text: "/reload-plugins", DryRun: true},
+		},
+		{
+			name:    "broadcast to every live session",
+			command: "broadcast",
+			args:    []string{"-p", "/reload-plugins"},
+			want:    cliRequest{Op: "broadcast", Text: "/reload-plugins"},
+		},
+		{
+			name:    "broadcast with every filter",
+			command: "broadcast",
+			args:    []string{"-p", "/reload-plugins", "--repo", "deck", "--alias", "review", "--only", "anna-8cc7, abc", "--dry-run"},
+			want:    cliRequest{Op: "broadcast", Text: "/reload-plugins", Filter: sessionFilter{Repo: "deck", Alias: "review", Only: []string{"anna-8cc7", "abc"}}, DryRun: true},
+		},
+		{
+			name:    "list --only",
+			command: "list",
+			args:    []string{"--only", "anna-8cc7"},
+			want:    cliRequest{Op: "list", Filter: sessionFilter{Only: []string{"anna-8cc7"}}},
 		},
 		{
 			// The plugin always passes --reason; empty means no reason.
@@ -277,50 +307,6 @@ func TestParseHookArgs_SessionFromEnv(t *testing.T) {
 	}
 }
 
-func TestAliasMatches(t *testing.T) {
-	tests := []struct {
-		alias, filter string
-		want          bool
-	}{
-		{"review-pr-12", "", true},
-		{"", "", true},
-		{"review-pr-12", "review-pr-12", true},
-		{"review-pr-12", "pr-12", true},
-		{"review-pr-12", "Review", true},
-		{"review-pr-12", "fix", false},
-		{"", "review", false},
-	}
-	for _, tt := range tests {
-		if got := aliasMatches(tt.alias, tt.filter); got != tt.want {
-			t.Errorf("aliasMatches(%q, %q) = %v, want %v", tt.alias, tt.filter, got, tt.want)
-		}
-	}
-}
-
-func TestRepoMatches(t *testing.T) {
-	tests := []struct {
-		name, repoPath, filter string
-		want                   bool
-	}{
-		{"no filter passes", "/src/github.com/pomesaka/claude-deck", "", true},
-		{"no filter passes an empty path", "", "", true},
-		{"whole name", "/src/github.com/pomesaka/claude-deck", "claude-deck", true},
-		{"part of the name", "/src/github.com/pomesaka/claude-deck", "deck", true},
-		{"case is ignored", "/src/github.com/pomesaka/claude-deck", "Deck", true},
-		{"trailing slash", "/src/github.com/pomesaka/claude-deck/", "deck", true},
-		{"a parent directory does not match", "/src/github.com/pomesaka/claude-deck", "pomesaka", false},
-		{"another repository", "/src/github.com/pomesaka/dotclaude", "deck", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := repoMatches(tt.repoPath, tt.filter); got != tt.want {
-				t.Errorf("repoMatches(%q, %q) = %v, want %v", tt.repoPath, tt.filter, got, tt.want)
-			}
-		})
-	}
-}
-
-// Without --session, fork forks the calling session; --session wins over it.
 func TestParseForkArgs_SessionFromEnv(t *testing.T) {
 	t.Setenv("CLAUDE_DECK_SESSION_ID", "from-env")
 	tests := []struct {
@@ -413,6 +399,15 @@ func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 		{name: "clear with an empty --id", command: "clear", args: []string{"--id", ""}},
 		{name: "clear with a positional argument", command: "clear", args: []string{"abc"}},
 		{name: "clear with an extra positional argument", command: "clear", args: []string{"--id", "abc", "extra"}},
+		{name: "clear does not take -p", command: "clear", args: []string{"--id", "abc", "-p", "x"}},
+		{name: "send without -p", command: "send", args: []string{"--id", "abc"}},
+		{name: "send with a blank -p", command: "send", args: []string{"--id", "abc", "-p", "  "}},
+		{name: "send with a line break", command: "send", args: []string{"--id", "abc", "-p", "a\nb"}},
+		{name: "send without --id", command: "send", args: []string{"-p", "x"}},
+		{name: "send with a positional argument", command: "send", args: []string{"--id", "abc", "-p", "x", "extra"}},
+		{name: "broadcast without -p", command: "broadcast"},
+		{name: "broadcast with a line break", command: "broadcast", args: []string{"-p", "a\rb"}},
+		{name: "broadcast with a positional argument", command: "broadcast", args: []string{"-p", "x", "extra"}},
 		{name: "hook status idle with a reason", command: "hook", args: []string{"status", "idle", "--reason", "x", "--session", "abc"}},
 		{name: "hook without session", command: "hook", args: []string{"exited"}},
 		{name: "hook rate-limits without JSON", command: "hook", args: []string{"rate-limits"}},

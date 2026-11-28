@@ -1,7 +1,6 @@
 package session
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -175,55 +174,4 @@ func contextFigures(s Snapshot) string {
 	default:
 		return compactions
 	}
-}
-
-// Why CheckClear refuses to type /clear into a session.
-var (
-	ErrClearSelf      = errors.New("the session is this one")
-	ErrClearBusy      = errors.New("the session is not waiting for input")
-	ErrClearNoPrompt  = errors.New("the session's prompt was not found on its screen")
-	ErrClearHalfTyped = errors.New("the session's prompt holds text the user is typing")
-)
-
-// clearable reports whether /clear may be typed in status s: the main
-// loop has ended its turn and nothing waits on a dialog.
-// WHY subagent_running を外す: 動いているサブエージェントの報告は、/clear の後の会話に届いても読む文脈が無い。
-// WHY waiting_approval / waiting_answer を外す: 打った文がダイアログの選択に入る。
-func clearable(s Status) bool {
-	return s == StatusIdle || s == StatusWaitingAction
-}
-
-// ClearPrompt is what the prompt of a session's screen shows: found is false
-// when no prompt was found, typed is the text typed into it.
-type ClearPrompt struct {
-	Found bool
-	Typed string
-}
-
-// CheckClear reports why /clear must not be typed into the session, or nil.
-// self is the session the caller runs in ("" outside claude-deck). The checks
-// go from the one whose miss cannot be undone (typing into one's own prompt
-// ends the caller's own turn) to the one that reads the screen.
-func CheckClear(s Snapshot, self DeckSessionID, prompt ClearPrompt) error {
-	if self != "" && s.ID == self {
-		return fmt.Errorf("%w: %s", ErrClearSelf, s.ID)
-	}
-	if !clearable(s.Status) {
-		return fmt.Errorf("%w: %s is %s", ErrClearBusy, s.ID, s.Status.ID())
-	}
-	if !prompt.Found {
-		return fmt.Errorf("%w: %s", ErrClearNoPrompt, s.ID)
-	}
-	if prompt.Typed != "" {
-		return fmt.Errorf("%w: %s (%s)", ErrClearHalfTyped, s.ID, truncateRunes(prompt.Typed, 30))
-	}
-	return nil
-}
-
-func truncateRunes(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "…"
 }

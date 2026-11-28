@@ -108,10 +108,12 @@ CLI を変えたら、同梱のスキル `deck-status:claude-deck`（`deckmod/sk
 |------|------|
 | `claude-deck new [--dir DIR] [--no-workspace] [--prompt TEXT\|-]` | `n`（`--no-workspace` は C-Enter）。`--prompt` で最初の指示を渡す（TUI には無い） |
 | `claude-deck fork [--session ID\|NAME] [--prompt TEXT\|-]` | `f`。`--session` を省くと自分のセッション（`$CLAUDE_DECK_SESSION_ID`）。`--prompt` で最初の指示を渡す（TUI には無い） |
-| `claude-deck list [--alias TEXT] [--repo TEXT]` | 一覧表示。`session_chain` と `forked_from` で `/clear` とフォークの系譜も返す。`--alias` はエイリアスの部分一致、`--repo` はリポジトリの名前（`repo_path` の末尾）の部分一致で絞る。両方付けると両方に当たるもの |
+| `claude-deck list [--alias TEXT] [--repo TEXT] [--only ID\|NAME,...]` | 一覧表示。`session_chain` と `forked_from` で `/clear` とフォークの系譜も返す。`--alias` はエイリアスの部分一致、`--repo` はリポジトリの名前（`repo_path` の末尾）の部分一致、`--only` は ID か名前の完全一致で絞る。付けた条件のどれにも当たるもの（`broadcast` と同じ関数） |
 | `claude-deck tree` | なし。Claude Code のセッションを `/clear` とフォークの親子関係でたどった木を、テキストで出す（[用語集](docs/00-glossary.md) の ForkedFrom） |
 | `claude-deck close <ID\|NAME>` | `x` |
-| `claude-deck clear --id <ID\|NAME> [--dry-run]` | なし。そのセッションの tmux のウィンドウの入力欄に `/clear` を打つ。`idle` か `waiting_action` で入力欄が空のときだけ送り、自分のセッションには送らない。`list` の `hints` の `context_full` が打つ時機を勧める |
+| `claude-deck send --id <ID\|NAME> -p <TEXT> [--dry-run]` | なし。そのセッションの tmux のウィンドウの入力欄に 1 行の文と Enter を打つ。`idle` か `waiting_action` で入力欄が空のときだけ送り、自分のセッションには送らない（`session.CheckSend`） |
+| `claude-deck broadcast -p <TEXT> [--alias TEXT] [--repo TEXT] [--only ID\|NAME,...] [--dry-run]` | なし。生きているセッションのうち `list` と同じ絞り込みに合うものへ、`send` と同じ判定で送る。合うものが無ければ 0 以外で止まる |
+| `claude-deck clear --id <ID\|NAME> [--dry-run]` | なし。`send -p /clear` の短い形。`list` の `hints` の `context_full` が打つ時機を勧める |
 | `claude-deck alias [--session ID\|NAME] <ALIAS>` | なし。セッションに表示用の名前を付ける（英数字と `-` `_` `.`、40 文字まで）。`--session` を省くと自分のセッション（`$CLAUDE_DECK_SESSION_ID`）。空文字で消す |
 | `claude-deck gc [--dry-run]` | なし。どのセッションのものでもないワークスペースと、消えたワークスペースについての `~/.claude.json` の登録を消す |
 | `claude-deck project list` | なし。`config.toml` の `[projects]` にあるプロジェクトごとの設定を返す |
