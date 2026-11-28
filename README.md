@@ -140,6 +140,7 @@ claude-deck send --id maika-7c78 -p "Go on"   # type a line into it, only while 
 claude-deck broadcast -p /reload-plugins --repo api   # the same, into every live session that passes the filters of list
 claude-deck clear --id maika-7c78   # send -p /clear
 claude-deck close maika-7c78        # stop it and remove its workspace (ID or name)
+claude-deck reload                  # after a build, start the running TUI again from it; sessions keep running
 ```
 
 Every session claude-deck starts also gets the bundled `deck-status:claude-deck` skill, which teaches Claude Code these commands. Ask such a session to "start another session to look into the flaky test" and the new one appears in the list, already working on it.
@@ -243,7 +244,10 @@ Hold `Shift` while dragging to use your terminal's own selection. For a block se
 ```bash
 GOEXPERIMENT=jsonv2 go build -o claude-deck ./cmd/claude-deck
 GOEXPERIMENT=jsonv2 go test ./...
+claude-deck reload   # start the running TUI again from the new build
 ```
+
+`reload` checks that the new build runs (`claude-deck version`) before the TUI replaces itself, keeps the cursor and the Ghostty split, and leaves the sessions running. It does not reload the plugin in running sessions; for that, `claude-deck broadcast -p /reload-plugins`.
 
 Design notes are in [docs/](docs/) (Japanese). Start with [docs/01-overview.md](docs/01-overview.md).
 

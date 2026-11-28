@@ -276,6 +276,7 @@ func (m *Model) setRepoCandidates(filter, selectedDir string) {
 func (m *Model) selectRepo(item repoItem, withWorkspace bool) tea.Cmd {
 	m.mode = viewDashboard
 	m.setStatus("Creating session...")
+	m.operations++
 
 	mgr := m.manager
 	ctx := m.ctx

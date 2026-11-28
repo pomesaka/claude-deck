@@ -158,6 +158,13 @@ func (r *Runner) PanePID(windowName string) (int, error) {
 	return strconv.Atoi(strings.TrimSpace(out))
 }
 
+// RespawnWindow kills the process of the named window and runs command in it
+// instead, keeping the window (and the clients that show it).
+func (r *Runner) RespawnWindow(windowName, command string) error {
+	_, err := r.run("respawn-window", "-k", "-t", r.sess()+":"+windowName, command)
+	return err
+}
+
 // CapturePane returns what the named window's pane shows, with its colours as
 // SGR escapes (capture-pane -e): the faint text Claude Code draws in its input
 // box is told apart only by its colour.

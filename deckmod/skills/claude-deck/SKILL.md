@@ -25,6 +25,7 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
 | `clear --id ID\|NAME [--dry-run]` | `send -p /clear` の短い形。文脈を空にする |
 | `alias [--session ID\|NAME] <ALIAS>` | セッションに表示用の名前を付ける。TUI の一覧で、セッション名と並べて出る |
 | `gc [--dry-run]` | どのセッションのものでもないワークスペースと、消えたワークスペースについての Claude Code の記録を消す |
+| `reload [--dry-run]` | 動いている TUI を、そのバイナリ（TUI を起動したパス）で起動し直す。claude-deck をビルドし直した後に打つ。新しいバイナリが動かないときと、TUI が操作の途中のときは起動し直さず、0 以外で終わる。セッションは止まらない。出力の `tui_revision` と `cli_revision` が違えば、TUI は打った側のビルドを動かしていない |
 | `project list` | 設定ファイルにある、プロジェクトごとの設定を返す |
 | `project args [--clear] <DIR> [-- <ARG>...]` | そのリポジトリで Claude Code を起動するときに足す引数を読み書きする |
 

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -82,10 +83,15 @@ type Model struct {
 	// Quit state
 	prompt   modalPrompt
 	quitting bool
+	// reload is the binary the TUI quit to start again from (ReloadMsg), or "".
+	reload string
 
 	// In-flight async operation flags — prevent duplicate key presses from
 	// launching concurrent operations while a background Cmd is running.
 	killing bool // true while sessionKilledMsg is in flight
+	// operations counts the create, resume, fork and close Cmds whose result
+	// has not arrived. A reload waits for none: the exec would cut them off.
+	operations int
 
 	// Vim-style key sequence state
 	pendingG        bool
@@ -259,6 +265,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case ReloadMsg:
+		if err := m.reloadBlocker(); err != nil {
+			msg.Refuse(err)
+			cmds = append(cmds, m.flash("Reload refused: "+err.Error()))
+			break
+		}
+		m.reload = msg.Binary
+		m.quitting = true
+		return m, tea.Quit
+
+	case ReloadFailedMsg:
+		cmds = append(cmds, m.flash("Reload failed: "+msg.Err.Error()))
+
 	case tea.KeyPressMsg:
 		cmd := m.handleKey(msg)
 		if cmd != nil {
@@ -301,6 +320,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ensureCursorVisible()
 
 	case sessionCreatedMsg:
+		m.operations--
 		if msg.err != nil {
 			cmds = append(cmds, m.flash("Create failed: "+msg.err.Error()))
 		} else {
@@ -309,6 +329,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case sessionResumedMsg:
+		m.operations--
 		if msg.err != nil {
 			cmds = append(cmds, m.flash("Resume failed: "+msg.err.Error()))
 		} else {
@@ -317,6 +338,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case sessionForkedMsg:
+		m.operations--
 		if msg.err != nil {
 			cmds = append(cmds, m.flash("Fork failed: "+msg.err.Error()))
 		} else {
@@ -326,6 +348,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionKilledMsg:
 		m.killing = false
+		m.operations--
 		// refreshSessions は呼ばない: Kill は store を書いた後に Reload し、その notifyChange が
 		// SessionRefreshMsg を届ける。StopProcess が失敗したときも同じ。beginClose で失敗したときは何も書いていない。
 		switch {
@@ -375,7 +398,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyPressMsg,
 			metadataTickMsg, SessionRefreshMsg, statusClearMsg,
 			sessionCreatedMsg, sessionResumedMsg, sessionForkedMsg, sessionKilledMsg, pinToggledMsg, repoListMsg,
-			RateLimitsUpdatedMsg:
+			RateLimitsUpdatedMsg, ReloadFailedMsg:
 			// skip: 処理済み or repoList に無関係
 		default:
 			var cmd tea.Cmd
@@ -385,6 +408,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+// ReloadMsg asks the TUI to quit so that main starts it again from Binary
+// (`claude-deck reload`). main sends it once Binary has run. When the TUI is
+// in the middle of something, it calls Refuse instead and keeps running.
+type ReloadMsg struct {
+	Binary string
+	Refuse func(error)
+}
+
+// ReloadFailedMsg says a reload was refused: the new binary did not run.
+type ReloadFailedMsg struct{ Err error }
+
+// ReloadBinary is the binary the TUI quit to start again from (ReloadMsg), or "".
+func (m Model) ReloadBinary() string { return m.reload }
+
+// reloadBlocker is why the TUI cannot start again now, or nil.
+// WHY 断る: exec はこのプロセスの goroutine ごと消すので、作成中のワークスペースや
+// 打ちかけの選択が途中で切れる。空いてから打ち直してもらう。
+func (m Model) reloadBlocker() error {
+	switch {
+	case m.operations > 0:
+		return errors.New("a session is being created, resumed, forked or closed")
+	case m.mode != viewDashboard || m.prompt != promptNone:
+		return errors.New("a dialog is open")
+	}
+	return nil
+}
+
+// SelectedID is the session the cursor is on, or "".
+func (m Model) SelectedID() session.DeckSessionID { return m.selectedID }
+
+// WithSelection puts the cursor on the session id, as the TUI that reloaded
+// left it. A session no longer listed leaves the cursor where a start puts it.
+func (m Model) WithSelection(id session.DeckSessionID) Model {
+	if m.manager.GetSession(id) == nil {
+		return m
+	}
+	m.selectedID = id
+	m.refreshSessions() // cmds discarded — bubbletea event loop not yet running
+	return m
 }
 
 // statusDuration is how long a flash message stays.

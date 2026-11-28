@@ -409,6 +409,12 @@ func (m *Manager) EnsurePreviewWindow() error {
 	return m.backend.EnsurePreview()
 }
 
+// RestartPreviewWindow runs the preview again from the running binary.
+// Delegates to the backend — only tmuxBackend has an effect.
+func (m *Manager) RestartPreviewWindow() error {
+	return m.backend.RestartPreview()
+}
+
 // FocusPreviewWindow switches the display to the preview window.
 // Delegates to the backend — only tmuxBackend has an effect.
 func (m *Manager) FocusPreviewWindow() error {

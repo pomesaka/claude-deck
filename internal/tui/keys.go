@@ -297,6 +297,7 @@ func (m *Model) resumeSelected() tea.Cmd {
 	}
 
 	m.setStatus("Resuming...")
+	m.operations++
 	mgr := m.manager
 	ctx := m.ctx
 	id := m.selectedID
@@ -322,6 +323,7 @@ func (m *Model) forkSelected() tea.Cmd {
 	}
 
 	m.setStatus("Forking...")
+	m.operations++
 	mgr := m.manager
 	ctx := m.ctx
 	id := m.selectedID
@@ -354,6 +356,7 @@ func (m *Model) killSelected() tea.Cmd {
 	sid := m.selectedID
 	mgr := m.manager
 	m.killing = true
+	m.operations++
 	m.setStatus("Closing...")
 	return func() tea.Msg {
 		res, err := mgr.Kill(sid)

@@ -172,21 +172,36 @@ func (b *tmuxBackend) EnsurePreview() error {
 	if b.runner.HasWindow(previewWindowName) {
 		return nil
 	}
-	// Use the full path of the running binary so the preview window can be
-	// launched even when claude-deck is not installed globally in PATH.
-	execPath, err := os.Executable()
-	if err != nil {
-		execPath = "claude-deck"
-	}
-	execPath, _ = filepath.EvalSymlinks(execPath)
 	opts := tmux.WindowOpts{
-		Command: execPath + " --preview",
+		Command: previewCommand(),
 	}
 	if err := b.runner.NewWindow(previewWindowName, opts); err != nil {
 		return fmt.Errorf("create preview window: %w", err)
 	}
 	debuglog.Printf("[tmuxBackend.EnsurePreview] created %s window: %s", previewWindowName, opts.Command)
 	return nil
+}
+
+// RestartPreview runs the preview window's process again from the running
+// binary, or creates the window when there is none. Used after a reload, so
+// the preview runs the new build too.
+// WHY respawn-window: ウィンドウを消して作り直すと、右ペインの tmux のクライアントが別のウィンドウへ移る。
+func (b *tmuxBackend) RestartPreview() error {
+	if !b.runner.HasWindow(previewWindowName) {
+		return b.EnsurePreview()
+	}
+	return b.runner.RespawnWindow(previewWindowName, previewCommand())
+}
+
+// previewCommand runs the preview from the full path of the running binary,
+// so the window starts even when claude-deck is not on PATH.
+func previewCommand() string {
+	execPath, err := os.Executable()
+	if err != nil {
+		execPath = "claude-deck"
+	}
+	execPath, _ = filepath.EvalSymlinks(execPath)
+	return execPath + " --preview"
 }
 
 // FocusPreview switches the tmux client to the __preview__ window.

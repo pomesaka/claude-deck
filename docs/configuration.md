@@ -138,6 +138,7 @@ The data directory is, in order of precedence:
   deck.db                                  Session metadata (SQLite)
   plugin/                                  deck-status plugin
   rate-limits.json                         Account rate limits reported by the sessions
+  tui.lock                                 The running TUI's pid, held while it runs; claude-deck reload finds it here
   workspace/<encoded-repo>/<name>/         jj workspaces
   debug.log                                Debug log
 ~/.claude/projects/<project>/<uuid>.jsonl              Claude Code JSONL (read by claude-deck)

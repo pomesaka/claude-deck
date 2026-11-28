@@ -81,3 +81,20 @@ func TestRunner_MissingWindow(t *testing.T) {
 		t.Error("SendLine to a missing window succeeded")
 	}
 }
+
+// RespawnWindow replaces the window's process and keeps the window.
+func TestRunner_RespawnWindow(t *testing.T) {
+	r := startServer(t)
+	if err := r.NewWindow("w", WindowOpts{Command: "echo first; sleep 600"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the first process", func() bool { s, _ := r.CapturePane("w"); return strings.Contains(s, "first") })
+	before, _ := r.PanePID("w")
+	if err := r.RespawnWindow("w", "echo second; sleep 600"); err != nil {
+		t.Fatalf("RespawnWindow: %v", err)
+	}
+	waitFor(t, "the second process", func() bool { s, _ := r.CapturePane("w"); return strings.Contains(s, "second") })
+	if after, _ := r.PanePID("w"); after == before || !r.HasWindow("w") {
+		t.Errorf("pane pid %d → %d, window kept %v; want a new process in the same window", before, after, r.HasWindow("w"))
+	}
+}

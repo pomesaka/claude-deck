@@ -21,6 +21,7 @@ import (
 	"github.com/pomesaka/claude-deck/internal/config"
 	"github.com/pomesaka/claude-deck/internal/debuglog"
 	"github.com/pomesaka/claude-deck/internal/ghostty"
+	"github.com/pomesaka/claude-deck/internal/instance"
 	"github.com/pomesaka/claude-deck/internal/jj"
 	"github.com/pomesaka/claude-deck/internal/preview"
 	"github.com/pomesaka/claude-deck/internal/ratelimits"
@@ -106,6 +107,8 @@ func run() error {
 		}
 	}
 
+	carry := takeReloadCarry()
+
 	// Initialize store
 	st, err := session.OpenStore(cfg.DataDir)
 	if err != nil {
@@ -154,7 +157,16 @@ func run() error {
 	// regardless so the list-only layout is active even without a live Ghostty split.
 	var splitMode bool
 	var splitTermUUID string // Ghostty terminal UUID for cleanup on exit
-	if err := mgr.EnsurePreviewWindow(); err != nil {
+	// WHY 起動し直しでは分割しない: 前のプロセスが開いた Ghostty の右ペインと preview のウィンドウが残っている。
+	// preview は新しいバイナリで動かし直す。
+	if carry.reloaded {
+		if err := mgr.RestartPreviewWindow(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: preview window setup: %v\n", err)
+		} else {
+			splitMode = true
+			splitTermUUID = carry.ghosttySplit
+		}
+	} else if err := mgr.EnsurePreviewWindow(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: preview window setup: %v\n", err)
 	} else {
 		splitMode = true
@@ -163,7 +175,27 @@ func run() error {
 
 	// Create and run TUI
 	model := tui.NewModel(mgr, cfg, ctx)
+	if carry.cursor != "" {
+		model = model.WithSelection(carry.cursor)
+	}
 	p := tea.NewProgram(model)
+
+	// `claude-deck reload` finds this TUI through the instance file.
+	command := carry.command
+	if command == "" {
+		if command, err = os.Executable(); err != nil {
+			return fmt.Errorf("locating claude-deck binary: %w", err)
+		}
+	}
+	reloadCh := reloadSignals()
+	inst, err := instance.Acquire(cfg.DataDir, command, buildVersion().Revision)
+	if err != nil {
+		// 2 つめの TUI や書けないデータディレクトリでは、reload を受けないだけで動かす。
+		fmt.Fprintf(os.Stderr, "warning: claude-deck reload will not reach this TUI: %v\n", err)
+	} else {
+		defer inst.Close()
+		watchReload(reloadCh, inst, command, func(msg any) { p.Send(msg) })
+	}
 
 	// rate_limits ファイルを監視し、更新があれば TUI に通知する。
 	// Pro/Max サブスクリプションユーザーのみ有効（APIキーユーザーはデータなし）。
@@ -188,12 +220,24 @@ func run() error {
 	// CLI・hook・ペインの終了コマンドが store に書いた変更を一覧に反映する。
 	go mgr.WatchStore(ctx)
 
-	if _, err := p.Run(); err != nil {
+	final, err := p.Run()
+	if err != nil {
 		return fmt.Errorf("running TUI: %w", err)
 	}
 
 	// 終了時に JSONL から読んだトークン数などを保存し、次回起動時にすぐ表示できるようにする
 	mgr.PersistAll()
+
+	// WHY preview と Ghostty の右ペインを閉じずに exec する: 新しいプロセスがそのまま使う。
+	// セッションは tmux のウィンドウで動き、状態は store にあるので、TUI を差し替えても止まらない。
+	// 約束するのは新しいバイナリの version が動くことまで。新しいプロセスが起動の途中
+	// （設定や store の読み込み）で落ちると、引き継いだ右ペインと preview のウィンドウは残る。
+	if m, ok := final.(tui.Model); ok && m.ReloadBinary() != "" && inst != nil {
+		err := execReload(m.ReloadBinary(), reloadCarry{command: command, cursor: m.SelectedID(), ghosttySplit: splitTermUUID})
+		// exec が戻るのは失敗したときだけ。理由を reload に返し、いつもの終わり方で片付ける。
+		_ = inst.RecordReloadError(fmt.Errorf("exec %s: %w", m.ReloadBinary(), err))
+		fmt.Fprintf(os.Stderr, "error: claude-deck reload: %v\n", err)
+	}
 
 	// claude-deck が開いた Ghostty 右ペインと preview ウィンドウを閉じる。
 	// 自分で開いたものは自分で閉じる原則。

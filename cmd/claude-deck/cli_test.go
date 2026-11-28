@@ -224,6 +224,22 @@ func TestParseCLIArgs(t *testing.T) {
 			want:    cliRequest{Op: "send", Target: "anna-8cc7", Text: "/clear", DryRun: true},
 		},
 		{
+			name:    "reload",
+			command: "reload",
+			want:    cliRequest{Op: "reload"},
+		},
+		{
+			name:    "reload dry run",
+			command: "reload",
+			args:    []string{"--dry-run"},
+			want:    cliRequest{Op: "reload", DryRun: true},
+		},
+		{
+			name:    "version",
+			command: "version",
+			want:    cliRequest{Op: "version"},
+		},
+		{
 			name:    "send",
 			command: "send",
 			args:    []string{"--id", "anna-8cc7", "-p", "続けて"},
@@ -401,6 +417,8 @@ func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 		{name: "clear with an extra positional argument", command: "clear", args: []string{"--id", "abc", "extra"}},
 		{name: "clear does not take -p", command: "clear", args: []string{"--id", "abc", "-p", "x"}},
 		{name: "send without -p", command: "send", args: []string{"--id", "abc"}},
+		{name: "reload with a positional argument", command: "reload", args: []string{"now"}},
+		{name: "version with an argument", command: "version", args: []string{"--json"}},
 		{name: "send with a blank -p", command: "send", args: []string{"--id", "abc", "-p", "  "}},
 		{name: "send with a line break", command: "send", args: []string{"--id", "abc", "-p", "a\nb"}},
 		{name: "send without --id", command: "send", args: []string{"-p", "x"}},

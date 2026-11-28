@@ -36,6 +36,10 @@ type SessionBackend interface {
 	// tmuxBackend: runs tmux select-window for ~0ms session switching.
 	Focus(sessionID DeckSessionID) error
 
+	// RestartPreview runs the preview subprocess again from the running binary
+	// (creating its window when there is none), after a reload.
+	RestartPreview() error
+
 	// EnsurePreview creates the preview subprocess window if not already present.
 	// The preview window displays JSONL logs for the selected session in split mode.
 	EnsurePreview() error

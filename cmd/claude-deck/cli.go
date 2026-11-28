@@ -85,6 +85,8 @@ var cliCommands = map[string]cliParser{
 	"send":      ignoreStdin(parseSendArgs),
 	"broadcast": ignoreStdin(parseBroadcastArgs),
 	"hook":      ignoreStdin(parseHookArgs),
+	"reload":    ignoreStdin(parseReloadArgs),
+	"version":   ignoreStdin(parseVersionArgs),
 }
 
 // SessionInfo is the JSON form of a session printed by new / fork / list / close.
@@ -189,6 +191,10 @@ func runCLI(name string, args []string) error {
 	if req.Op == "project" {
 		return runProject(req, config.DefaultPath())
 	}
+	// WHY 設定と store の前に答える: reload は、壊れた設定を読むビルドでもこの答えで動くかを見る。
+	if req.Op == "version" {
+		return printJSON(buildVersion())
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
@@ -200,6 +206,12 @@ func runCLI(name string, args []string) error {
 	defer st.Close()
 
 	switch req.Op {
+	case "reload":
+		info, err := reloadTUI(cfg.DataDir, req.DryRun)
+		if err != nil {
+			return err
+		}
+		return printJSON(info)
 	case "hook":
 		return runHook(req, st, cfg.DataDir)
 	case "list":

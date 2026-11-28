@@ -74,6 +74,7 @@ func (b *fakeBackend) KillWindows(ids []DeckSessionID) error {
 
 func (b *fakeBackend) Focus(DeckSessionID) error { return nil }
 func (b *fakeBackend) EnsurePreview() error      { return nil }
+func (b *fakeBackend) RestartPreview() error     { return nil }
 func (b *fakeBackend) FocusPreview() error       { return nil }
 func (b *fakeBackend) KillPreview() error        { return nil }
 
