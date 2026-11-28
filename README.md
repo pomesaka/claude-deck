@@ -137,6 +137,7 @@ claude-deck list --alias invoice    # only sessions whose label contains "invoic
 claude-deck list --repo api         # only sessions in a repository whose name contains "api"
 claude-deck list --only maika-7c78,sana-d999   # only these sessions (ID or name, exactly)
 claude-deck send --id maika-7c78 -p "Go on"   # type a line into it, only while it is idle with nothing typed
+claude-deck send --self -p /reload-plugins    # into this session, mid-turn too: it runs once the turn ends (after changing a plugin)
 claude-deck broadcast -p /reload-plugins --repo api   # the same, into every live session that passes the filters of list
 claude-deck clear --id maika-7c78   # send -p /clear
 claude-deck close maika-7c78        # stop it and remove its workspace (ID or name)

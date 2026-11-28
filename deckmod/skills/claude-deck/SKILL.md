@@ -21,6 +21,7 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
 | `tree` | Claude Code のセッションを、`/clear` とフォークの親子関係でたどった木としてテキストで出す |
 | `close <ID\|NAME>` | プロセスを止め、ワークスペースを消す。JSONL とメタデータは残り、TUI から再開できる。jj が作業コピーを取り込めなかったときはワークスペースを残し、stderr に警告を出す |
 | `send --id ID\|NAME -p TEXT [--dry-run]` | そのセッションの入力欄に 1 行の文を打って Enter を送る。利用者が打ったのと同じ形で届く。送るのは `idle` か `waiting_action` で、入力欄に打ちかけの文が無いときだけ。それ以外と自分のセッションには送らず、理由を出して 0 以外で終わる |
+| `send --self -p TEXT [--dry-run]` | 自分のセッションの入力欄に打つ。ターンの途中でも打て、Claude Code が列に入れてターンの後に流す。承認や回答のダイアログの間と、打ちかけの文があるときは断る。Mod を直した後に `send --self -p /reload-plugins` で自分も読み込み直す |
 | `broadcast -p TEXT [--alias TEXT] [--repo TEXT] [--only ID\|NAME,...] [--dry-run]` | 生きているセッションのうち絞り込みに合うものに、`send` と同じ判定で同じ文を送る。絞り込みは `list` と同じで、条件はどれも満たすものだけ。セッションごとの `{id, name, sent, skipped_reason, dry_run}` の配列を返す。合うものが無ければ何も送らずに 0 以外で終わる |
 | `clear --id ID\|NAME [--dry-run]` | `send -p /clear` の短い形。文脈を空にする |
 | `alias [--session ID\|NAME] <ALIAS>` | セッションに表示用の名前を付ける。TUI の一覧で、セッション名と並べて出る |
@@ -89,6 +90,7 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
 - ふつうの依頼と報告の催促は SendMessage で送る。`send` と `broadcast` は、`/reload-plugins` や `/clear` のような、入力欄でしか効かないコマンドと、利用者に頼まれた文のためにある
 - `broadcast` の前に、同じ絞り込みの `list` か `--dry-run` で宛先を確かめる。`--dry-run` の出力で、`skipped_reason` が空のものが送る先、入っているものが飛ばす先
 - 文は 1 行だけ。改行を含む文と空の文は断られる
+- `broadcast` は自分を飛ばす。自分に打つのは `send --self` を明示したときだけ
 
 ## clear
 

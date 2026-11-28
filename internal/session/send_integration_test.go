@@ -210,3 +210,35 @@ func TestBroadcast_RefusesTheText(t *testing.T) {
 		t.Errorf("Broadcast() = %v, want ErrSendMultiline", err)
 	}
 }
+
+// send --self types into one's own session mid-turn.
+func TestSendSelf(t *testing.T) {
+	tests := []struct {
+		name    string
+		prompt  string
+		self    DeckSessionID
+		want    string // what the window received
+		wantErr error
+	}{
+		{"mid-turn with an empty prompt", "❯ ", "abc", "/reload-plugins", nil},
+		{"half-typed text", "❯ draft", "abc", "", ErrSendHalfTyped},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := sendStore(t, store.Record{Status: "running"})
+			r := startTmux(t)
+			typed := fakePrompt(t, r, "abc", tt.prompt)
+			_, sent, err := SendSelf(st, r, tt.self, "/reload-plugins", false)
+			if !errors.Is(err, tt.wantErr) || (tt.wantErr == nil && (err != nil || !sent)) {
+				t.Fatalf("SendSelf() = (%v, %v), want %v", sent, err, tt.wantErr)
+			}
+			wait := 2 * time.Second
+			if tt.want == "" {
+				wait = 300 * time.Millisecond
+			}
+			if got := typedInto(typed, wait); got != tt.want {
+				t.Errorf("the window received %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

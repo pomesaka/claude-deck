@@ -37,7 +37,9 @@ type cliRequest struct {
 	// Filter is which sessions list and broadcast take.
 	Filter sessionFilter
 	// Text is what send and broadcast type into the sessions' input boxes.
-	Text   string
+	Text string
+	// Self is send --self: type into the session this command runs in.
+	Self   bool
 	DryRun bool // gc, send, broadcast
 	// project (Dir is the project)
 	ProjectOp  string
@@ -236,7 +238,7 @@ func runCLI(name string, args []string) error {
 		return printJSON(infoWithHints(snap))
 	case "send":
 		runner := &tmux.Runner{Command: cfg.Tmux.Command, SessionName: cfg.Tmux.SessionName}
-		info, err := sendSession(st, runner, session.DeckSessionID(os.Getenv(session.EnvSessionID)), req.Target, req.Text, req.DryRun)
+		info, err := sendSession(st, runner, session.DeckSessionID(os.Getenv(session.EnvSessionID)), req.Target, req.Self, req.Text, req.DryRun)
 		if err != nil {
 			return err
 		}

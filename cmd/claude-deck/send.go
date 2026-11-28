@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"os"
 
 	"github.com/pomesaka/claude-deck/internal/session"
 	"github.com/pomesaka/claude-deck/internal/store"
@@ -37,11 +38,26 @@ func textFlag(fs *flag.FlagSet) *string {
 func parseSendArgs(args []string) (cliRequest, error) {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: claude-deck send --id ID|NAME -p TEXT [--dry-run]")
-		fmt.Fprintln(fs.Output(), "Types TEXT and Enter into the session's input box, as if the user typed it, only while it is idle or waiting_action with nothing typed. Never into this session.")
+		fmt.Fprintln(fs.Output(), "Usage: claude-deck send --id ID|NAME | --self -p TEXT [--dry-run]")
+		fmt.Fprintln(fs.Output(), "Types TEXT and Enter into the session's input box, as if the user typed it, only while it is idle or waiting_action with nothing typed. --self types into this session, mid-turn too: Claude Code runs the line once the turn ends.")
 		fs.PrintDefaults()
 	}
-	return parseTargetArgs(fs, "send", args, textFlag(fs))
+	self := fs.Bool("self", false, "type into this session ($"+session.EnvSessionID+") instead of --id")
+	text := textFlag(fs)
+	req, err := parseTargetArgs(fs, "send", args, text)
+	if err != nil {
+		return cliRequest{}, err
+	}
+	switch {
+	case *self && req.Target != "":
+		return cliRequest{}, errors.New("send: give --id or --self, not both")
+	case *self && os.Getenv(session.EnvSessionID) == "":
+		return cliRequest{}, fmt.Errorf("send --self: %w ($%s is not set)", session.ErrSendNoSelf, session.EnvSessionID)
+	case !*self && req.Target == "":
+		return cliRequest{}, errors.New("send: --id or --self is required")
+	}
+	req.Self = *self
+	return req, nil
 }
 
 func parseClearArgs(args []string) (cliRequest, error) {
@@ -52,10 +68,15 @@ func parseClearArgs(args []string) (cliRequest, error) {
 		fs.PrintDefaults()
 	}
 	text := clearText
-	return parseTargetArgs(fs, "clear", args, &text)
+	req, err := parseTargetArgs(fs, "clear", args, &text)
+	if err == nil && req.Target == "" {
+		err = errors.New("clear: --id is required")
+	}
+	return req, err
 }
 
-// parseTargetArgs parses --id and --dry-run of send and clear into a send request.
+// parseTargetArgs parses --id and --dry-run of send and clear into a send
+// request. The caller checks that a target was given.
 func parseTargetArgs(fs *flag.FlagSet, cmd string, args []string, text *string) (cliRequest, error) {
 	target := fs.String("id", "", "ID or name of the session")
 	dryRun := fs.Bool("dry-run", false, "check whether the text would be sent, without sending it")
@@ -64,9 +85,6 @@ func parseTargetArgs(fs *flag.FlagSet, cmd string, args []string, text *string) 
 	}
 	if fs.NArg() > 0 {
 		return cliRequest{}, fmt.Errorf("%s: unexpected arguments: %v", cmd, fs.Args())
-	}
-	if *target == "" {
-		return cliRequest{}, fmt.Errorf("%s: --id is required", cmd)
 	}
 	if err := session.CheckSendText(*text); err != nil {
 		return cliRequest{}, fmt.Errorf("%s: -p: %w", cmd, err)
@@ -97,9 +115,19 @@ func parseBroadcastArgs(args []string) (cliRequest, error) {
 	return cliRequest{Op: "broadcast", Filter: filter, Text: *text, DryRun: *dryRun}, nil
 }
 
-// sendSession runs `claude-deck send` (and clear) against the store and tmux server given.
-func sendSession(st *store.Store, runner *tmux.Runner, self session.DeckSessionID, key, text string, dryRun bool) (SendInfo, error) {
-	s, sent, err := session.SendStored(st, runner, self, key, text, dryRun)
+// sendSession runs `claude-deck send` (and clear) against the store and tmux
+// server given: into key, or into self when toSelf (send --self).
+func sendSession(st *store.Store, runner *tmux.Runner, self session.DeckSessionID, key string, toSelf bool, text string, dryRun bool) (SendInfo, error) {
+	var (
+		s    session.Snapshot
+		sent bool
+		err  error
+	)
+	if toSelf {
+		s, sent, err = session.SendSelf(st, runner, self, text, dryRun)
+	} else {
+		s, sent, err = session.SendStored(st, runner, self, key, text, dryRun)
+	}
 	if err != nil {
 		return SendInfo{}, err
 	}

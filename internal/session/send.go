@@ -17,6 +17,8 @@ var (
 	ErrSendBusy      = errors.New("the session is not waiting for input")
 	ErrSendNoPrompt  = errors.New("the session's prompt was not found on its screen")
 	ErrSendHalfTyped = errors.New("the session's prompt holds text the user is typing")
+	ErrSendNoSelf    = errors.New("this process does not run in a claude-deck session")
+	ErrSendNoProcess = errors.New("the session has no running process")
 )
 
 // Why CheckSendText refuses a text to type.
@@ -68,6 +70,30 @@ func CheckSend(s Snapshot, self DeckSessionID, box InputBox) error {
 	if !acceptsInput(s.Status) {
 		return fmt.Errorf("%w: %s is %s", ErrSendBusy, s.ID, s.Status.ID())
 	}
+	return checkInputBox(s, box)
+}
+
+// CheckSendSelf is CheckSend for the session the caller runs in: it types
+// into its own prompt on purpose (send --self).
+// WHY ターンの途中（running）も送る: 打った文は Claude Code が列に入れ、ターンが終わった後に流す
+// （画面に「Queued」が出て、ターンの後に /reload-plugins が効いた。2026-11-28 に PM のセッションで確かめた。
+// 版はその日の手元の claude --version で 2.1.332、そのセッションの版そのものは未確認）。
+// WHY waiting_approval / waiting_answer は断る: ダイアログの間に打った文は、ほかのセッションと同じく
+// 選択に入る（acceptsInput の WHY）。列に入るかは確かめていない。
+// 打ちかけも、ほかのセッションと同じく壊さないよう断る。
+func CheckSendSelf(s Snapshot, box InputBox) error {
+	switch {
+	case !s.Status.IsLive():
+		return fmt.Errorf("%w: %s is %s", ErrSendNoProcess, s.ID, s.Status.ID())
+	case s.Status == StatusWaitingApproval || s.Status == StatusWaitingAnswer:
+		return fmt.Errorf("%w: %s is %s", ErrSendBusy, s.ID, s.Status.ID())
+	}
+	return checkInputBox(s, box)
+}
+
+// checkInputBox reports why the input box must not be typed into: none was
+// found, or it holds text being typed.
+func checkInputBox(s Snapshot, box InputBox) error {
 	if !box.Found {
 		return fmt.Errorf("%w: %s", ErrSendNoPrompt, s.ID)
 	}
@@ -95,13 +121,14 @@ func SendTo(runner *tmux.Runner, s Snapshot, self DeckSessionID, text string, dr
 	if err := CheckSendText(text); err != nil {
 		return false, err
 	}
-	return sendChecked(runner, s, self, text, dryRun)
+	return sendChecked(runner, s, func(box InputBox) error { return CheckSend(s, self, box) }, text, dryRun)
 }
 
-// sendChecked is SendTo for a text CheckSendText has accepted.
-func sendChecked(runner *tmux.Runner, s Snapshot, self DeckSessionID, text string, dryRun bool) (bool, error) {
+// sendChecked types text, which CheckSendText has accepted, into s when check
+// accepts its input box.
+func sendChecked(runner *tmux.Runner, s Snapshot, check func(InputBox) error, text string, dryRun bool) (bool, error) {
 	// 自分と状態は画面を読まずに決まるので、先に見る。
-	if err := CheckSend(s, self, InputBox{Found: true}); err != nil {
+	if err := check(InputBox{Found: true}); err != nil {
 		return false, err
 	}
 	b := newTmuxBackend(runner)
@@ -110,7 +137,7 @@ func sendChecked(runner *tmux.Runner, s Snapshot, self DeckSessionID, text strin
 		return false, fmt.Errorf("reading the screen of %s: %w", s.ID, err)
 	}
 	typed, found := claudecode.TypedText(screen)
-	if err := CheckSend(s, self, InputBox{Found: found, Typed: typed}); err != nil {
+	if err := check(InputBox{Found: found, Typed: typed}); err != nil {
 		return false, err
 	}
 	if dryRun {
@@ -133,6 +160,24 @@ func SendStored(st *store.Store, runner *tmux.Runner, self DeckSessionID, key, t
 	return s, sent, err
 }
 
+// SendSelf types text into the input box of self, the session the caller
+// runs in, as CheckSendSelf allows: mid-turn too (send --self).
+// The CLI checks self too, to fail before it opens the store.
+func SendSelf(st *store.Store, runner *tmux.Runner, self DeckSessionID, text string, dryRun bool) (Snapshot, bool, error) {
+	if self == "" {
+		return Snapshot{}, false, ErrSendNoSelf
+	}
+	if err := CheckSendText(text); err != nil {
+		return Snapshot{}, false, err
+	}
+	s, err := FindStored(st, string(self))
+	if err != nil {
+		return Snapshot{}, false, err
+	}
+	sent, err := sendChecked(runner, s, func(box InputBox) error { return CheckSendSelf(s, box) }, text, dryRun)
+	return s, sent, err
+}
+
 // Delivery is what Broadcast did for one session: Sent, or why it skipped it
 // (nil when dryRun found nothing against sending).
 type Delivery struct {
@@ -149,7 +194,7 @@ func Broadcast(runner *tmux.Runner, targets []Snapshot, self DeckSessionID, text
 	}
 	out := make([]Delivery, 0, len(targets))
 	for _, s := range targets {
-		sent, err := sendChecked(runner, s, self, text, dryRun)
+		sent, err := sendChecked(runner, s, func(box InputBox) error { return CheckSend(s, self, box) }, text, dryRun)
 		out = append(out, Delivery{Session: s, Sent: sent, Skipped: err})
 	}
 	return out, nil

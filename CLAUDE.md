@@ -18,7 +18,7 @@ GOEXPERIMENT=jsonv2 go test ./...
 ./claude-deck
 ```
 
-claude-deck を直したら、`go build` の後に `claude-deck reload` を打ち、動いている TUI を新しいバイナリで起動し直す。起動し直すのは、TUI を起動したパス（リンクならその先）のバイナリで、打った側のビルドではない。出力の `tui_revision` と `cli_revision` が違えば、TUI は今のビルドを動かしていない。`deckmod/` を変えたなら、続けて `claude-deck broadcast -p /reload-plugins` も打ち、動いているセッションにプラグインを読み込み直させる。reload は deckmod を書き出し直すだけで、セッションには送らない。
+claude-deck を直したら、`go build` の後に `claude-deck reload` を打ち、動いている TUI を新しいバイナリで起動し直す。起動し直すのは、TUI を起動したパス（リンクならその先）のバイナリで、打った側のビルドではない。出力の `tui_revision` と `cli_revision` が違えば、TUI は今のビルドを動かしていない。`deckmod/` を変えたなら、続けて `claude-deck broadcast -p /reload-plugins` も打ち、動いているセッションにプラグインを読み込み直させる。broadcast は自分を飛ばすので、自分には `claude-deck send --self -p /reload-plugins` を打つ（ターンの後に流れる）。reload は deckmod を書き出し直すだけで、セッションには送らない。
 
 ## アーキテクチャ概要
 
@@ -116,6 +116,7 @@ CLI を変えたら、同梱のスキル `deck-status:claude-deck`（`deckmod/sk
 | `claude-deck reload [--dry-run]` | なし。動いている TUI に、自分のバイナリ（起動したパスのリンクをたどった先）で起動し直すよう頼む。TUI は新しいバイナリの `version` が動くのを確かめてから exec し、カーソルの位置と Ghostty の右ペインを引き継ぐ。動かないとき、操作やダイアログの途中のとき、TUI が動いていないときは、起動し直さずに 0 以外で終わる。取り決めは [docs/architecture.md](docs/architecture.md#tui-の起動し直しreload) |
 | `claude-deck version` | なし。ビルドの revision を JSON で出す。reload がバイナリの確かめに使う |
 | `claude-deck send --id <ID\|NAME> -p <TEXT> [--dry-run]` | なし。そのセッションの tmux のウィンドウの入力欄に 1 行の文と Enter を打つ。`idle` か `waiting_action` で入力欄が空のときだけ送り、自分のセッションには送らない（`session.CheckSend`） |
+| `claude-deck send --self -p <TEXT> [--dry-run]` | なし。自分のセッションの入力欄に打つ。ターンの途中でも送り（文は列に入り、ターンの後に流れる）、承認や回答のダイアログの間と、打ちかけがあるときは断る（`session.CheckSendSelf`）。Mod を直した後の `/reload-plugins` に使う |
 | `claude-deck broadcast -p <TEXT> [--alias TEXT] [--repo TEXT] [--only ID\|NAME,...] [--dry-run]` | なし。生きているセッションのうち `list` と同じ絞り込みに合うものへ、`send` と同じ判定で送る。合うものが無ければ 0 以外で止まる |
 | `claude-deck clear --id <ID\|NAME> [--dry-run]` | なし。`send -p /clear` の短い形。`list` の `hints` の `context_full` が打つ時機を勧める |
 | `claude-deck alias [--session ID\|NAME] <ALIAS>` | なし。セッションに表示用の名前を付ける（英数字と `-` `_` `.`、40 文字まで）。`--session` を省くと自分のセッション（`$CLAUDE_DECK_SESSION_ID`）。空文字で消す |

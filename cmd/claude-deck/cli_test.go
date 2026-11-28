@@ -417,6 +417,9 @@ func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 		{name: "clear with an extra positional argument", command: "clear", args: []string{"--id", "abc", "extra"}},
 		{name: "clear does not take -p", command: "clear", args: []string{"--id", "abc", "-p", "x"}},
 		{name: "send without -p", command: "send", args: []string{"--id", "abc"}},
+		{name: "send --self outside a session", command: "send", args: []string{"--self", "-p", "x"}},
+		{name: "send --self and --id", command: "send", args: []string{"--self", "--id", "abc", "-p", "x"}},
+		{name: "clear does not take --self", command: "clear", args: []string{"--self"}},
 		{name: "reload with a positional argument", command: "reload", args: []string{"now"}},
 		{name: "version with an argument", command: "version", args: []string{"--json"}},
 		{name: "send with a blank -p", command: "send", args: []string{"--id", "abc", "-p", "  "}},
@@ -478,3 +481,12 @@ func (r failingReader) Read([]byte) (int, error) {
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+
+func TestParseSendArgs_Self(t *testing.T) {
+	t.Setenv("CLAUDE_DECK_SESSION_ID", "deck1")
+	got, err := parseSendArgs([]string{"--self", "-p", "/reload-plugins", "--dry-run"})
+	want := cliRequest{Op: "send", Self: true, Text: "/reload-plugins", DryRun: true}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("parseSendArgs() = (%+v, %v), want %+v", got, err, want)
+	}
+}
