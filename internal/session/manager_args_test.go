@@ -9,9 +9,9 @@ import (
 
 func TestStartSpec_SharedFlags(t *testing.T) {
 	tests := []struct {
-		name      string
-		sessName  string
-		pluginDir string
+		name        string
+		sessName    string
+		pluginDir   string
 		addDirs     []string
 		projectArgs []string
 		want        []string

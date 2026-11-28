@@ -65,4 +65,3 @@ func (d repoDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 
 	fmt.Fprintf(w, "%s", title) //nolint: errcheck
 }
-
