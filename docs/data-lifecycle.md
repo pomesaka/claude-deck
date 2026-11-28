@@ -11,6 +11,7 @@ claude-deck が読み書き・作成・削除する外部データの一覧と�
 | `{DataDir}/deck.db` | セッションメタデータ（SQLite） | claude-deck |
 | `{DataDir}/workspace/<encoded-repo>/<name>/` | jj ワークスペースディレクトリ | claude-deck |
 | `{DataDir}/plugin/` | deck-status プラグイン（バイナリから書き出す） | claude-deck |
+| `{DataDir}/deck.db` の `sent_texts` | claude-deck が利用者の代わりに打った文の記録（セッション、時刻、送り元、文の SHA-256）。届けたときだけ書く。消さない。セッションの行が prune で消えても、会話の記録は残るので、見分けるための行も残す | CLI の `new` と `fork` の `--prompt`、`send`、`broadcast`（スラッシュコマンドは除く）。最初の指示の行は、SessionStart の hook が Claude Code のセッション ID を埋める |
 | `{DataDir}/tui.lock` | 動いている TUI の pid と起動したパス。TUI が動いている間 flock を持ち、`claude-deck reload` はこれで TUI を見つける。消さない（ロックが外れていれば、残った中身は読まない） | TUI |
 | `{DataDir}/rate-limits.json` | アカウントのレート制限（5 時間枠と 7 日枠）。セッションが報告するたびに上書きする | claude-deck |
 | `~/.local/share/claude-deck/debug.log` | デバッグログ。`CLAUDE_DECK_DEBUG` を設定したときだけ書く。値が `1` か `true` ならこのパス（`XDG_DATA_HOME` があればその下。`data_dir` には従わない）、それ以外ならその値のパスに書く | claude-deck |

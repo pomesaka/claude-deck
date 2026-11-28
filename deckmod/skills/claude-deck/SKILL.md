@@ -27,6 +27,7 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
 | `alias [--session ID\|NAME] <ALIAS>` | セッションに表示用の名前を付ける。TUI の一覧で、セッション名と並べて出る |
 | `gc [--dry-run]` | どのセッションのものでもないワークスペースと、消えたワークスペースについての Claude Code の記録を消す |
 | `reload [--dry-run]` | 動いている TUI を、そのバイナリ（TUI を起動したパス）で起動し直す。claude-deck をビルドし直した後に打つ。新しいバイナリが動かないときと、TUI が操作の途中のときは起動し直さず、0 以外で終わる。セッションは止まらない。出力の `tui_revision` と `cli_revision` が違えば、TUI は打った側のビルドを動かしていない |
+| `sent [--since TIME]` | claude-deck が利用者の代わりに打った文（`new` と `fork` の `--prompt`、`send`、`broadcast`）の記録を、古い順に返す。スラッシュコマンドは記録しない。`{session_id, claude_session_id, sent_at, source, text_sha256}`。`--since` は RFC 3339 か、今からさかのぼる長さ（`24h`） |
 | `project list` | 設定ファイルにある、プロジェクトごとの設定を返す |
 | `project args [--clear] <DIR> [-- <ARG>...]` | そのリポジトリで Claude Code を起動するときに足す引数を読み書きする |
 
@@ -91,6 +92,15 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
 - `broadcast` の前に、同じ絞り込みの `list` か `--dry-run` で宛先を確かめる。`--dry-run` の出力で、`skipped_reason` が空のものが送る先、入っているものが飛ばす先
 - 文は 1 行だけ。改行を含む文と空の文は断られる
 - `broadcast` は自分を飛ばす。自分に打つのは `send --self` を明示したときだけ
+
+## 会話の記録から利用者の発言だけを取る
+
+claude-deck が打った文も、Claude Code の会話の記録では利用者が打った発言（origin が human）になる。記事やまとめに利用者の言葉として引く前に、次のように外す。
+
+1. 記録の user の行の文を、そのまま SHA-256 にする
+2. `sent` の行のうち、`claude_session_id` がその記録のセッションで、`text_sha256` が同じものがあれば、claude-deck が打った文として外す
+3. フォークした会話の記録は、元の会話の行から始まる。フォークの記録では、`forked_from` のセッションの行とも照らす
+4. スラッシュコマンド（`clear`、`-p /reload-plugins`）は記録の上で `<command-name>` の行になり、`sent` には出ない。利用者の発言として引かない
 
 ## clear
 

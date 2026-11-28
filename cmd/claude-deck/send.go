@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/pomesaka/claude-deck/internal/session"
 	"github.com/pomesaka/claude-deck/internal/store"
@@ -128,6 +129,9 @@ func sendSession(st *store.Store, runner *tmux.Runner, self session.DeckSessionI
 	} else {
 		s, sent, err = session.SendStored(st, runner, self, key, text, dryRun)
 	}
+	if sent {
+		noteSent(st, s, session.SentBySend, text)
+	}
 	if err != nil {
 		return SendInfo{}, err
 	}
@@ -168,6 +172,18 @@ func broadcast(st *store.Store, runner *tmux.Runner, self session.DeckSessionID,
 		if d.Skipped != nil {
 			infos[i].SkippedReason = d.Skipped.Error()
 		}
+		if d.Sent {
+			noteSent(st, d.Session, session.SentByBroadcast, text)
+		}
 	}
 	return infos, nil
+}
+
+// noteSent records that text reached s (session.RecordSent), and warns on
+// stderr when it could not: a text with no row is read as the user's own words.
+// WHY 送ったことは取り消さない: 文はもう届いている。
+func noteSent(st *store.Store, s session.Snapshot, source session.SentSource, text string) {
+	if _, err := session.RecordSent(st, s, source, text, time.Now()); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v; claude-deck sent will not list it\n", err)
+	}
 }

@@ -142,6 +142,7 @@ claude-deck broadcast -p /reload-plugins --repo api   # the same, into every liv
 claude-deck clear --id maika-7c78   # send -p /clear
 claude-deck close maika-7c78        # stop it and remove its workspace (ID or name)
 claude-deck reload                  # after a build, start the running TUI again from it; sessions keep running
+claude-deck sent --since 24h        # the texts claude-deck typed for you (--prompt, send, broadcast)
 ```
 
 Every session claude-deck starts also gets the bundled `deck-status:claude-deck` skill, which teaches Claude Code these commands. Ask such a session to "start another session to look into the flaky test" and the new one appears in the list, already working on it.
@@ -172,6 +173,8 @@ The `name` a session gets is also its Claude Code session name, so sessions can 
 `status` is one of `running`, `idle`, `subagent_running`, `waiting_approval`, `waiting_answer`, `waiting_action`, `completed` and `error`. `waiting_action` means the session ended its turn asking you to run a `!` command (a line starting with `! ` in its last message), or stopped on an API error (a network outage, say) and resumes when you send anything; `status_reason` says which. There is no wait command; poll `list`.
 
 `context` is the context window's fill as Claude Code last measured it, and `compactions` how many times the current conversation was compacted (`/clear` starts it again from 0); either is `null` until measured. `hints` lists next steps derived from these each time you list: `context_full` (the context is at least half full, or was compacted: run `claude-deck clear` at a good stopping point), `api_error` (an API error stopped it: send anything to resume), `stale` (it has not moved for two days: close it if it is not needed) and, after `stale`, `unsaved` (its workspace has uncommitted files or commits not pushed: decide before closing). `send` and `clear` refuse, with a non-zero exit, a session that is working, waiting on a dialog, or has text typed into its prompt, and never type into the session they run in. The text must be one line. `broadcast` takes the filters of `list` (`--alias`, `--repo`, `--only`, all of which must hold), so the same `list` shows where it will go, and refuses an `--only` name that matches no live session or more than one; it prints `{id, name, sent, skipped_reason, dry_run}` for each live session that passes, and fails only when none does.
+
+Claude Code records a text that claude-deck typed (the `--prompt` of `new` and `fork`, and `send` and `broadcast`) as a message you typed. To take only your own words from a transcript, hash each user message's text with SHA-256 and drop those that `claude-deck sent` lists with the same `text_sha256` and `claude_session_id`. A forked conversation starts with the lines of the one it forked from, so for a fork check the rows of its `forked_from` too. Slash commands (`clear`, `-p /reload-plugins`) are not listed: the transcript keeps them as `<command-name>` lines, not as typed. `sent` keeps its rows after the session is gone.
 
 `--prompt` (on `new` and `fork`) gives the session its first task; it stays an interactive session you can talk to afterwards. Without it, the session starts waiting for one.
 

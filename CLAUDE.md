@@ -114,6 +114,7 @@ CLI を変えたら、同梱のスキル `deck-status:claude-deck`（`deckmod/sk
 | `claude-deck tree` | なし。Claude Code のセッションを `/clear` とフォークの親子関係でたどった木を、テキストで出す（[用語集](docs/00-glossary.md) の ForkedFrom） |
 | `claude-deck close <ID\|NAME>` | `x` |
 | `claude-deck reload [--dry-run]` | なし。動いている TUI に、自分のバイナリ（起動したパスのリンクをたどった先）で起動し直すよう頼む。TUI は新しいバイナリの `version` が動くのを確かめてから exec し、カーソルの位置と Ghostty の右ペインを引き継ぐ。動かないとき、操作やダイアログの途中のとき、TUI が動いていないときは、起動し直さずに 0 以外で終わる。取り決めは [docs/architecture.md](docs/architecture.md#tui-の起動し直しreload) |
+| `claude-deck sent [--since TIME]` | なし。claude-deck が利用者の代わりに打った文（`--prompt`、`send`、`broadcast`。スラッシュコマンドは除く）の記録を返す。文は持たず SHA-256 だけを持ち、会話の記録の user の行と照らして、利用者が打った文と見分ける |
 | `claude-deck version` | なし。ビルドの revision を JSON で出す。reload がバイナリの確かめに使う |
 | `claude-deck send --id <ID\|NAME> -p <TEXT> [--dry-run]` | なし。そのセッションの tmux のウィンドウの入力欄に 1 行の文と Enter を打つ。`idle` か `waiting_action` で入力欄が空のときだけ送り、自分のセッションには送らない（`session.CheckSend`） |
 | `claude-deck send --self -p <TEXT> [--dry-run]` | なし。自分のセッションの入力欄に打つ。ターンの途中でも送り（文は列に入り、ターンの後に流れる）、承認や回答のダイアログの間と、打ちかけがあるときは断る（`session.CheckSendSelf`）。Mod を直した後の `/reload-plugins` に使う |

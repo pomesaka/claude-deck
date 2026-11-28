@@ -28,6 +28,13 @@ func RecordHookStatus(st *store.Store, sessionID DeckSessionID, status Activity,
 // RecordSessionStart links the Claude Code session ID reported by SessionStart.
 // See applySessionStart.
 func RecordSessionStart(st *store.Store, sessionID DeckSessionID, claudeID ClaudeSessionID, source string) error {
+	// The first instruction was recorded before the session had a Claude Code session ID.
+	// WHY ここで埋める: セッションの行が prune で消えた後も、送った文を会話の記録と ID で照らせるようにする。
+	if claudeID != "" {
+		if err := st.FillSentClaudeSessionID(string(sessionID), string(claudeID)); err != nil {
+			return err
+		}
+	}
 	_, err := st.Update(string(sessionID), func(r *store.Record) error {
 		applyContextOnSessionStart(r, source)
 		applySessionStart(r, string(claudeID), source)

@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pomesaka/claude-deck/internal/session"
 )
@@ -235,6 +236,17 @@ func TestParseCLIArgs(t *testing.T) {
 			want:    cliRequest{Op: "reload", DryRun: true},
 		},
 		{
+			name:    "sent",
+			command: "sent",
+			want:    cliRequest{Op: "sent"},
+		},
+		{
+			name:    "sent since a time",
+			command: "sent",
+			args:    []string{"--since", "2026-11-28T00:00:00Z"},
+			want:    cliRequest{Op: "sent", Since: time.Date(2026, 11, 28, 0, 0, 0, 0, time.UTC)},
+		},
+		{
 			name:    "version",
 			command: "version",
 			want:    cliRequest{Op: "version"},
@@ -421,6 +433,8 @@ func TestParseCLIArgsRejectsInvalid(t *testing.T) {
 		{name: "send --self and --id", command: "send", args: []string{"--self", "--id", "abc", "-p", "x"}},
 		{name: "clear does not take --self", command: "clear", args: []string{"--self"}},
 		{name: "reload with a positional argument", command: "reload", args: []string{"now"}},
+		{name: "sent with a bad time", command: "sent", args: []string{"--since", "yesterday"}},
+		{name: "sent with a negative duration", command: "sent", args: []string{"--since", "-1h"}},
 		{name: "version with an argument", command: "version", args: []string{"--json"}},
 		{name: "send with a blank -p", command: "send", args: []string{"--id", "abc", "-p", "  "}},
 		{name: "send with a line break", command: "send", args: []string{"--id", "abc", "-p", "a\nb"}},
@@ -488,5 +502,24 @@ func TestParseSendArgs_Self(t *testing.T) {
 	want := cliRequest{Op: "send", Self: true, Text: "/reload-plugins", DryRun: true}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Errorf("parseSendArgs() = (%+v, %v), want %+v", got, err, want)
+	}
+}
+
+func TestParseSince(t *testing.T) {
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		in   string
+		want time.Time
+	}{
+		{"", time.Time{}},
+		{"24h", now.Add(-24 * time.Hour)},
+		{"2026-11-28T09:00:00Z", time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got, err := parseSince(tt.in, now); err != nil || !got.Equal(tt.want) {
+				t.Errorf("parseSince(%q) = (%v, %v), want %v", tt.in, got, err, tt.want)
+			}
+		})
 	}
 }

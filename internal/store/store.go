@@ -224,6 +224,10 @@ func OpenPath(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("creating schema: %w", err)
 	}
+	if _, err := db.Exec(sentSchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating the sent_texts table: %w", err)
+	}
 	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrating schema: %w", err)

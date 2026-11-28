@@ -51,6 +51,12 @@ deck が作成時に付ける名前（`emiri-f7d9` のような形）。作っ�
 
 **フィールド**: `Session.ForkedFrom RuntimeSessionID`
 
+### 送った文（Sent）
+
+claude-deck が利用者の代わりにセッションへ打った文。`new` と `fork` の `--prompt`、`send`、`broadcast` で届けたときだけ記録する。Claude Code の会話の記録では、利用者が打った発言と同じ形（origin が human）になるので、この記録の SHA-256 と照らして見分ける。スラッシュコマンドは記録の上で別の形の行になるので記録しない。
+
+**型**: `store.Sent`、`session.SentSource`（送り元）
+
 ## 状態モデル
 
 ### Origin

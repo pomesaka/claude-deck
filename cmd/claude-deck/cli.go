@@ -39,7 +39,9 @@ type cliRequest struct {
 	// Text is what send and broadcast type into the sessions' input boxes.
 	Text string
 	// Self is send --self: type into the session this command runs in.
-	Self   bool
+	Self bool
+	// Since is the earliest time `sent` lists.
+	Since  time.Time
 	DryRun bool // gc, send, broadcast
 	// project (Dir is the project)
 	ProjectOp  string
@@ -88,6 +90,7 @@ var cliCommands = map[string]cliParser{
 	"broadcast": ignoreStdin(parseBroadcastArgs),
 	"hook":      ignoreStdin(parseHookArgs),
 	"reload":    ignoreStdin(parseReloadArgs),
+	"sent":      ignoreStdin(parseSentArgs),
 	"version":   ignoreStdin(parseVersionArgs),
 }
 
@@ -208,6 +211,12 @@ func runCLI(name string, args []string) error {
 	defer st.Close()
 
 	switch req.Op {
+	case "sent":
+		rows, err := st.ListSent(req.Since)
+		if err != nil {
+			return err
+		}
+		return printJSON(sentInfos(rows))
 	case "reload":
 		info, err := reloadTUI(cfg.DataDir, req.DryRun)
 		if err != nil {
@@ -287,6 +296,9 @@ func runCLI(name string, args []string) error {
 		if err != nil {
 			return err
 		}
+		if req.Prompt != "" {
+			noteSent(st, sess.Snapshot(), session.SentByNew, req.Prompt)
+		}
 		return printJSON(infoWithHints(sess.Snapshot()))
 	case "fork":
 		src, err := mgr.FindSession(req.Target)
@@ -296,6 +308,9 @@ func runCLI(name string, args []string) error {
 		sess, err := mgr.ForkSession(ctx, src.ID, req.Prompt)
 		if err != nil {
 			return err
+		}
+		if req.Prompt != "" {
+			noteSent(st, sess.Snapshot(), session.SentByFork, req.Prompt)
 		}
 		return printJSON(infoWithHints(sess.Snapshot()))
 	case "close":
