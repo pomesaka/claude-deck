@@ -141,6 +141,19 @@ func applyContextOnSessionStart(r *store.Record, source string) {
 	}
 }
 
+// markActive records that the session's process reported something through a
+// hook at now. A row that is not live is left as is: a hook delivered after the
+// exit was recorded did not come from a moving session.
+// WHY 新しい列: store の last_activity は TUI が終わるときにしか書かれず（sortTimeOf の WHY）、
+// TUI を動かしたままの CLI の list からは、動いているセッションも古く見える。hook はターンの
+// 始まりと終わりごとに store を書くので、その時刻を写す。
+func markActive(r *store.Record, now time.Time) {
+	if status, _ := StatusFromID(r.Status); !status.IsLive() {
+		return
+	}
+	r.ActiveAt = &now
+}
+
 // applyContextMeasured records the context window that session.measure
 // reported. tokens is nil until a response of the live window reports a fill.
 func applyContextMeasured(r *store.Record, tokens *int, window int) {

@@ -53,6 +53,7 @@ func (s *Session) recordLocked() store.Record {
 	if s.Compactions != nil {
 		r.Compactions = new(*s.Compactions)
 	}
+	r.ActiveAt = copyTimePtr(s.ActiveAt)
 	isolationToRecord(&r, s.Isolation)
 	return r
 }
@@ -99,6 +100,7 @@ func (s *Session) applyControlRecordLocked(r store.Record) {
 	if r.Compactions != nil {
 		s.Compactions = new(*r.Compactions)
 	}
+	s.ActiveAt = copyTimePtr(r.ActiveAt)
 }
 
 // applyProjectionRecordLocked copies the fields the TUI projects from JSONL

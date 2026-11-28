@@ -13,8 +13,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pomesaka/claude-deck/internal/config"
+	"github.com/pomesaka/claude-deck/internal/debuglog"
+	"github.com/pomesaka/claude-deck/internal/jj"
 	"github.com/pomesaka/claude-deck/internal/ratelimits"
 	"github.com/pomesaka/claude-deck/internal/session"
 	"github.com/pomesaka/claude-deck/internal/store"
@@ -120,7 +123,8 @@ type HintInfo struct {
 	Message string `json:"message"`
 }
 
-func infoFromSnapshot(s session.Snapshot) SessionInfo {
+// infoFromSnapshot is the JSON form of s with the hints given for it.
+func infoFromSnapshot(s session.Snapshot, hints []session.Hint) SessionInfo {
 	var chain []string
 	for _, id := range s.Chain() {
 		chain = append(chain, string(id))
@@ -129,14 +133,14 @@ func infoFromSnapshot(s session.Snapshot) SessionInfo {
 	if s.Context != nil {
 		context = &ContextInfo{UsedTokens: s.Context.UsedTokens, WindowTokens: s.Context.WindowTokens}
 	}
-	hints := []HintInfo{}
-	for _, h := range session.Hints(s) {
-		hints = append(hints, HintInfo{Kind: string(h.Kind), Message: h.Message})
+	hintInfos := []HintInfo{}
+	for _, h := range hints {
+		hintInfos = append(hintInfos, HintInfo{Kind: string(h.Kind), Message: h.Message})
 	}
 	return SessionInfo{
 		Context:         context,
 		Compactions:     s.Compactions,
-		Hints:           hints,
+		Hints:           hintInfos,
 		ID:              string(s.ID),
 		Name:            s.Name,
 		Alias:           s.Alias,
@@ -199,9 +203,11 @@ func runCLI(name string, args []string) error {
 			return err
 		}
 		infos := []SessionInfo{}
+		now := time.Now()
+		jjRunner := &jj.Runner{Command: cfg.Commands.JJ}
 		for _, s := range snaps {
 			if aliasMatches(s.Alias, req.Alias) && repoMatches(s.RepoPath, req.Repo) {
-				infos = append(infos, infoFromSnapshot(s))
+				infos = append(infos, infoFromSnapshot(s, listHints(s, now, jjRunner)))
 			}
 		}
 		return printJSON(infos)
@@ -210,7 +216,7 @@ func runCLI(name string, args []string) error {
 		if err != nil {
 			return err
 		}
-		return printJSON(infoFromSnapshot(snap))
+		return printJSON(infoWithHints(snap))
 	case "clear":
 		runner := &tmux.Runner{Command: cfg.Tmux.Command, SessionName: cfg.Tmux.SessionName}
 		info, err := clearSession(st, runner, session.DeckSessionID(os.Getenv(session.EnvSessionID)), req.Target, req.DryRun)
@@ -255,7 +261,7 @@ func runCLI(name string, args []string) error {
 		if err != nil {
 			return err
 		}
-		return printJSON(infoFromSnapshot(sess.Snapshot()))
+		return printJSON(infoWithHints(sess.Snapshot()))
 	case "fork":
 		src, err := mgr.FindSession(req.Target)
 		if err != nil {
@@ -265,7 +271,7 @@ func runCLI(name string, args []string) error {
 		if err != nil {
 			return err
 		}
-		return printJSON(infoFromSnapshot(sess.Snapshot()))
+		return printJSON(infoWithHints(sess.Snapshot()))
 	case "close":
 		sess, err := mgr.FindSession(req.Target)
 		if err != nil {
@@ -278,7 +284,9 @@ func runCLI(name string, args []string) error {
 		if res.WorkspaceKept != "" {
 			fmt.Fprintf(os.Stderr, "warning: jj could not snapshot the working copy, so the workspace was kept: %s\n", res.WorkspaceKept)
 		}
-		return printJSON(infoFromSnapshot(sess.Snapshot()))
+		// WHY ヒントを付けない: 閉じた直後の行に、閉じるかを勧める stale は要らない。
+		// ワークスペースを残したとき（WorkspaceKept）は、警告の行で知らせる。
+		return printJSON(infoFromSnapshot(sess.Snapshot(), nil))
 	default:
 		return fmt.Errorf("unknown command %q", req.Op)
 	}
@@ -372,6 +380,33 @@ func (o *optionalString) read(cmd string, stdin io.Reader) (string, error) {
 		return "", fmt.Errorf("%s: --prompt is empty", cmd)
 	}
 	return text, nil
+}
+
+// infoWithHints is the JSON form of s with its hints now. The workspace is
+// not read: only list shows unsaved.
+func infoWithHints(s session.Snapshot) SessionInfo {
+	return infoFromSnapshot(s, session.Hints(s, time.Now(), nil))
+}
+
+// workspaceReader reads the work a workspace holds outside trunk() (jj.Runner).
+type workspaceReader interface {
+	WorkspaceChanges(wsPath string) (files, commits int, err error)
+}
+
+// listHints are the hints `list` shows for s at now, with the workspace read
+// when session.NeedsWorkspaceRead asks for it.
+func listHints(s session.Snapshot, now time.Time, ws workspaceReader) []session.Hint {
+	var changes *session.WorkspaceChanges
+	if session.NeedsWorkspaceRead(s, now) {
+		files, commits, err := ws.WorkspaceChanges(s.WorkDir())
+		if err != nil {
+			// 読めなければ unsaved を出さない。stale は出すので、close の前に確かめる手がかりは残る。
+			debuglog.Printf("[list] reading the workspace of %s: %v", s.ID, err)
+		} else {
+			changes = &session.WorkspaceChanges{Files: files, Commits: commits}
+		}
+	}
+	return session.Hints(s, now, changes)
 }
 
 func parseListArgs(args []string) (cliRequest, error) {

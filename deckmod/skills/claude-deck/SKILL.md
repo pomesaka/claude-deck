@@ -41,12 +41,12 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
   "forked_from": "フォークで作ったセッションの、分岐元の Claude Code のセッション ID（別のセッションの session_chain の要素。フォークでなければ無い）",
   "context": { "used_tokens": "Claude Code が測った、最後の応答の入力のトークン数", "window_tokens": "モデルの文脈の窓の大きさ" },
   "compactions": "いまの会話で compaction が走った回数（/clear で 0 に戻る）",
-  "hints": [{ "kind": "context_full | api_error", "message": "次の一手の案" }]
+  "hints": [{ "kind": "context_full | api_error | stale | unsaved", "message": "次の一手の案" }]
 }
 ```
 
 - `context` と `compactions` は、測っていなければ `null`（0 とは別）。`hints` は無ければ `[]`
-- `hints` は `list` のたびに状態と測った値から出す。`context_full` は文脈が半分以上詰まったか compaction が走ったセッションで、きりのいい所で `clear` を打つ。`api_error` は API の誤りで止まったセッションで、SendMessage で何か送ると再開する
+- `hints` は `list` のたびに状態と測った値から出す。`context_full` は文脈が半分以上詰まったか compaction が走ったセッションで、きりのいい所で `clear` を打つ。`api_error` は API の誤りで止まったセッションで、SendMessage で何か送ると再開する。`stale` は 2 日動いていないセッションで、要らなければ `close` する。`unsaved` は `stale` のセッションのワークスペースに、未コミットの変更か push していないコミットがあるときに続けて出る。閉じる前に、入れるか要らないかを利用者に確かめる
 
 `tree` だけはテキストを返す。系譜をプログラムから読むときは、`list` の `session_chain` と `forked_from` を使う。
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/pomesaka/claude-deck/internal/store"
 )
@@ -18,6 +19,7 @@ import (
 func RecordHookStatus(st *store.Store, sessionID DeckSessionID, status Activity, w Wait) error {
 	_, err := st.Update(string(sessionID), func(r *store.Record) error {
 		applyHookStatus(r, status, w)
+		markActive(r, time.Now())
 		return nil
 	})
 	return err
@@ -29,6 +31,7 @@ func RecordSessionStart(st *store.Store, sessionID DeckSessionID, claudeID Claud
 	_, err := st.Update(string(sessionID), func(r *store.Record) error {
 		applyContextOnSessionStart(r, source)
 		applySessionStart(r, string(claudeID), source)
+		markActive(r, time.Now())
 		return nil
 	})
 	return err
@@ -39,6 +42,7 @@ func RecordSessionStart(st *store.Store, sessionID DeckSessionID, claudeID Claud
 func RecordContext(st *store.Store, sessionID DeckSessionID, tokens *int, window int) error {
 	_, err := st.Update(string(sessionID), func(r *store.Record) error {
 		applyContextMeasured(r, tokens, window)
+		markActive(r, time.Now())
 		return nil
 	})
 	return err

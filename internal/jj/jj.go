@@ -1,6 +1,7 @@
 package jj
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -258,4 +259,44 @@ func (r *Runner) ForgetWorkspace(dir, name string) error {
 	}
 
 	return nil
+}
+
+// WorkspaceChanges returns the work the workspace at wsPath holds that
+// nobody else has: how many files its working-copy commit (@) changes, and how
+// many non-empty commits between trunk() and @- no remote bookmark holds
+// (not pushed).
+//
+// 既知の制約: GitHub で squash か rebase でマージした後、元のコミットを手元から捨てていなければ、
+// trunk の祖先にならないので数える。push 済みのブランチを消した後も同じ。
+//
+// WHY --ignore-working-copy: ほかのセッションの作業コピーを snapshot しない（GetNearestBookmark の WHY）。
+// そのため、最後の snapshot の後に書かれたファイルは数えない。数えるのは、そのセッションの jj が最後に取り込んだ所まで。
+// WHY NOT run（lockRepo）を通す: 操作を書かないので分岐の元にならず、list のたびに close や new の jj を待たない。
+func (r *Runner) WorkspaceChanges(wsPath string) (files, commits int, err error) {
+	read := func(args ...string) (int, error) {
+		cmd := exec.Command(r.command(), append([]string{"--ignore-working-copy", "--color=never"}, args...)...)
+		cmd.Dir = wsPath
+		out, err := cmd.Output()
+		if err != nil {
+			var stderr string
+			if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+				stderr = strings.TrimSpace(string(ee.Stderr))
+			}
+			return 0, fmt.Errorf("jj %s: %w: %s", strings.Join(args, " "), err, stderr)
+		}
+		n := 0
+		for line := range strings.Lines(string(out)) {
+			if strings.TrimSpace(line) != "" {
+				n++
+			}
+		}
+		return n, nil
+	}
+	if files, err = read("diff", "-r", "@", "--name-only"); err != nil {
+		return 0, 0, err
+	}
+	if commits, err = read("log", "--no-graph", "-r", "(trunk()..@-) ~ ::remote_bookmarks() ~ empty()", "-T", `change_id ++ "\n"`); err != nil {
+		return 0, 0, err
+	}
+	return files, commits, nil
 }

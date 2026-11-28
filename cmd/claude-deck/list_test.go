@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pomesaka/claude-deck/internal/session"
 	"github.com/pomesaka/claude-deck/internal/store"
@@ -38,7 +41,7 @@ func TestInfoFromSnapshot_Context(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			snap := session.Snapshot{ID: "abc", Origin: session.OriginDeck, Status: session.StatusIdle, Context: tt.context, Compactions: tt.compactions}
-			out, err := json.Marshal(infoFromSnapshot(snap), jsontext.EscapeForHTML(false))
+			out, err := json.Marshal(infoFromSnapshot(snap, session.Hints(snap, time.Time{}, nil)), jsontext.EscapeForHTML(false))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -72,7 +75,7 @@ func listedHints(t *testing.T, st *store.Store, id string) []HintInfo {
 	}
 	for _, s := range snaps {
 		if string(s.ID) == id {
-			return infoFromSnapshot(s).Hints
+			return infoFromSnapshot(s, session.Hints(s, time.Now(), nil)).Hints
 		}
 	}
 	t.Fatalf("session %s not listed", id)
@@ -100,3 +103,64 @@ func TestHooksReachList(t *testing.T) {
 	}
 }
 
+// A session that rested for three days is stale in list until a hook reports it moving.
+func TestHooksReachList_Stale(t *testing.T) {
+	old := time.Now().Add(-72 * time.Hour)
+	st := openCLIStore(t, store.Record{ID: "abc", Name: "anna-8cc7", Status: "idle", StartedAt: old, Isolation: store.IsolationDirect})
+	if got := listedHints(t, st, "abc"); len(got) != 1 || got[0].Kind != string(session.HintStale) {
+		t.Errorf("after three days: hints = %+v, want one stale", got)
+	}
+	if err := session.RecordHookStatus(st, "abc", session.ActivityRunning, session.Wait{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.RecordHookStatus(st, "abc", session.ActivityIdle, session.Wait{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedHints(t, st, "abc"); len(got) != 0 {
+		t.Errorf("after a turn: hints = %+v, want none", got)
+	}
+}
+
+// fakeWorkspaces answers WorkspaceChanges for listHints and records the paths read.
+type fakeWorkspaces struct {
+	files, commits int
+	err            error
+	read           []string
+}
+
+func (f *fakeWorkspaces) WorkspaceChanges(wsPath string) (int, int, error) {
+	f.read = append(f.read, wsPath)
+	return f.files, f.commits, f.err
+}
+
+// list reads a workspace only for a stale session that has one, and a failed read drops only unsaved.
+func TestListHints_ReadsOnlyStaleWorkspaces(t *testing.T) {
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	old, recent := new(now.Add(-72*time.Hour)), new(now.Add(-time.Hour))
+	tests := []struct {
+		name      string
+		iso       session.Isolation
+		activeAt  *time.Time
+		ws        fakeWorkspaces
+		wantRead  []string
+		wantKinds []string
+	}{
+		{"stale with a workspace", session.WorkspaceIsolation("/ws/anna"), old, fakeWorkspaces{files: 1}, []string{"/ws/anna"}, []string{"stale", "unsaved"}},
+		{"stale with a clean workspace", session.WorkspaceIsolation("/ws/anna"), old, fakeWorkspaces{}, []string{"/ws/anna"}, []string{"stale"}},
+		{"recent with a workspace", session.WorkspaceIsolation("/ws/anna"), recent, fakeWorkspaces{files: 1}, nil, nil},
+		{"stale without a workspace", session.DirectIsolation("/repo"), old, fakeWorkspaces{files: 1}, nil, []string{"stale"}},
+		{"a workspace jj cannot read", session.WorkspaceIsolation("/ws/anna"), old, fakeWorkspaces{err: errors.New("jj failed")}, []string{"/ws/anna"}, []string{"stale"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := session.Snapshot{ID: "abc", Name: "anna", Origin: session.OriginDeck, Status: session.StatusIdle, Isolation: tt.iso, ActiveAt: tt.activeAt}
+			var kinds []string
+			for _, h := range listHints(s, now, &tt.ws) {
+				kinds = append(kinds, string(h.Kind))
+			}
+			if !slices.Equal(tt.ws.read, tt.wantRead) || !slices.Equal(kinds, tt.wantKinds) {
+				t.Errorf("read %v, hints %v; want read %v, hints %v", tt.ws.read, kinds, tt.wantRead, tt.wantKinds)
+			}
+		})
+	}
+}

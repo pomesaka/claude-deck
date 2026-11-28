@@ -193,3 +193,50 @@ func TestLockRepo(t *testing.T) {
 		})
 	}
 }
+
+func TestRunner_WorkspaceChanges(t *testing.T) {
+	_, ws := realJJRepo(t, "w")
+	dir := ws["w"]
+	r := &Runner{}
+	write := func(name string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	steps := []struct {
+		name        string
+		do          func()
+		wantFiles   int
+		wantCommits int
+	}{
+		{"a new workspace holds nothing", func() {}, 0, 0},
+		// The session's own jj snapshots the files; until then they are not counted.
+		{"files not yet snapshotted are not counted", func() { write("a"); write("b") }, 0, 0},
+		{"snapshotted files are counted", func() { runJJ(t, dir, "status") }, 2, 0},
+		{"a commit is counted once it is @-", func() { runJJ(t, dir, "commit", "-m", "x") }, 0, 1},
+		{"an empty commit is not counted", func() { runJJ(t, dir, "new") }, 0, 1},
+		// A remote bookmark on the commit: it was pushed.
+		{"a pushed commit is not counted", func() {
+			runJJ(t, dir, "git", "remote", "add", "origin", t.TempDir())
+			runJJ(t, dir, "bookmark", "create", "feat", "-r", "@-")
+			runJJ(t, dir, "bookmark", "track", "feat@origin")
+		}, 0, 1},
+	}
+	for _, st := range steps {
+		st.do()
+		ops := runJJ(t, dir, "--ignore-working-copy", "op", "log", "--no-graph", "-T", `id ++ "\n"`)
+		files, commits, err := r.WorkspaceChanges(dir)
+		if err != nil {
+			t.Fatalf("%s: WorkspaceChanges: %v", st.name, err)
+		}
+		if files != st.wantFiles || commits != st.wantCommits {
+			t.Errorf("%s: WorkspaceChanges() = (%d, %d), want (%d, %d)", st.name, files, commits, st.wantFiles, st.wantCommits)
+		}
+		if after := runJJ(t, dir, "--ignore-working-copy", "op", "log", "--no-graph", "-T", `id ++ "\n"`); after != ops {
+			t.Errorf("%s: WorkspaceChanges wrote a jj operation", st.name)
+		}
+	}
+	if _, _, err := r.WorkspaceChanges(t.TempDir()); err == nil {
+		t.Error("WorkspaceChanges outside a repository succeeded")
+	}
+}

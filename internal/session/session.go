@@ -244,6 +244,8 @@ type Session struct {
 	// 測っていなければ nil。
 	Context     *ContextUsage `json:"-"`
 	Compactions *int          `json:"-"`
+	// ActiveAt は hook が最後に何かを報告した時刻（store の active_at）。無ければ nil。
+	ActiveAt *time.Time `json:"-"`
 }
 
 // hasProcessLocked reports whether the session has a running process.
@@ -348,6 +350,23 @@ type Snapshot struct {
 	// Compactions is how many times the current Claude Code session compacted
 	// its conversation, or nil when it is not known.
 	Compactions *int
+	// ActiveAt is the last time the session's process reported anything
+	// through a hook, or nil.
+	ActiveAt *time.Time
+}
+
+// LastMoved is the last time the session is known to have done anything: the
+// latest of its last hook, its transcript's last write, its finish and its
+// start. Zero when none is known.
+// WHY NOT sortTimeOf に active_at を足す: sortTimeOf は一覧の並びと prune の順を決める。
+// active_at はターンごとに変わるので、足すと一覧の行が動き続ける。
+// 止まってからの長さを見る stale だけに使う。
+func (s Snapshot) LastMoved() time.Time {
+	t := sortTimeOf(s.LastActivity, s.FinishedAt, s.StartedAt)
+	if s.ActiveAt != nil && s.ActiveAt.After(t) {
+		t = *s.ActiveAt
+	}
+	return t
 }
 
 // HasProcess reports whether claude-deck has a live process for the session.
@@ -427,6 +446,7 @@ func (s *Session) Snapshot() Snapshot {
 	if s.Compactions != nil {
 		snap.Compactions = new(*s.Compactions)
 	}
+	snap.ActiveAt = copyTimePtr(s.ActiveAt)
 	return snap
 }
 

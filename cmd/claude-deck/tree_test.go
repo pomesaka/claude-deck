@@ -115,7 +115,7 @@ func TestInfoFromSnapshot_Lineage(t *testing.T) {
 		RuntimeSessionID: "55555555-bbbb",
 		PriorRuntimeIDs:  []session.RuntimeSessionID{"44444444-bbbb"},
 		ForkedFrom:       "22222222-aaaa",
-	})
+	}, nil)
 	if len(info.SessionChain) != 2 || info.SessionChain[0] != "44444444-bbbb" || info.SessionChain[1] != "55555555-bbbb" {
 		t.Errorf("SessionChain = %v, want [44444444-bbbb 55555555-bbbb]", info.SessionChain)
 	}

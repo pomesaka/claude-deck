@@ -46,7 +46,7 @@ func TestStore_RoundTrip(t *testing.T) {
 				Prompt: "hello", PermissionMode: "plan",
 				StartedAt: time.Unix(1_700_000_000, 1), LastActivity: time.Unix(1_700_000_050, 2),
 				ClosingAt: &closing, LaunchingAt: &finished, Pinned: true,
-				ContextTokens: new(120_000), ContextWindow: new(200_000), Compactions: new(2),
+				ContextTokens: new(120_000), ContextWindow: new(200_000), Compactions: new(2), ActiveAt: &closing,
 			},
 		},
 		{

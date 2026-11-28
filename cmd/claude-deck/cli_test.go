@@ -445,7 +445,7 @@ func TestInfoFromSnapshot_WorkDir(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := infoFromSnapshot(session.Snapshot{ID: "s", RepoPath: "/repo", Isolation: tt.iso}).WorkDir
+			got := infoFromSnapshot(session.Snapshot{ID: "s", RepoPath: "/repo", Isolation: tt.iso}, nil).WorkDir
 			if got != tt.want {
 				t.Errorf("work_dir = %q, want %q", got, tt.want)
 			}

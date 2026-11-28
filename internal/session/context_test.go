@@ -4,6 +4,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 )
 
 func TestHints(t *testing.T) {
@@ -35,7 +36,7 @@ func TestHints(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := Snapshot{ID: "abc", Origin: OriginDeck, Status: tt.status, WaitKind: tt.wait.Kind, StatusReason: tt.wait.Reason, Context: tt.context, Compactions: tt.compactions}
 			var got []HintKind
-			for _, h := range Hints(s) {
+			for _, h := range Hints(s, time.Time{}, nil) {
 				got = append(got, h.Kind)
 			}
 			if !slices.Equal(got, tt.wantKinds) {
@@ -58,7 +59,7 @@ func TestHints_Message(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hints := Hints(Snapshot{ID: "abc", Origin: OriginDeck, Status: StatusIdle, Context: tt.context, Compactions: tt.compactions})
+			hints := Hints(Snapshot{ID: "abc", Origin: OriginDeck, Status: StatusIdle, Context: tt.context, Compactions: tt.compactions}, time.Time{}, nil)
 			if len(hints) != 1 || hints[0].Message != tt.want {
 				t.Errorf("Hints() = %+v, want one with message %q", hints, tt.want)
 			}

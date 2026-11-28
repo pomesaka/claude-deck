@@ -67,6 +67,7 @@ CLI のサブコマンドやフラグを変えたら、スキルも同時に直�
 - compaction の回数はプラグインから送らない。`classic.SessionStart` の source が `compact` のとき、`session-start` の中で 1 足す。数える場所を状態の遷移の関数 1 か所にでき、プラグインの読み込み直しで数が失われない
 - source が `clear` と、新しいセッションの `startup` で回数を 0 に、`fork` で「分からない」（`null`）にする。`resume` では変えない。`clear` と `compact` では、トークン数を「測っていない」に戻す。古い使用率が残ると、空にした直後もヒントが出続ける
 - `hints` は保存せず、`list` のたびに状態と測った値から出す（`session.Hints`）
+- `hook` の書き込み（`status`、`session-start`、`context`）は、生きている行の `active_at` に時刻を入れる。`list` は、これを最後に動いた時刻に含めて `stale` を決める（`Snapshot.LastMoved`、`session.IsStale`）。`unsaved` のために jj を読むのは `list` だけで、ほかのセッションの作業コピーを書き換えない読み方にする（`jj.Runner.WorkspaceChanges`）
 
 ## レート制限
 

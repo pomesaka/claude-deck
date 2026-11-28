@@ -233,6 +233,28 @@ func deref(n *int) any {
 	return *n
 }
 
+func TestMarkActive(t *testing.T) {
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		status string
+		want   *time.Time
+	}{
+		{"a live row", "idle", &now},
+		{"a finished row is left as is", "completed", nil},
+		{"an unknown status is left as is", "bogus", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := store.Record{ID: "s", Status: tt.status}
+			markActive(&r, now)
+			if !reflect.DeepEqual(r.ActiveAt, tt.want) {
+				t.Errorf("ActiveAt = %v, want %v", r.ActiveAt, tt.want)
+			}
+		})
+	}
+}
+
 func TestApplyExited(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	earlier := now.Add(-time.Hour)
