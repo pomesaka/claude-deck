@@ -41,9 +41,47 @@ func TestApplyHookStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := store.Record{ID: "s", Status: tt.from, StatusReason: tt.fromReason}
-			changed := applyHookStatus(&r, tt.to, tt.reason)
+			if tt.fromReason != "" {
+				r.WaitKind = string(WaitCommand)
+			}
+			changed := applyHookStatus(&r, tt.to, Wait{Kind: WaitCommand, Reason: tt.reason})
 			if r.Status != tt.wantStatus || r.StatusReason != tt.wantReason || changed != tt.wantChanged {
 				t.Errorf("got (%q, %q, %v), want (%q, %q, %v)", r.Status, r.StatusReason, changed, tt.wantStatus, tt.wantReason, tt.wantChanged)
+			}
+		})
+	}
+}
+
+func TestApplyHookStatus_WaitKind(t *testing.T) {
+	const reason = "API の誤りで止まりました。何か送ると再開します"
+	tests := []struct {
+		name        string
+		from        string
+		fromKind    string
+		to          Activity
+		wait        Wait
+		wantKind    string
+		wantChanged bool
+	}{
+		{"waiting for an API error keeps its kind", "running", "", ActivityWaitingAction, Wait{Kind: WaitAPIError, Reason: reason}, "api_error", true},
+		{"a new kind for the same reason is a change", "waiting_action", "command", ActivityWaitingAction, Wait{Kind: WaitAPIError, Reason: reason}, "api_error", true},
+		// A row an older binary wrote has the reason but no kind.
+		{"a kind for a row that has none is a change", "waiting_action", "", ActivityWaitingAction, Wait{Kind: WaitAPIError, Reason: reason}, "api_error", true},
+		{"the same kind and reason is not a change", "waiting_action", "api_error", ActivityWaitingAction, Wait{Kind: WaitAPIError, Reason: reason}, "api_error", false},
+		// A session that runs an older plugin sends no kind.
+		{"a wait without a kind is kept without one", "running", "", ActivityWaitingAction, Wait{Reason: reason}, "", true},
+		{"leaving the wait clears the kind", "waiting_action", "api_error", ActivityRunning, Wait{}, "", true},
+		{"a kind with another activity is dropped", "running", "", ActivityIdle, Wait{Kind: WaitCommand, Reason: reason}, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := store.Record{ID: "s", Status: tt.from, StatusReason: reason, WaitKind: tt.fromKind}
+			if tt.from != "waiting_action" {
+				r.StatusReason = ""
+			}
+			changed := applyHookStatus(&r, tt.to, tt.wait)
+			if r.WaitKind != tt.wantKind || changed != tt.wantChanged {
+				t.Errorf("got (%q, %v), want (%q, %v)", r.WaitKind, changed, tt.wantKind, tt.wantChanged)
 			}
 		})
 	}
@@ -56,7 +94,7 @@ func TestStatusReasonOnlyWhileWaitingAction(t *testing.T) {
 	const reason = "ログインしてください"
 	for _, a := range activities {
 		r := store.Record{ID: "s", Status: StatusWaitingAction.ID(), StatusReason: reason}
-		applyHookStatus(&r, a, reason)
+		applyHookStatus(&r, a, Wait{Kind: WaitCommand, Reason: reason})
 		if r.Status != StatusWaitingAction.ID() && r.StatusReason != "" {
 			t.Errorf("hook %v: status %q kept reason %q", a.Status(), r.Status, r.StatusReason)
 		}
@@ -117,6 +155,82 @@ func TestApplySessionStart(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApplyContextOnSessionStart(t *testing.T) {
+	tests := []struct {
+		name            string
+		chain           []string
+		compactions     *int
+		source          string
+		wantCompactions *int
+		wantTokens      bool // the fill is still known
+	}{
+		{"startup of a new session counts from 0", nil, nil, SourceStartup, new(0), false},
+		{"startup of a known conversation keeps the count", []string{"a"}, new(2), SourceStartup, new(2), true},
+		{"resume keeps the count and the fill", []string{"a"}, new(2), SourceResume, new(2), true},
+		{"clear goes back to 0", []string{"a"}, new(3), SourceClear, new(0), false},
+		{"clear of an unknown count goes to 0", []string{"a"}, nil, SourceClear, new(0), false},
+		{"compact counts one more", []string{"a"}, new(1), SourceCompact, new(2), false},
+		{"compact of an unknown count stays unknown", []string{"a"}, nil, SourceCompact, nil, false},
+		{"fork does not know the source's count", nil, new(0), SourceFork, nil, false},
+		{"an unknown source changes nothing", []string{"a"}, new(1), "other", new(1), true},
+	}
+	t.Run("a finished row is left as is", func(t *testing.T) {
+		r := store.Record{ID: "s", Status: "completed", SessionChain: []string{"a"}, Compactions: new(1)}
+		applyContextOnSessionStart(&r, SourceCompact)
+		if *r.Compactions != 1 {
+			t.Errorf("Compactions = %d, want 1", *r.Compactions)
+		}
+	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := store.Record{ID: "s", Status: "idle", SessionChain: tt.chain, Compactions: tt.compactions,
+				ContextTokens: new(150_000), ContextWindow: new(200_000)}
+			applyContextOnSessionStart(&r, tt.source)
+			if !reflect.DeepEqual(r.Compactions, tt.wantCompactions) {
+				t.Errorf("Compactions = %v, want %v", deref(r.Compactions), deref(tt.wantCompactions))
+			}
+			if (r.ContextTokens != nil) != tt.wantTokens {
+				t.Errorf("ContextTokens = %v, want known = %v", deref(r.ContextTokens), tt.wantTokens)
+			}
+			if r.ContextWindow == nil || *r.ContextWindow != 200_000 {
+				t.Errorf("ContextWindow = %v, want 200000 kept", deref(r.ContextWindow))
+			}
+		})
+	}
+}
+
+func TestApplyContextMeasured(t *testing.T) {
+	tests := []struct {
+		name       string
+		before     *int
+		tokens     *int
+		window     int
+		wantTokens *int
+	}{
+		{"first measurement", nil, new(1_000), 200_000, new(1_000)},
+		{"a new measurement replaces the last", new(1_000), new(90_000), 200_000, new(90_000)},
+		{"zero tokens is a measurement", nil, new(0), 200_000, new(0)},
+		{"no fill yet in the live window", new(90_000), nil, 1_000_000, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := store.Record{ID: "s", Status: "idle", ContextTokens: tt.before}
+			applyContextMeasured(&r, tt.tokens, tt.window)
+			if !reflect.DeepEqual(r.ContextTokens, tt.wantTokens) || r.ContextWindow == nil || *r.ContextWindow != tt.window {
+				t.Errorf("got (%v, %v), want (%v, %d)", deref(r.ContextTokens), deref(r.ContextWindow), deref(tt.wantTokens), tt.window)
+			}
+		})
+	}
+}
+
+// deref prints a nullable figure in a failure message.
+func deref(n *int) any {
+	if n == nil {
+		return nil
+	}
+	return *n
 }
 
 func TestApplyExited(t *testing.T) {

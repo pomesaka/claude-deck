@@ -27,17 +27,18 @@ CLI のサブコマンドやフラグを変えたら、スキルも同時に直�
 
 | Claude Code のイベント | store への書き込み | 備考 |
 |---|---|---|
-| `classic.SessionStart`（`agent_id` なし） | `hook session-start --claude-session-id <id> --source <source>` | SessionChain を更新する。モデルに claude-deck の案内を渡す |
+| `classic.SessionStart`（`agent_id` なし） | `hook session-start --claude-session-id <id> --source <source>` | SessionChain を更新する。compaction の回数と文脈の量も更新する（下の「文脈の量」）。モデルに claude-deck の案内を渡す |
 | `turn.start`（メイン） | `hook status running`。待ちの理由を消す | ほかの Mod が `prompt.submit` で止めた入力では発火しない（Claude Code 2.1.327 で確認） |
 | `turn.start`（サブエージェント） | メインのターンが終わった後で、待ち状態でも `waiting_action` でもなければ `subagent_running` | サブエージェントの実行でも発火する（同じ版で確認）。Mod がメインの停止中に立てたエージェントは、メインの `turn.complete` を通らない |
 | `tool.call`（メイン） | `running`（待ち状態のときは変えない）。`AskUserQuestion` のときは `waiting_answer`。実行中のツール呼び出しがすべて返ったら `running` | `next(e)` は承認ダイアログと質問への回答を待つので、返った時点でユーザーが答えている。並行して走る別の呼び出しの承認ダイアログが開いている間は、待ち状態を消さない |
 | `tool.call`（サブエージェントと、Mod が起こした呼び出し） | 実行中のツール呼び出しがすべて返り、直前が `waiting_approval` / `waiting_answer` なら `running`。メインのターンが終わった後なら、動いているサブエージェントの有無で `subagent_running` か `idle` | サブエージェントの承認ダイアログもユーザーを待たせる。Mod の `$.agent.spawn` は `agentId` の無い `Agent` の呼び出しとして、メインのターンの外でも届く。`tool_use_id` が `toolu_plugin_` で始まることで見分ける（Claude Code 2.1.327 で確認） |
 | `classic.PermissionRequest` | `waiting_approval`。`AskUserQuestion` のときは `waiting_answer` | サブエージェントでも書く |
-| `turn.complete`（メイン） | 待ちの理由（`! コマンド`か、`reason` が `error`）があれば `waiting_action --reason <理由>`。無ければ `idle`、動いているサブエージェントがあれば `subagent_running` | 拒否・中断・API エラーでも発火する。サブエージェントは `$.agent.list()` の `pending` / `running` / `waiting` を数える |
+| `turn.complete`（メイン） | 待ちの理由（`! コマンド`か、`reason` が `error`）があれば `waiting_action --reason <理由> --wait-kind <command か api_error>`。無ければ `idle`、動いているサブエージェントがあれば `subagent_running` | 拒否・中断・API エラーでも発火する。サブエージェントは `$.agent.list()` の `pending` / `running` / `waiting` を数える |
 | `turn.complete`（サブエージェント） | 直前が `subagent_running` で、動いているサブエージェントが無くなったら `idle` | メインのターンが終わった後も、バックグラウンドのサブエージェントは動き続ける |
 | `classic.Stop`（メイン） | 書かない。最後の返答から待ちの理由を作り、プラグインのメモリに置く。メインのターンが既に終わっていたら、`turn.complete` と同じ規則で書く | 下の「利用者の操作待ち」 |
 | `classic.SessionStart`（source が `clear`） | 待ちの理由があれば消して、`idle` か `subagent_running` | 頼んだ会話が消えるので、待ちも消す |
 | `session.measure`（`changed` に `rateLimits` があるとき） | `hook rate-limits <JSON>` | store ではなく `{DataDir}/rate-limits.json` に書く（下の節） |
+| `session.measure`（`changed` に `context` があるとき） | `hook context --tokens <N> --window <N>` | まだ応答の無い窓では `--tokens` が空（下の「文脈の量」） |
 
 サブエージェントとして数えるのは `$.agent.list()` に出るエージェントだけ。バックグラウンドのシェルとモニターは数えないので、それだけが動いている間は `idle` になる。ワークフローのエージェントも一覧に出ない（Mods の型定義 `AgentLoop.agentId` の説明。動作は未確認）。
 
@@ -55,7 +56,17 @@ CLI のサブコマンドやフラグを変えたら、スキルも同時に直�
 - `classic.Stop` の時点では store に書かない。メインの `turn.complete` で `idle` の代わりに `waiting_action` を書く
 - バックグラウンドのサブエージェントが動いていても `waiting_action` を出す。利用者にすることがあるほうを優先する
 - メインの `turn.complete` の `reason` が `error`（Claude Code が再試行し終えた後の API の誤り。通信が落ちたときなど）なら、同じ `waiting_action` を「API の誤りで止まりました。何か送ると再開します」の理由で書く。`idle` のままだと、報告を待っているだけのセッションと一覧で見分けられない。再開するには利用者が何か送るしかないので、新しい状態を作らずに操作待ちに入れる
+- 待ちの種類（store の `wait_kind`）を、理由の文と別に `--wait-kind` で渡す。`! コマンド`は `command`、API の誤りは `api_error`。`list` の `hints` は種類で決め、理由の文は一覧に出すだけにする。文で照らすと、言い回しを直したときにヒントが知らないうちに出なくなる。種類の無い古い行にはヒントを出さない
 - 次のメインの `turn.start`（利用者の次の発言）と `/clear` で外す。`! コマンド` の実行で `turn.start` が発火するかは未確認
+
+## 文脈の量
+
+`claude-deck list` の `context`、`compactions`、`hints` の元になる値は、Claude Code が測ったものを写す。claude-deck は見積もらない。
+
+- 使っているトークン数と窓の大きさは、`session.measure` の `context`（`tokens` と `window`）を `hook context` で store の行に書く（Claude Code 2.1.331 の型定義 `SessionMeasureInput`）。`tokens` は新しい会話と compaction の直後、次の応答まで無い
+- compaction の回数はプラグインから送らない。`classic.SessionStart` の source が `compact` のとき、`session-start` の中で 1 足す。数える場所を状態の遷移の関数 1 か所にでき、プラグインの読み込み直しで数が失われない
+- source が `clear` と、新しいセッションの `startup` で回数を 0 に、`fork` で「分からない」（`null`）にする。`resume` では変えない。`clear` と `compact` では、トークン数を「測っていない」に戻す。古い使用率が残ると、空にした直後もヒントが出続ける
+- `hints` は保存せず、`list` のたびに状態と測った値から出す（`session.Hints`）
 
 ## レート制限
 

@@ -19,6 +19,7 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
 | `list --repo TEXT` | リポジトリの名前（`repo_path` の末尾）にその文字列を含むセッションだけを返す。大文字と小文字を区別しない。`--alias` と組み合わせると両方に当たるものだけを返す |
 | `tree` | Claude Code のセッションを、`/clear` とフォークの親子関係でたどった木としてテキストで出す |
 | `close <ID\|NAME>` | プロセスを止め、ワークスペースを消す。JSONL とメタデータは残り、TUI から再開できる。jj が作業コピーを取り込めなかったときはワークスペースを残し、stderr に警告を出す |
+| `clear --id ID\|NAME [--dry-run]` | そのセッションの入力欄に `/clear` を打って Enter を送り、文脈を空にする。送るのは `idle` か `waiting_action` で、入力欄に打ちかけの文が無いときだけ。それ以外と自分のセッションには送らず、理由を出して 0 以外で終わる。`--dry-run` は送れるかだけを確かめる |
 | `alias [--session ID\|NAME] <ALIAS>` | セッションに表示用の名前を付ける。TUI の一覧で、セッション名と並べて出る |
 | `gc [--dry-run]` | どのセッションのものでもないワークスペースと、消えたワークスペースについての Claude Code の記録を消す |
 | `project list` | 設定ファイルにある、プロジェクトごとの設定を返す |
@@ -37,9 +38,15 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
   "status_reason": "waiting_action のとき、利用者がすること。実行する `!` のコマンドか、API の誤りで止まったこと（ほかの状態では無い）",
   "claude_session_id": "Claude Code のセッション ID（まだ届いていなければ無い）",
   "session_chain": ["/clear をまたいだ Claude Code のセッション ID。古い順で、末尾が claude_session_id"],
-  "forked_from": "フォークで作ったセッションの、分岐元の Claude Code のセッション ID（別のセッションの session_chain の要素。フォークでなければ無い）"
+  "forked_from": "フォークで作ったセッションの、分岐元の Claude Code のセッション ID（別のセッションの session_chain の要素。フォークでなければ無い）",
+  "context": { "used_tokens": "Claude Code が測った、最後の応答の入力のトークン数", "window_tokens": "モデルの文脈の窓の大きさ" },
+  "compactions": "いまの会話で compaction が走った回数（/clear で 0 に戻る）",
+  "hints": [{ "kind": "context_full | api_error", "message": "次の一手の案" }]
 }
 ```
+
+- `context` と `compactions` は、測っていなければ `null`（0 とは別）。`hints` は無ければ `[]`
+- `hints` は `list` のたびに状態と測った値から出す。`context_full` は文脈が半分以上詰まったか compaction が走ったセッションで、きりのいい所で `clear` を打つ。`api_error` は API の誤りで止まったセッションで、SendMessage で何か送ると再開する
 
 `tree` だけはテキストを返す。系譜をプログラムから読むときは、`list` の `session_chain` と `forked_from` を使う。
 
@@ -71,6 +78,12 @@ CLI は store と tmux を直接操作するので、TUI が起動していな�
 - 待機の通知は完了の合図ではない。相手が裏で走らせたコマンドの終了を待っているあいだにも届く。通知が来たのに報告が届いていなければ、`list` の `status` で相手の状態を確かめる
 - `status` が `idle` で報告が届いていなければ、相手は止まっている。報告を自分の画面に書いただけで終えていることが多いので、SendMessage で「報告が届いていない」と伝えて送り直させる。`running` なら作業中なので待つ
 - 相手が画面に書いた文はこちらに届かない。依頼文に「結果は SendMessage で返す」と書く
+
+## clear
+
+- 担当のセッションの `hints` に `context_full` が出たら、報告を受け取って次の仕事を頼む前に打つ。仕事の途中で打つと、相手は経緯を失う
+- 打った後の相手は何も覚えていない。次の依頼には、目的、対象のファイル、返してほしいものを書き直す
+- 断られたら（`running` など）、相手が止まってから打ち直す
 
 ## alias
 

@@ -17,18 +17,24 @@ let queue: Promise<boolean> = Promise.resolve(true)
 // WHY 判定用の hook に .catch(next(e)) を付ける: 状態の報告に失敗しても、ツール呼び出しや承認の流れは止めない。
 // deck() は失敗をすべて握りつぶすので、next を呼んだ後に例外が出ることはない。
 
+// What a waiting_action session waits for, as session.WaitKind spells it in Go.
+// WHY 理由の文と別に送る: claude-deck は種類でヒントを決め、文は一覧に出すだけにする。
+// 文で照らすと、言い回しを直したときにヒントが知らないうちに出なくなる。
+type WaitKind = 'command' | 'api_error'
+type Wait = { kind: WaitKind; reason: string }
+
 // The last status this process wrote successfully. Repeating it is skipped:
 // tool.call fires for every tool, and each write spawns a process and wakes the TUI.
 let lastStatus: DeckStatus | undefined
-// The reason written with lastStatus (waiting_action only).
-let lastReason: string | undefined
+// The wait written with lastStatus (waiting_action only).
+let lastWait: Wait | undefined
 
 // What the user has to do: run the `! command` found in the last message of the main turn (classic.Stop),
 // or send anything after an API error ended the turn (turn.complete).
 // Written as waiting_action when the turn ends; the next main turn and /clear clear it.
-let waitReason: string | undefined
+let wait: Wait | undefined
 
-const API_ERROR_REASON = 'API の誤りで止まりました。何か送ると再開します'
+const API_ERROR_WAIT: Wait = { kind: 'api_error', reason: 'API の誤りで止まりました。何か送ると再開します' }
 
 // Tool calls (main loop and subagents) between tool.call and its result.
 // WHY 数える: 並行に走るツール呼び出しの 1 つが終わった時点で Running に戻すと、
@@ -87,13 +93,13 @@ function deckContext(env: { bin: string; id: string }): string {
   ].join('\n')
 }
 
-async function setStatus($: EngineInterface, status: DeckStatus, reason?: string): Promise<void> {
-  if (status === lastStatus && reason === lastReason) return
-  // WHY いつも --reason を渡す: 呼び出しの形を 1 つにして、Go の契約のテスト（hook_contract_test.go）が読めるようにする。
-  // 空の --reason は、理由が無いという意味で CLI が受け付ける。
-  if (await deck($, ['status', status, '--reason', reason ?? ''])) {
+async function setStatus($: EngineInterface, status: DeckStatus, w?: Wait): Promise<void> {
+  if (status === lastStatus && w?.kind === lastWait?.kind && w?.reason === lastWait?.reason) return
+  // WHY いつも --reason と --wait-kind を渡す: 呼び出しの形を 1 つにして、Go の契約のテスト（hook_contract_test.go）が読めるようにする。
+  // 空の値は、待ちが無いという意味で CLI が受け付ける。
+  if (await deck($, ['status', status, '--reason', w?.reason ?? '', '--wait-kind', w?.kind ?? ''])) {
     lastStatus = status
-    lastReason = reason
+    lastWait = w
   }
 }
 
@@ -121,8 +127,8 @@ async function hasActiveSubagent($: EngineInterface): Promise<boolean> {
  * A `! command` the user was asked to run outranks subagents: the user has something to do either way.
  */
 async function setRestingStatus($: EngineInterface): Promise<void> {
-  if (waitReason !== undefined) {
-    await setStatus($, 'waiting_action', waitReason)
+  if (wait !== undefined) {
+    await setStatus($, 'waiting_action', wait)
     return
   }
   await setStatus($, (await hasActiveSubagent($)) ? 'subagent_running' : 'idle')
@@ -160,8 +166,8 @@ export const register: Register = on => {
     if (e.agent_id !== undefined) return next(e)
     await deck($, ['session-start', '--claude-session-id', e.session_id, '--source', e.source])
     // /clear drops the conversation that asked the user to act, so the wait goes with it.
-    if (e.source === 'clear' && waitReason !== undefined) {
-      waitReason = undefined
+    if (e.source === 'clear' && wait !== undefined) {
+      wait = undefined
       await setRestingStatus($)
     }
     const [env, result] = await Promise.all([deckEnv($), next(e)])
@@ -176,9 +182,9 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       inMainTurn = true
-      waitReason = undefined
+      wait = undefined
       await setStatus($, 'running')
-    } else if (!inMainTurn && !isWaiting() && waitReason === undefined) {
+    } else if (!inMainTurn && !isWaiting() && wait === undefined) {
       await setStatus($, 'subagent_running')
     }
     return next(e)
@@ -222,7 +228,8 @@ export const register: Register = on => {
   // WHY 既にターンが終わっていたら書く: Stop と turn.complete のどちらが先に届くかは確かめていない。
   on('classic.Stop', async ($, e, next) => {
     if (e.agent_id === undefined) {
-      waitReason = detectWait(e.last_assistant_message ?? '')
+      const reason = detectWait(e.last_assistant_message ?? '')
+      wait = reason === undefined ? undefined : { kind: 'command', reason }
       if (!inMainTurn) await setRestingStatus($)
     }
     return next(e)
@@ -248,7 +255,7 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       inMainTurn = false
-      if (e.reason === 'error') waitReason = API_ERROR_REASON
+      if (e.reason === 'error') wait = API_ERROR_WAIT
       await setRestingStatus($)
     } else if (lastStatus === 'subagent_running') {
       await setRestingStatus($)
@@ -259,9 +266,18 @@ export const register: Register = on => {
   // The rate limits are the account's, not the session's: every deck session
   // reports them to the one file the TUI watches, and the last report wins.
   // The JSON is read by ratelimits.ParseMeasured in Go.
+  //
+  // The context window is the session's own: its fill (the last response's input
+  // tokens) and the model's window, copied to the store for `claude-deck list`.
+  // WHY session.measure で取る: Mods の型定義（Claude Code 2.1.331 の SessionMeasureInput.context）に
+  // tokens と window がある。tokens は新しい会話と compaction の直後、次の応答まで無い。
+  // compaction の回数は送らない: SessionStart の source が compact のとき、claude-deck が store で数える。
   on('session.measure', async ($, e, next) => {
     if (e.changed.includes('rateLimits') && e.rateLimits.length > 0) {
       await deck($, ['rate-limits', JSON.stringify(e.rateLimits)])
+    }
+    if (e.changed.includes('context') && e.context.window > 0) {
+      await deck($, ['context', '--tokens', e.context.tokens === undefined ? '' : String(e.context.tokens), '--window', String(e.context.window)])
     }
     return next(e)
   })

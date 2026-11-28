@@ -41,12 +41,18 @@ func TestStore_RoundTrip(t *testing.T) {
 				ID: "b", Name: "maika-548e", RepoPath: "/repo", RepoName: "repo",
 				WorkspacePath: "/ws/maika-548e/sub", WorkspaceName: "maika-548e", SubProjectDir: "sub", Isolation: IsolationWorkspace,
 				SessionChain: []string{"old", "new"}, ForkedFrom: "source", Alias: "review-pr-12", Status: "completed", FinishedAt: &finished, PID: 42,
-				ErrorMessage: "boom", StatusReason: "ログインしてください", TerminalTitle: "title", BookmarkName: "feat/x",
+				ErrorMessage: "boom", StatusReason: "ログインしてください", WaitKind: "command", TerminalTitle: "title", BookmarkName: "feat/x",
 				LastJJRevision: "abc", LastJJParentRevision: "def",
 				Prompt: "hello", PermissionMode: "plan",
 				StartedAt: time.Unix(1_700_000_000, 1), LastActivity: time.Unix(1_700_000_050, 2),
 				ClosingAt: &closing, LaunchingAt: &finished, Pinned: true,
+				ContextTokens: new(120_000), ContextWindow: new(200_000), Compactions: new(2),
 			},
+		},
+		{
+			// 0 is a measurement, not "not measured".
+			name: "zero measurements stay zero",
+			rec:  Record{ID: "c", Status: "idle", Isolation: IsolationDirect, ContextTokens: new(0), ContextWindow: new(0), Compactions: new(0)},
 		},
 	}
 	for _, tt := range tests {

@@ -65,6 +65,34 @@ func (s Status) NeedsAttention() bool {
 	return s == StatusWaitingApproval || s == StatusWaitingAnswer || s == StatusWaitingAction
 }
 
+// WaitKind is what a waiting_action session waits for the user to do.
+// WHY 理由の文と別に持つ: 理由の文は deckmod が一覧に出すために作る文で、言い回しが変わる。
+// 文で照らすと、片方だけ直されたときにヒントが知らないうちに出なくなる。
+type WaitKind string
+
+const (
+	// WaitCommand: run the `! command` the last message asked for.
+	WaitCommand WaitKind = "command"
+	// WaitAPIError: an API error ended the turn; anything sent resumes it.
+	WaitAPIError WaitKind = "api_error"
+)
+
+// WaitKindFromID parses a WaitKind as the hook passes it.
+func WaitKindFromID(id string) (WaitKind, bool) {
+	switch k := WaitKind(id); k {
+	case WaitCommand, WaitAPIError:
+		return k, true
+	}
+	return "", false
+}
+
+// Wait is what a waiting_action session waits for: its kind, and the reason
+// the list shows.
+type Wait struct {
+	Kind   WaitKind
+	Reason string
+}
+
 // IsLive reports whether the status is one of the activities of a running process.
 func (s Status) IsLive() bool {
 	switch s {
@@ -208,9 +236,14 @@ type Session struct {
 	LastActivity   time.Time `json:"last_activity,omitzero"`
 
 	// --- Runtime fields (not persisted, protected by sess.mu unless noted) ---
-	CurrentTool  string `json:"-"` // パーサー検出中のツール名
-	ErrorMessage string `json:"-"` // 終了の理由（store の error_message）
-	StatusReason string `json:"-"` // 利用者を待つ理由（store の status_reason）。Status が WaitingAction のときだけ入る
+	CurrentTool  string   `json:"-"` // パーサー検出中のツール名
+	ErrorMessage string   `json:"-"` // 終了の理由（store の error_message）
+	StatusReason string   `json:"-"` // 利用者を待つ理由（store の status_reason）。Status が WaitingAction のときだけ入る
+	WaitKind     WaitKind `json:"-"` // 何を待っているか（store の wait_kind）。StatusReason と同じときだけ入る
+	// Context と Compactions は Claude Code が測った値の写し（store の context_tokens、context_window、compactions）。
+	// 測っていなければ nil。
+	Context     *ContextUsage `json:"-"`
+	Compactions *int          `json:"-"`
 }
 
 // hasProcessLocked reports whether the session has a running process.
@@ -305,9 +338,16 @@ type Snapshot struct {
 	CurrentTool    string
 	ErrorMessage   string
 	StatusReason   string
-	TerminalTitle  string
-	BookmarkName   string
-	Elapsed        time.Duration
+	// WaitKind is what a waiting_action session waits for, or "".
+	WaitKind      WaitKind
+	TerminalTitle string
+	BookmarkName  string
+	Elapsed       time.Duration
+	// Context is the context window's fill Claude Code last measured, or nil.
+	Context *ContextUsage
+	// Compactions is how many times the current Claude Code session compacted
+	// its conversation, or nil when it is not known.
+	Compactions *int
 }
 
 // HasProcess reports whether claude-deck has a live process for the session.
@@ -376,9 +416,16 @@ func (s *Session) Snapshot() Snapshot {
 		CurrentTool:      s.CurrentTool,
 		ErrorMessage:     s.ErrorMessage,
 		StatusReason:     s.StatusReason,
+		WaitKind:         s.WaitKind,
 		TerminalTitle:    s.TerminalTitle,
 		BookmarkName:     s.BookmarkName,
 		Elapsed:          elapsed,
+	}
+	if s.Context != nil {
+		snap.Context = new(*s.Context)
+	}
+	if s.Compactions != nil {
+		snap.Compactions = new(*s.Compactions)
 	}
 	return snap
 }

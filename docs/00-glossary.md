@@ -75,7 +75,7 @@ deck セッションの実行状態。動いている間の活動（Activity）�
 | SubagentRunning | メインのターンは終わったが、バックグラウンドのサブエージェントが動いている (Hook turn.complete) |
 | WaitingApproval | ツール承認待ち (Hook PermissionRequest) |
 | WaitingAnswer | ユーザー質問待ち (Hook PermissionRequest / AskUserQuestion の tool.call) |
-| WaitingAction | メインのターンを終えて、利用者が `!` のコマンドを実行するのを待っている。ターンの最後の返答の行頭に `! コマンド` があったとき (Hook classic.Stop と turn.complete)。理由（store の `status_reason`）を持ち、次のメインのターンの開始と `/clear` で外れる |
+| WaitingAction | メインのターンを終えて、利用者が `!` のコマンドを実行するのを待っている。ターンの最後の返答の行頭に `! コマンド` があったとき (Hook classic.Stop と turn.complete)。理由（store の `status_reason`）と、何を待つかの種類（`wait_kind`。`! コマンド`は `command`、API の誤りで止まったときは `api_error`）を持ち、次のメインのターンの開始と `/clear` で外れる |
 | Completed | プロセス終了 (ウィンドウのコマンドの `hook exited` / close / ウィンドウ消失の検知) |
 | Error | 再開でワークスペースを作り直せなかった、または終了済みセッションの作業ディレクトリが消えている |
 | Unknown | store にこの版の知らない値がある（新しい版の claude-deck が書いた）。動いているとも終わったとも扱わず、hook も再開も prune も行に触れない。外部セッションの Status もこれ |

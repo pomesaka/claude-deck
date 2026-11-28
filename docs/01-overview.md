@@ -163,7 +163,7 @@ internal/
   config/                 TOML 設定 (インフラ)
   jj/                     Jujutsu ワークスペース (インフラ)
   ghostty/                Ghostty ランチャー (インフラ)
-  claudecode/             Claude Code パス解決・trust 設定 (インフラ)
+  claudecode/             Claude Code パス解決・trust 設定・画面の入力欄の読み取り (インフラ)
   ratelimits/             アカウントのレート制限の保存と監視 (インフラ)
   debuglog/               デバッグログ (インフラ)
 ```

@@ -38,12 +38,20 @@ func (s *Session) recordLocked() store.Record {
 		PID:            s.PID,
 		ErrorMessage:   s.ErrorMessage,
 		StatusReason:   s.StatusReason,
+		WaitKind:       string(s.WaitKind),
 		TerminalTitle:  s.TerminalTitle,
 		BookmarkName:   s.BookmarkName,
 		Prompt:         s.Prompt,
 		PermissionMode: s.PermissionMode,
 		StartedAt:      s.StartedAt,
 		LastActivity:   s.LastActivity,
+	}
+	if s.Context != nil {
+		r.ContextTokens = new(s.Context.UsedTokens)
+		r.ContextWindow = new(s.Context.WindowTokens)
+	}
+	if s.Compactions != nil {
+		r.Compactions = new(*s.Compactions)
 	}
 	isolationToRecord(&r, s.Isolation)
 	return r
@@ -85,6 +93,12 @@ func (s *Session) applyControlRecordLocked(r store.Record) {
 	s.PID = r.PID
 	s.ErrorMessage = r.ErrorMessage
 	s.StatusReason = r.StatusReason
+	s.WaitKind = WaitKind(r.WaitKind)
+	s.Context = contextFromRecord(r.ContextTokens, r.ContextWindow)
+	s.Compactions = nil
+	if r.Compactions != nil {
+		s.Compactions = new(*r.Compactions)
+	}
 }
 
 // applyProjectionRecordLocked copies the fields the TUI projects from JSONL

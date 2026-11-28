@@ -66,7 +66,8 @@ jq -c . /tmp/cdv/new1.json
 ```
 
 - `new` は数秒かかる。`tmux -L cdverify capture-pane -p -t cli` に `rc=0` が出てから JSON を読む。TUI の一覧に新しい行が出るのは、さらに次の更新（5 秒ごと）の後。
-- `close` と `list` は tmux の外から打ってよい。
+- `close` と `list` は tmux の外から打ってよい。`clear` は打たない。`cli.sh` は呼び出し側の `TMUX` を引き継ぐので、claude-deck のセッションの中から打つと、`clear` の send-keys が利用者のふだんの tmux サーバーへ向く。`sed 's#TMUX="\$TMUX"#TMUX="/private/tmp/tmux-'"$(id -u)"'/cdverify,0,0"#' /tmp/cdv/cli.sh > /tmp/cdv/cli-tmux.sh` と `chmod +x /tmp/cdv/cli-tmux.sh` で包みを作り、`clear` と `new` はこれで打つ
+- `clear` を試すには入力欄を描く偽の claude が要る（偽の claude の画面には `❯` が無く、いつも「prompt was not found」で断る）。`printf '#!/bin/sh\nprintf "❯ \\n"\nread l\nprintf %%s "$l" > /tmp/cdv/typed-$CLAUDE_DECK_SESSION_ID\nexec sleep 600\n' > /tmp/cdv/bin/claude-prompt` と `chmod +x /tmp/cdv/bin/claude-prompt` で作り、`config.toml` の `claude` をそれに向けてから `new` を打つ。送られた行は `/tmp/cdv/typed-<deck ID>` に出る
 - 起動の引数の区切りは `/tmp/cdv/claude-args/` で見る。偽の claude が、起動のたびに引数を 1 つずつ `[ ]` で囲んで 1 ファイルに書く。画面の `fake claude args:` は空白でつなぐので、改行や空白を含む引数の境目が分からない。
 - プロジェクトの `claude_args` を入れるには `/tmp/cdv/cli.sh project args /tmp/cdv/jjrepo -- --add-dir /tmp/cdv/extra` を打つ。隔てた `config.toml` に書かれる。
 - `cli` の `zsh -f` の PATH には `rg` が無い。出力はファイルに書き出し、tmux の外で読む。
@@ -107,7 +108,7 @@ README の画面のように本物の Claude Code が要るときは、HOME を�
 - レート制限の行（ヘッダーの 2 行目）は、`/tmp/cdv/data/rate-limits.json` に `{"rate_limits":{"five_hour":{"used_percentage":42,"resets_at":1900000000},"seven_day":{"used_percentage":17,"resets_at":1900500000}}}` を書くと出る。起動中に書いても出る（fsnotify）。
 - カーソルの行は、画面の 1 行目の名前と同じ名前の行で、`capture-pane -p -e` で背景 `48;5;237` が付く。`tmux -L cdverify capture-pane -p -e -t run | rg -n '48;5;237' | cut -c1-5` で行番号が出る。
 - 高さは `tmux -L cdverify resize-window -t run -x 160 -y 16` で変える。
-- 変更前の版と比べるときは、次の順に打ってビルドし、`run-old.sh` で起動する。`mkdir -p /tmp/cdv/old-src`、`git -C <リポジトリ> archive HEAD -o /tmp/cdv/old.tar`、`tar -x -C /tmp/cdv/old-src -f /tmp/cdv/old.tar`、`GOEXPERIMENT=jsonv2 go build -C /tmp/cdv/old-src -o /tmp/cdv/claude-deck-old ./cmd/claude-deck`、`sed 's#/claude-deck"#/claude-deck-old"#' /tmp/cdv/run.sh > /tmp/cdv/run-old.sh`、`chmod +x /tmp/cdv/run-old.sh`。CLI も古い版で打つなら、同じ `sed` で `cli.sh` から `cli-old.sh` を作る。store の列を足す変更は、古い版の `cli-old.sh new` と `close` で `deck.db` に行を作ってから、新しい版を起動して読ませる。
+- 変更前の版と比べるときは、次の順に打ってビルドし、`run-old.sh` で起動する。`mkdir -p /tmp/cdv/old-src`、`git -C <リポジトリ> archive HEAD -o /tmp/cdv/old.tar`、`tar -x -C /tmp/cdv/old-src -f /tmp/cdv/old.tar`、`GOEXPERIMENT=jsonv2 go build -C /tmp/cdv/old-src -o /tmp/cdv/claude-deck-old ./cmd/claude-deck`、`sed 's#/claude-deck"#/claude-deck-old"#' /tmp/cdv/run.sh > /tmp/cdv/run-old.sh`、`chmod +x /tmp/cdv/run-old.sh`。CLI も古い版で打つなら、同じ `sed` で `cli.sh` から `cli-old.sh` を作る。store の列を足す変更は、古い版の `cli-old.sh new` と `close` で `deck.db` に行を作ってから、新しい版を起動して読ませる。新しい版が一度開いた `data/` は列が足されているので、別のフォルダに `setup.sh` を流してから古い版で作る。
 
 ## 外部セッションを出す
 

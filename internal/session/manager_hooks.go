@@ -13,11 +13,11 @@ import (
 // TUI picks the change up through WatchStore. No Manager is needed, so a hook
 // does not touch tmux.
 
-// RecordHookStatus applies an activity reported by a hook, with the reason of a
+// RecordHookStatus applies an activity reported by a hook, with the wait of a
 // WaitingAction. See applyHookStatus.
-func RecordHookStatus(st *store.Store, sessionID DeckSessionID, status Activity, reason string) error {
+func RecordHookStatus(st *store.Store, sessionID DeckSessionID, status Activity, w Wait) error {
 	_, err := st.Update(string(sessionID), func(r *store.Record) error {
-		applyHookStatus(r, status, reason)
+		applyHookStatus(r, status, w)
 		return nil
 	})
 	return err
@@ -27,7 +27,18 @@ func RecordHookStatus(st *store.Store, sessionID DeckSessionID, status Activity,
 // See applySessionStart.
 func RecordSessionStart(st *store.Store, sessionID DeckSessionID, claudeID ClaudeSessionID, source string) error {
 	_, err := st.Update(string(sessionID), func(r *store.Record) error {
+		applyContextOnSessionStart(r, source)
 		applySessionStart(r, string(claudeID), source)
+		return nil
+	})
+	return err
+}
+
+// RecordContext records the context window reported by session.measure.
+// See applyContextMeasured.
+func RecordContext(st *store.Store, sessionID DeckSessionID, tokens *int, window int) error {
+	_, err := st.Update(string(sessionID), func(r *store.Record) error {
+		applyContextMeasured(r, tokens, window)
 		return nil
 	})
 	return err
@@ -98,4 +109,18 @@ func findRecord(recs []store.Record, key string) (store.Record, error) {
 		}
 		return store.Record{}, fmt.Errorf("session name %q is ambiguous; use one of the IDs: %s", key, strings.Join(ids, ", "))
 	}
+}
+
+// FindStored looks a deck session up in the store by ID, or by a name that
+// only one session has, as FindSession does in memory. Needs no Manager.
+func FindStored(st *store.Store, key string) (Snapshot, error) {
+	recs, err := st.List()
+	if err != nil {
+		return Snapshot{}, err
+	}
+	r, err := findRecord(recs, key)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return newSessionFromRecord(r).Snapshot(), nil
 }

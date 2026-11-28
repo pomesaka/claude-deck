@@ -55,21 +55,22 @@ var ErrLaunching = errors.New("session is still being launched")
 // as is: a hook delivered after the exit was recorded must not bring it back,
 // and a status this version does not know is not ours to overwrite.
 //
-// reason is kept only with ActivityWaitingAction; any other activity clears it.
-// The same status with a new reason is a change: the list shows the reason.
-func applyHookStatus(r *store.Record, a Activity, reason string) (changed bool) {
+// w is kept only with ActivityWaitingAction; any other activity clears it.
+// The same status with a new wait is a change: the list shows the reason.
+func applyHookStatus(r *store.Record, a Activity, w Wait) (changed bool) {
 	current, _ := StatusFromID(r.Status)
 	if !current.IsLive() {
 		return false
 	}
 	if a != ActivityWaitingAction {
-		reason = ""
+		w = Wait{}
 	}
-	if current == a.Status() && r.StatusReason == reason {
+	if current == a.Status() && r.StatusReason == w.Reason && r.WaitKind == string(w.Kind) {
 		return false
 	}
 	setStatus(r, a.Status())
-	r.StatusReason = reason
+	r.StatusReason = w.Reason
+	r.WaitKind = string(w.Kind)
 	return true
 }
 
@@ -96,6 +97,58 @@ func applySessionStart(r *store.Record, claudeID, source string) (changed bool) 
 	}
 	r.SessionChain = append(r.SessionChain, claudeID)
 	return true
+}
+
+// applyContextOnSessionStart updates what Claude Code measured of the
+// conversation when SessionStart reports how it began.
+//
+//   - startup of a session with no chain, clear: a new conversation, with no
+//     compaction and no fill yet.
+//   - compact: one more compaction, and the fill is unknown until the next response.
+//   - fork: the conversation is another session's, whose compactions this row
+//     does not know.
+//   - resume, and startup of a known conversation: the conversation goes on.
+//
+// A row that is not live is left as is: a hook delivered after the exit was recorded.
+//
+// WHY store の側で数える: compaction の後の SessionStart（source が compact）は、今の deckmod より
+// 前の版も送っている。数える場所をここ 1 か所にでき、Mod の読み込み直しで数が失われない。
+// WHY NOT chain で重複を捨てる: compaction の後もセッション ID は変わらない（6 回 compaction した
+// 記録の sessionId が 1 つだけだった、2026-11-28）。同じ SessionStart が 2 回届けば 2 回数える。
+// 呼ぶのは applySessionStart の前（startup が新しい会話かを、更新前の chain で見る）。
+func applyContextOnSessionStart(r *store.Record, source string) {
+	if status, _ := StatusFromID(r.Status); !status.IsLive() {
+		return
+	}
+	switch source {
+	case SourceStartup:
+		if len(r.SessionChain) > 0 {
+			return
+		}
+		r.Compactions = new(0)
+		r.ContextTokens = nil
+	case SourceClear:
+		r.Compactions = new(0)
+		r.ContextTokens = nil
+	case SourceCompact:
+		if r.Compactions != nil {
+			r.Compactions = new(*r.Compactions + 1)
+		}
+		r.ContextTokens = nil
+	case SourceFork:
+		r.Compactions = nil
+		r.ContextTokens = nil
+	}
+}
+
+// applyContextMeasured records the context window that session.measure
+// reported. tokens is nil until a response of the live window reports a fill.
+func applyContextMeasured(r *store.Record, tokens *int, window int) {
+	r.ContextWindow = new(window)
+	r.ContextTokens = nil
+	if tokens != nil {
+		r.ContextTokens = new(*tokens)
+	}
 }
 
 // applyExited records that the session's process has ended.
@@ -242,8 +295,9 @@ func setError(r *store.Record, msg string, now time.Time) {
 }
 
 // setStatus moves the row to s. A reason belongs to the wait it was given for,
-// so every move clears it; applyHookStatus sets it again for WaitingAction.
+// so every move clears it and its kind; applyHookStatus sets them again for WaitingAction.
 func setStatus(r *store.Record, s Status) {
 	r.Status = s.ID()
 	r.StatusReason = ""
+	r.WaitKind = ""
 }

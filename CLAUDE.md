@@ -111,12 +111,13 @@ CLI を変えたら、同梱のスキル `deck-status:claude-deck`（`deckmod/sk
 | `claude-deck list [--alias TEXT] [--repo TEXT]` | 一覧表示。`session_chain` と `forked_from` で `/clear` とフォークの系譜も返す。`--alias` はエイリアスの部分一致、`--repo` はリポジトリの名前（`repo_path` の末尾）の部分一致で絞る。両方付けると両方に当たるもの |
 | `claude-deck tree` | なし。Claude Code のセッションを `/clear` とフォークの親子関係でたどった木を、テキストで出す（[用語集](docs/00-glossary.md) の ForkedFrom） |
 | `claude-deck close <ID\|NAME>` | `x` |
+| `claude-deck clear --id <ID\|NAME> [--dry-run]` | なし。そのセッションの tmux のウィンドウの入力欄に `/clear` を打つ。`idle` か `waiting_action` で入力欄が空のときだけ送り、自分のセッションには送らない。`list` の `hints` の `context_full` が打つ時機を勧める |
 | `claude-deck alias [--session ID\|NAME] <ALIAS>` | なし。セッションに表示用の名前を付ける（英数字と `-` `_` `.`、40 文字まで）。`--session` を省くと自分のセッション（`$CLAUDE_DECK_SESSION_ID`）。空文字で消す |
 | `claude-deck gc [--dry-run]` | なし。どのセッションのものでもないワークスペースと、消えたワークスペースについての `~/.claude.json` の登録を消す |
 | `claude-deck project list` | なし。`config.toml` の `[projects]` にあるプロジェクトごとの設定を返す |
 | `claude-deck project args [--clear] <DIR> [-- <ARG>...]` | なし。そのリポジトリで Claude Code を起動するときに足す引数（`config.toml` の `claude_args`）を読み書きする。store と tmux には触れない |
 
-内部用に `claude-deck hook status|session-start|exited|rate-limits --session <ID>` がある。deck-status プラグインとウィンドウのコマンドが呼ぶもので、手で実行するものではない。
+内部用に `claude-deck hook status|session-start|exited|rate-limits|context --session <ID>` がある。deck-status プラグインとウィンドウのコマンドが呼ぶもので、手で実行するものではない。
 
 `x` と `close` を複数のプロセスが同時に実行したときの排他は [docs/architecture.md](docs/architecture.md) にある。
 

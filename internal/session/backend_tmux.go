@@ -252,3 +252,13 @@ func buildShellCommand(cmd string, args []string) string {
 func shellescape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// Screen returns what the session's window shows, with its colours.
+func (b *tmuxBackend) Screen(sessionID DeckSessionID) (string, error) {
+	return b.runner.CapturePane(string(sessionID))
+}
+
+// TypeLine types text into the session's window and presses Enter.
+func (b *tmuxBackend) TypeLine(sessionID DeckSessionID, text string) error {
+	return b.runner.SendLine(string(sessionID), text)
+}

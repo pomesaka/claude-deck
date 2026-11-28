@@ -24,6 +24,9 @@ const (
 type Runner struct {
 	Command     string // tmux binary path; defaults to DefaultCommand
 	SessionName string // tmux session name; defaults to DefaultSessionName
+	// Socket is the name of the tmux server's socket (tmux -L); "" is the
+	// default server. Tests set it to run a server of their own.
+	Socket string
 }
 
 // cmd returns the resolved binary name.
@@ -44,6 +47,9 @@ func (r *Runner) sess() string {
 
 // run executes a tmux sub-command and returns trimmed combined output.
 func (r *Runner) run(args ...string) (string, error) {
+	if r.Socket != "" {
+		args = append([]string{"-L", r.Socket}, args...)
+	}
 	out, err := exec.Command(r.cmd(), args...).CombinedOutput()
 	text := strings.TrimRight(string(out), "\n")
 	if err != nil && text != "" {
@@ -150,6 +156,24 @@ func (r *Runner) PanePID(windowName string) (int, error) {
 		return 0, err
 	}
 	return strconv.Atoi(strings.TrimSpace(out))
+}
+
+// CapturePane returns what the named window's pane shows, with its colours as
+// SGR escapes (capture-pane -e): the faint text Claude Code draws in its input
+// box is told apart only by its colour.
+func (r *Runner) CapturePane(windowName string) (string, error) {
+	return r.run("capture-pane", "-p", "-e", "-t", r.sess()+":"+windowName)
+}
+
+// SendLine types text into the named window's pane and presses Enter.
+// WHY -l で打ってから Enter を別に送る: 文の中の語（Enter、C-c など）が tmux のキー名として読まれない。
+func (r *Runner) SendLine(windowName, text string) error {
+	target := r.sess() + ":" + windowName
+	if _, err := r.run("send-keys", "-t", target, "-l", "--", text); err != nil {
+		return err
+	}
+	_, err := r.run("send-keys", "-t", target, "Enter")
+	return err
 }
 
 // ── Unexported helpers (argument construction, tested via package-level tests) ─

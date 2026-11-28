@@ -11,12 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/pomesaka/claude-deck/internal/config"
 	"github.com/pomesaka/claude-deck/internal/ratelimits"
 	"github.com/pomesaka/claude-deck/internal/session"
 	"github.com/pomesaka/claude-deck/internal/store"
+	"github.com/pomesaka/claude-deck/internal/tmux"
 	"github.com/pomesaka/claude-deck/internal/usage"
 )
 
@@ -27,10 +29,10 @@ type cliRequest struct {
 	NoWorkspace bool   // new
 	// Prompt is the first instruction given to the new session's agent, or "".
 	Prompt string // new, fork
-	Target string // close, alias, fork
+	Target string // close, alias, fork, clear
 	Alias  string // alias: the alias to set. list: the text to filter aliases by
 	Repo   string // list: the text to filter repository names by
-	DryRun bool   // gc
+	DryRun bool   // gc, clear
 	// project (Dir is the project)
 	ProjectOp  string
 	ClaudeArgs []string // projectSetArgs: the arguments to set
@@ -41,10 +43,16 @@ type cliRequest struct {
 	// activities: they come from the exit command and close, which also record FinishedAt.
 	Activity session.Activity
 	// StatusReason is why a waiting_action session waits on the user.
-	StatusReason    string
+	StatusReason string
+	// WaitKind is what a waiting_action session waits for.
+	WaitKind        session.WaitKind
 	ClaudeSessionID string
 	Source          string
 	RateLimits      string // JSON, as ratelimits.ParseMeasured reads it
+	// ContextTokens is the context window's fill reported by `hook context`,
+	// nil before a response of the live window reported one.
+	ContextTokens *int
+	ContextWindow int
 }
 
 // cliParser parses the arguments of a subcommand. stdin is read only by the
@@ -67,6 +75,7 @@ var cliCommands = map[string]cliParser{
 	"alias":   ignoreStdin(parseAliasArgs),
 	"gc":      ignoreStdin(parseGCArgs),
 	"project": ignoreStdin(parseProjectArgs),
+	"clear":   ignoreStdin(parseClearArgs),
 	"hook":    ignoreStdin(parseHookArgs),
 }
 
@@ -88,6 +97,27 @@ type SessionInfo struct {
 	// ForkedFrom is the Claude Code session ID the session was forked from: an
 	// element of another session's SessionChain.
 	ForkedFrom string `json:"forked_from,omitempty"`
+	// Context is the context window's fill Claude Code last measured; null
+	// until measured, so a session that was not measured is not read as empty.
+	Context *ContextInfo `json:"context"`
+	// Compactions is how many times the current Claude Code session compacted
+	// its conversation; null when it is not known.
+	Compactions *int `json:"compactions"`
+	// Hints are the next steps suggested for the session, derived each time it
+	// is listed; [] when there are none.
+	Hints []HintInfo `json:"hints"`
+}
+
+// ContextInfo is the JSON form of session.ContextUsage.
+type ContextInfo struct {
+	UsedTokens   int `json:"used_tokens"`
+	WindowTokens int `json:"window_tokens"`
+}
+
+// HintInfo is the JSON form of session.Hint.
+type HintInfo struct {
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
 }
 
 func infoFromSnapshot(s session.Snapshot) SessionInfo {
@@ -95,7 +125,18 @@ func infoFromSnapshot(s session.Snapshot) SessionInfo {
 	for _, id := range s.Chain() {
 		chain = append(chain, string(id))
 	}
+	var context *ContextInfo
+	if s.Context != nil {
+		context = &ContextInfo{UsedTokens: s.Context.UsedTokens, WindowTokens: s.Context.WindowTokens}
+	}
+	hints := []HintInfo{}
+	for _, h := range session.Hints(s) {
+		hints = append(hints, HintInfo{Kind: string(h.Kind), Message: h.Message})
+	}
 	return SessionInfo{
+		Context:         context,
+		Compactions:     s.Compactions,
+		Hints:           hints,
 		ID:              string(s.ID),
 		Name:            s.Name,
 		Alias:           s.Alias,
@@ -170,6 +211,13 @@ func runCLI(name string, args []string) error {
 			return err
 		}
 		return printJSON(infoFromSnapshot(snap))
+	case "clear":
+		runner := &tmux.Runner{Command: cfg.Tmux.Command, SessionName: cfg.Tmux.SessionName}
+		info, err := clearSession(st, runner, session.DeckSessionID(os.Getenv(session.EnvSessionID)), req.Target, req.DryRun)
+		if err != nil {
+			return err
+		}
+		return printJSON(info)
 	case "tree":
 		snaps, err := session.ListStored(st)
 		if err != nil {
@@ -553,12 +601,13 @@ const (
 	hookSessionStart = "session-start"
 	hookExited       = "exited"
 	hookRateLimits   = "rate-limits"
+	hookContext      = "context"
 )
 
 // parseHookArgs parses `hook <event> [args] --session ID`. These are called by
 // the deck-status plugin and by the pane's exit command, not by people.
 func parseHookArgs(args []string) (cliRequest, error) {
-	usage := "Usage: claude-deck hook status <running|idle|waiting_approval|waiting_answer|subagent_running|waiting_action --reason TEXT> | session-start --claude-session-id ID --source SOURCE | exited | rate-limits <JSON>  [--session DECK_ID]"
+	usage := "Usage: claude-deck hook status <running|idle|waiting_approval|waiting_answer|subagent_running|waiting_action --reason TEXT --wait-kind command|api_error> | session-start --claude-session-id ID --source SOURCE | exited | rate-limits <JSON> | context --tokens N --window N  [--session DECK_ID]"
 	if len(args) == 0 {
 		return cliRequest{}, fmt.Errorf("hook: missing event\n%s", usage)
 	}
@@ -576,12 +625,46 @@ func parseHookArgs(args []string) (cliRequest, error) {
 		}
 		req.Activity = a
 		fs.StringVar(&req.StatusReason, "reason", "", "why the session waits on the user (waiting_action only)")
+		fs.Func("wait-kind", "what the session waits for: command or api_error (waiting_action only)", func(v string) error {
+			if v == "" {
+				return nil
+			}
+			k, ok := session.WaitKindFromID(v)
+			if !ok {
+				return fmt.Errorf("unknown wait kind %q", v)
+			}
+			req.WaitKind = k
+			return nil
+		})
 		args = args[2:]
 	case hookSessionStart:
 		fs.StringVar(&req.ClaudeSessionID, "claude-session-id", "", "Claude Code session ID")
 		fs.StringVar(&req.Source, "source", "", "source of SessionStart (startup / resume / fork / clear / compact)")
 		args = args[1:]
 	case hookExited:
+		args = args[1:]
+	case hookContext:
+		// WHY 空の --tokens を受ける: 測った値が無いとき（新しい会話、compaction の直後）も
+		// 呼び出しの形を 1 つにして、契約のテスト（hook_contract_test.go）が読めるようにする。
+		fs.Func("tokens", "input tokens of the last response; empty before the first response of the live window", func(v string) error {
+			if v == "" {
+				return nil
+			}
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 {
+				return fmt.Errorf("--tokens %q: want a count", v)
+			}
+			req.ContextTokens = &n
+			return nil
+		})
+		fs.Func("window", "the context window of the session's model, in tokens", func(v string) error {
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 {
+				return fmt.Errorf("--window %q: want a positive count", v)
+			}
+			req.ContextWindow = n
+			return nil
+		})
 		args = args[1:]
 	case hookRateLimits:
 		if len(args) < 2 {
@@ -602,9 +685,12 @@ func parseHookArgs(args []string) (cliRequest, error) {
 		return cliRequest{}, fmt.Errorf("hook %s: unexpected arguments: %v", req.HookEvent, fs.Args())
 	}
 	if req.HookEvent == hookStatus {
-		if err := checkStatusReason(req.Activity, req.StatusReason); err != nil {
+		if err := checkStatusReason(req.Activity, req.StatusReason, req.WaitKind); err != nil {
 			return cliRequest{}, err
 		}
+	}
+	if req.HookEvent == hookContext && req.ContextWindow == 0 {
+		return cliRequest{}, fmt.Errorf("hook context: --window is required")
 	}
 	if req.Session == "" {
 		return cliRequest{}, fmt.Errorf("hook %s: no session (--session or $%s)", req.HookEvent, session.EnvSessionID)
@@ -622,7 +708,9 @@ func runHook(req cliRequest, st *store.Store, dataDir string) error {
 		}
 		return ratelimits.Save(dataDir, status)
 	case hookStatus:
-		return session.RecordHookStatus(st, id, req.Activity, req.StatusReason)
+		return session.RecordHookStatus(st, id, req.Activity, session.Wait{Kind: req.WaitKind, Reason: req.StatusReason})
+	case hookContext:
+		return session.RecordContext(st, id, req.ContextTokens, req.ContextWindow)
 	case hookSessionStart:
 		return session.RecordSessionStart(st, id, session.ClaudeSessionID(req.ClaudeSessionID), req.Source)
 	case hookExited:
@@ -655,13 +743,17 @@ func printJSON(v any) error {
 	return nil
 }
 
-// checkStatusReason requires --reason with waiting_action and refuses it with
-// any other status: the list shows the reason only for that wait.
+// checkStatusReason requires --reason with waiting_action and refuses it and
+// --wait-kind with any other status: the list shows the reason only for that wait.
 // WHY 長さはここで見ない: 理由の文はプラグインが作り、一覧に収まる長さに切ってから渡す。
-func checkStatusReason(a session.Activity, reason string) error {
+// WHY waiting_action に --wait-kind を求めない: 動いているセッションは、起動したときの古い deckmod を
+// 読み込んだままで、種類を送らない。断ると待ちが一覧に出なくなる。種類の無い行にはヒントを出さないだけにする。
+func checkStatusReason(a session.Activity, reason string, kind session.WaitKind) error {
 	switch {
 	case a == session.ActivityWaitingAction && strings.TrimSpace(reason) == "":
 		return fmt.Errorf("hook status %s: --reason is required", a.Status().ID())
+	case a != session.ActivityWaitingAction && kind != "":
+		return fmt.Errorf("hook status %s: --wait-kind is only for %s", a.Status().ID(), session.StatusWaitingAction.ID())
 	case strings.ContainsAny(reason, "\r\n"):
 		// 一覧の 2 行目に 1 行で出すので、改行があると行が崩れる。
 		return fmt.Errorf("hook status %s: --reason must be one line", a.Status().ID())

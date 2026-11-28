@@ -53,7 +53,10 @@ type Record struct {
 	ErrorMessage string
 	// StatusReason is why the session waits on the user, while Status is
 	// waiting_action. Empty in any other status.
-	StatusReason  string
+	StatusReason string
+	// WaitKind is what the waiting_action session waits for (session.WaitKind);
+	// empty in any other status, and on rows written before the column existed.
+	WaitKind      string
 	TerminalTitle string
 	BookmarkName  string
 
@@ -73,6 +76,14 @@ type Record struct {
 	LaunchingAt *time.Time
 	// Pinned keeps the session in the group at the bottom of the list.
 	Pinned bool
+
+	// ContextTokens and ContextWindow are the context window's fill and size
+	// as Claude Code last measured them; nil until measured. 0 is a measurement.
+	ContextTokens *int
+	ContextWindow *int
+	// Compactions is how many times the current Claude Code session compacted
+	// its conversation; nil when it is not known.
+	Compactions *int
 }
 
 const schema = `
@@ -103,7 +114,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 	alias                       TEXT NOT NULL DEFAULT '',
 	pinned                      INTEGER NOT NULL DEFAULT 0,
 	isolation                   TEXT NOT NULL DEFAULT '',
-	status_reason               TEXT NOT NULL DEFAULT ''
+	status_reason               TEXT NOT NULL DEFAULT '',
+	context_tokens              INTEGER,
+	context_window              INTEGER,
+	compactions                 INTEGER,
+	wait_kind                   TEXT NOT NULL DEFAULT ''
 );`
 
 // Values of the isolation column.
@@ -138,12 +153,17 @@ var addedColumns = []struct{ name, ddl string }{
 	{"pinned", "pinned INTEGER NOT NULL DEFAULT 0"},
 	{"isolation", "isolation TEXT NOT NULL DEFAULT ''"},
 	{"status_reason", "status_reason TEXT NOT NULL DEFAULT ''"},
+	{"context_tokens", "context_tokens INTEGER"},
+	{"context_window", "context_window INTEGER"},
+	{"compactions", "compactions INTEGER"},
+	{"wait_kind", "wait_kind TEXT NOT NULL DEFAULT ''"},
 }
 
 const columns = `id, name, repo_path, repo_name, workspace_path, workspace_name, sub_project_dir,
 	session_chain, status, finished_at, pid, error_message, terminal_title, bookmark_name,
 	last_jj_revision, last_jj_parent_revision, prompt, permission_mode, started_at, last_activity,
-	closing_at, launching_at, forked_from, alias, pinned, isolation, status_reason`
+	closing_at, launching_at, forked_from, alias, pinned, isolation, status_reason,
+	context_tokens, context_window, compactions, wait_kind`
 
 // upsert writes one row: it inserts it, or, when the ID exists, updates the
 // columns this binary knows.
@@ -411,6 +431,7 @@ func (t *Tx) Put(r Record) error {
 		string(chainJSON), r.Status, nullableTime(r.FinishedAt), r.PID, r.ErrorMessage, r.TerminalTitle, r.BookmarkName,
 		r.LastJJRevision, r.LastJJParentRevision, r.Prompt, r.PermissionMode, unixNano(r.StartedAt), unixNano(r.LastActivity),
 		nullableTime(r.ClosingAt), nullableTime(r.LaunchingAt), r.ForkedFrom, r.Alias, r.Pinned, r.Isolation, r.StatusReason,
+		nullableInt(r.ContextTokens), nullableInt(r.ContextWindow), nullableInt(r.Compactions), r.WaitKind,
 	)
 	return err
 }
@@ -452,12 +473,16 @@ func scanAll(rows *sql.Rows) ([]Record, error) {
 			finishedAt, closingAt   sql.NullInt64
 			launchingAt             sql.NullInt64
 			startedAt, lastActivity int64
+			contextTokens           sql.NullInt64
+			contextWindow           sql.NullInt64
+			compactions             sql.NullInt64
 		)
 		if err := rows.Scan(
 			&r.ID, &r.Name, &r.RepoPath, &r.RepoName, &r.WorkspacePath, &r.WorkspaceName, &r.SubProjectDir,
 			&chainJSON, &r.Status, &finishedAt, &r.PID, &r.ErrorMessage, &r.TerminalTitle, &r.BookmarkName,
 			&r.LastJJRevision, &r.LastJJParentRevision, &r.Prompt, &r.PermissionMode, &startedAt, &lastActivity,
 			&closingAt, &launchingAt, &r.ForkedFrom, &r.Alias, &r.Pinned, &r.Isolation, &r.StatusReason,
+			&contextTokens, &contextWindow, &compactions, &r.WaitKind,
 		); err != nil {
 			return nil, err
 		}
@@ -475,6 +500,9 @@ func scanAll(rows *sql.Rows) ([]Record, error) {
 		r.LaunchingAt = timePtr(launchingAt)
 		r.StartedAt = fromUnixNano(startedAt)
 		r.LastActivity = fromUnixNano(lastActivity)
+		r.ContextTokens = intPtr(contextTokens)
+		r.ContextWindow = intPtr(contextWindow)
+		r.Compactions = intPtr(compactions)
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -501,6 +529,21 @@ func nullableTime(t *time.Time) any {
 		return nil
 	}
 	return t.UnixNano()
+}
+
+// WHY NULL で持つ: 測っていない（古い deckmod、まだ応答が無い）と 0 を読み手が取り違えないようにする。
+func nullableInt(n *int) any {
+	if n == nil {
+		return nil
+	}
+	return *n
+}
+
+func intPtr(n sql.NullInt64) *int {
+	if !n.Valid {
+		return nil
+	}
+	return new(int(n.Int64))
 }
 
 func timePtr(n sql.NullInt64) *time.Time {

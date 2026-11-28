@@ -135,6 +135,7 @@ claude-deck fork --prompt "Measure the cold start"   # fork this session's conve
 claude-deck list                    # every session, in the order of the list (an array)
 claude-deck list --alias invoice    # only sessions whose label contains "invoice"
 claude-deck list --repo api         # only sessions in a repository whose name contains "api"
+claude-deck clear --id maika-7c78   # type /clear into it, only while it is idle with nothing typed
 claude-deck close maika-7c78        # stop it and remove its workspace (ID or name)
 ```
 
@@ -156,11 +157,16 @@ The `name` a session gets is also its Claude Code session name, so sessions can 
   "work_dir": "/home/you/.local/share/claude-deck/workspace/-home-you-src-billing-api/maika-7c78",
   "status": "waiting_approval",
   "claude_session_id": "70e29269-…",
-  "session_chain": ["70e29269-…"]
+  "session_chain": ["70e29269-…"],
+  "context": { "used_tokens": 120000, "window_tokens": 200000 },
+  "compactions": 1,
+  "hints": [{ "kind": "context_full", "message": "…" }]
 }
 ```
 
 `status` is one of `running`, `idle`, `subagent_running`, `waiting_approval`, `waiting_answer`, `waiting_action`, `completed` and `error`. `waiting_action` means the session ended its turn asking you to run a `!` command (a line starting with `! ` in its last message), or stopped on an API error (a network outage, say) and resumes when you send anything; `status_reason` says which. There is no wait command; poll `list`.
+
+`context` is the context window's fill as Claude Code last measured it, and `compactions` how many times the current conversation was compacted (`/clear` starts it again from 0); either is `null` until measured. `hints` lists next steps derived from these each time you list: `context_full` (the context is at least half full, or was compacted: run `claude-deck clear` at a good stopping point) and `api_error` (an API error stopped it: send anything to resume). `clear` refuses, with a non-zero exit, a session that is working, waiting on a dialog, or has text typed into its prompt, and never types into the session it runs in.
 
 `--prompt` (on `new` and `fork`) gives the session its first task; it stays an interactive session you can talk to afterwards. Without it, the session starts waiting for one.
 

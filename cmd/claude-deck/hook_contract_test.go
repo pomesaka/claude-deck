@@ -85,11 +85,34 @@ func TestHookContract_Statuses(t *testing.T) {
 	for _, status := range got {
 		args := []string{"status", status, "--session", "abc"}
 		if status == session.StatusWaitingAction.ID() {
-			args = append(args, "--reason", "gcloud auth login を実行してください")
+			args = append(args, "--reason", "gcloud auth login を実行してください", "--wait-kind", "command")
 		}
 		if _, err := parseHookArgs(args); err != nil {
 			t.Errorf("hook status %s: %v", status, err)
 		}
+	}
+}
+
+// The wait kinds the plugin sends are the ones `hook status --wait-kind` accepts.
+func TestHookContract_WaitKinds(t *testing.T) {
+	m := regexp.MustCompile(`(?m)^type WaitKind = (.+)$`).FindStringSubmatch(readRegisterTS(t))
+	if m == nil {
+		t.Fatal("type WaitKind not found in the plugin source")
+	}
+	var got []string
+	for part := range strings.SplitSeq(m[1], " | ") {
+		lit := tsLiteralRe.FindStringSubmatch(part)
+		if lit == nil {
+			t.Fatalf("WaitKind member %q is not a string literal", part)
+		}
+		got = append(got, lit[1])
+		if _, ok := session.WaitKindFromID(lit[1]); !ok {
+			t.Errorf("plugin wait kind %q is not a session.WaitKind", lit[1])
+		}
+	}
+	slices.Sort(got)
+	if want := []string{string(session.WaitAPIError), string(session.WaitCommand)}; !slices.Equal(got, want) {
+		t.Errorf("plugin wait kinds = %v, want %v", got, want)
 	}
 }
 
@@ -111,9 +134,12 @@ func TestHookContract_Calls(t *testing.T) {
 		event  string
 		values []string
 	}{
-		{"status", []string{"running", ""}},
-		{"status", []string{"waiting_action", "gcloud auth login を実行してください"}},
+		{"status", []string{"running", "", ""}},
+		{"status", []string{"waiting_action", "gcloud auth login を実行してください", "command"}},
+		{"status", []string{"waiting_action", "API の誤りで止まりました。何か送ると再開します", "api_error"}},
 		{"session-start", []string{"11111111-aaaa", "clear"}},
+		{"context", []string{"120000", "200000"}},
+		{"context", []string{"", "1000000"}},
 		{"rate-limits", []string{`[{"kind":"five_hour","percentUsed":12,"resetsAt":"2026-10-09T12:00:00Z"}]`}},
 	}
 

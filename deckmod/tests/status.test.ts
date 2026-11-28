@@ -6,8 +6,8 @@ const END = { answer: '', durationMs: 0, isAborted: false, reason: 'answer' } as
 const AGENT = 'a1'
 // The main loop's last message asks the user to run a command.
 const ASKS = '次を実行してください。\n\n```\n! gh auth login\n```'
-const WAITING = 'waiting_action: `! gh auth login` の実行を待っています'
-const STOPPED = 'waiting_action: API の誤りで止まりました。何か送ると再開します'
+const WAITING = 'waiting_action[command]: `! gh auth login` の実行を待っています'
+const STOPPED = 'waiting_action[api_error]: API の誤りで止まりました。何か送ると再開します'
 
 type Step =
   | { event: 'turn.start' | 'turn.complete'; agentId?: string }
@@ -27,12 +27,15 @@ type Step =
 const world = (on: On) => {
   const seen: { statuses: string[]; agent: 'running' | 'completed' | null } = { statuses: [], agent: null }
   on('env.get', (_$, e) => ({ value: e.name === 'CLAUDE_DECK_BIN' ? '/bin/claude-deck' : e.name === 'CLAUDE_DECK_SESSION_ID' ? 'deck1' : undefined }))
-  // A status is recorded as its name, and as "name: reason" when --reason is not empty.
+  // A status is recorded as its name, and as "name[kind]: reason" when --reason is not empty.
   on('process.run', (_$, e) => {
     if (e.argv[1] === 'hook' && e.argv[2] === 'status' && e.argv[3] !== undefined) {
-      const at = e.argv.indexOf('--reason')
-      const reason = at < 0 ? '' : (e.argv[at + 1] ?? '')
-      seen.statuses.push(reason === '' ? e.argv[3] : `${e.argv[3]}: ${reason}`)
+      const flag = (name: string) => {
+        const at = e.argv.indexOf(name)
+        return at < 0 ? '' : (e.argv[at + 1] ?? '')
+      }
+      const reason = flag('--reason')
+      seen.statuses.push(reason === '' ? e.argv[3] : `${e.argv[3]}[${flag('--wait-kind')}]: ${reason}`)
     }
     return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
