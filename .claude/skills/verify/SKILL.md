@@ -1,7 +1,7 @@
 ---
 name: verify
 description: claude-deck の TUI と CLI を、本物のデータと tmux から隔てた環境で起動し、別の tmux サーバーの中でキーを送って画面を取り、偽の Claude Code でセッションを作って閉じ、変更が動くかを確かめる手順。
-when_to_use: TUI（internal/tui）、リポジトリの探索、起動の流れ、セッションの作成と終了（close、x、ワークスペース）、右ペインの切り替えを変えた後に、テストでなく実際に動かして確かめるとき。
+when_to_use: TUI（internal/tui）、リポジトリの探索、起動の流れ、セッションの作成と終了（close、x、ワークスペース）、右ペインの切り替えを変えた後に、テストでなく実際に動かして確かめるとき。直した後に、残した台本を rerun.sh で流し直すとき。
 ---
 
 # claude-deck を動かして確かめる
@@ -23,7 +23,7 @@ sh .claude/skills/verify/setup.sh /tmp/cdv
 - 隔てる理由: 本物の HOME で起動すると、`~/.claude.json` にデータディレクトリの trust を書き、`~/.claude/settings.json` を書き換えることがある。`CLAUDE_DECK_DATA_DIR` だけでは防げない。
 - `tmux -L cdverify` の別サーバーで動かす。`run.sh` は `TMUX` を引き継ぐので、アプリが作るセッション `cdverify` もこのサーバーに入る。`env -i` で `TMUX` を落とすと、利用者のふだんの tmux サーバーにセッションができる。
 - `FD_DELAY`（既定 6 秒）は fd の 1 回の呼び出しごとに効く。探索 1 回は「リポジトリの数 + 1」回 fd を呼ぶので、既定の偽 HOME で約 40 秒かかる。探索中の振る舞いを見るための遅さ。
-- 止め方は下の「止める」。`tmux kill-server` は使わない。
+- 止め方は下の「止める」。手で `tmux kill-server` を打たない。`-L` を付け忘れると利用者のサーバーごと止まる。`rerun.sh` は、自分で起こした `-L` のサーバーだけを止める。
 
 ## 操作する
 
@@ -66,7 +66,7 @@ jq -c . /tmp/cdv/new1.json
 ```
 
 - `new` は数秒かかる。`tmux -L cdverify capture-pane -p -t cli` に `rc=0` が出てから JSON を読む。TUI の一覧に新しい行が出るのは、さらに次の更新（5 秒ごと）の後。
-- `close` と `list` は tmux の外から打ってよい。`clear` は打たない。`cli.sh` は呼び出し側の `TMUX` を引き継ぐので、claude-deck のセッションの中から打つと、`clear` の send-keys が利用者のふだんの tmux サーバーへ向く。`sed 's#TMUX="\$TMUX"#TMUX="/private/tmp/tmux-'"$(id -u)"'/cdverify,0,0"#' /tmp/cdv/cli.sh > /tmp/cdv/cli-tmux.sh` と `chmod +x /tmp/cdv/cli-tmux.sh` で包みを作り、`clear` と `new` はこれで打つ
+- `close` と `list` は tmux の外から打ってよい。`cli.sh` は呼び出し側の `TMUX` を引き継ぐので、claude-deck のセッションの中から `new`、`send`、`clear` を打つと、利用者のふだんの tmux サーバーへ向く。打つ前に `export TMUX="$(tmux -L cdverify display-message -p '#{socket_path}'),0,0"` で隔てたサーバーに向ける（`rerun.sh` は台本に同じ値を渡す）
 - `clear` を試すには入力欄を描く偽の claude が要る（偽の claude の画面には `❯` が無く、いつも「prompt was not found」で断る）。`printf '#!/bin/sh\nprintf "❯ \\n"\nread l\nprintf %%s "$l" > /tmp/cdv/typed-$CLAUDE_DECK_SESSION_ID\nexec sleep 600\n' > /tmp/cdv/bin/claude-prompt` と `chmod +x /tmp/cdv/bin/claude-prompt` で作り、`config.toml` の `claude` をそれに向けてから `new` を打つ。送られた行は `/tmp/cdv/typed-<deck ID>` に出る
 - 起動の引数の区切りは `/tmp/cdv/claude-args/` で見る。偽の claude が、起動のたびに引数を 1 つずつ `[ ]` で囲んで 1 ファイルに書く。画面の `fake claude args:` は空白でつなぐので、改行や空白を含む引数の境目が分からない。
 - プロジェクトの `claude_args` を入れるには `/tmp/cdv/cli.sh project args /tmp/cdv/jjrepo -- --add-dir /tmp/cdv/extra` を打つ。隔てた `config.toml` に書かれる。
@@ -151,6 +151,23 @@ tmux -L cdverify capture-pane -p -t run | head -1
 - 外部セッションを `r` で取り込んでから `x` で閉じる。`cwd` の jj ワークスペースが残るか（`jj workspace list` と `jj.log` に `workspace forget` が無いこと）。
 - `new --prompt -` に 16KB を超える指示を流す。tmux の `new-window` はそのままでは `Command too long` で断る（tmux 3.6a）ので、4096 バイトを超える起動のコマンドは一時的なスクリプトを通す。偽の claude が受け取った引数の長さと、`$TMPDIR/claude-deck-launch-*` が残っていないことを見る。
 - `x` のステータス行は 5 秒ほどで消え、幅で切れる。`tmux -L cdverify resize-window -t run -x 60` で狭くして見る。
+
+## 確かめを流し直す
+
+直した後の確かめ直しは、残した台本を `rerun.sh` で流す。ビルドし直し、data を消し、別の tmux サーバーを起こし、台本を順に流して、最後にサーバーを止めるまでを 1 回で済ませる。
+
+```bash
+sh .claude/skills/verify/rerun.sh /tmp/cdv ~/.claude/tmp/claude-deck-flows/01-create.sh ~/.claude/tmp/claude-deck-flows/03-clear.sh
+```
+
+- 既定のソケットは `cdverify-rerun` で、手で確かめるときの `cdverify` と分けてある。そのソケットでサーバーが動いていれば、止めずに断る
+- 毎回、作業フォルダの data、jjrepo、失敗を起こす印（`fdfail` など）、記録、外部セッションの JSONL を消してから setup.sh を流す。`config.toml` も書き直され、`claude` は偽の claude に戻る
+- 台本の書き方
+  - `set -eu` で書き、期待した結果を自分で調べて（`rg -q`、`[ ... ]`）、外れたら 0 以外で終える。終了コードだけで `ok` と `FAIL` を決めるので、画面を保存するだけの台本は壊れていても `ok` になる
+  - `"$DIR/cli.sh"` と `tmux -L "$SOCK"` で書く。`DIR`、`SOCK`、`TMUX` は `rerun.sh` が渡す
+  - セッションを作るところから書く（作る台本を先に並べる）。偽の claude を差し替えるとき（`claude-prompt` など）は、台本の中で `config.toml` を書き換える
+  - TUI を確かめる台本は、自分で `"$DIR/tmux.sh" -L "$SOCK" new-session -d -s run -x 160 -y 40 "$DIR/run.sh; sleep 600"` を打って起動する
+- 台本は、作業フォルダが消えても残るよう `~/.claude/tmp/claude-deck-flows/` に置き、報告に流すコマンドを書く
 
 ## 止める
 
